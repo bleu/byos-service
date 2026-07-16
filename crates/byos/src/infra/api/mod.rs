@@ -3,6 +3,7 @@
 pub mod dto;
 pub mod error;
 pub mod routes;
+pub mod solve;
 
 use {
     crate::domain::proposal::InMemoryProposalStore,
@@ -57,6 +58,7 @@ fn router(state: AppState) -> Router {
             "/proposals/by-solver/{address}",
             get(routes::list_proposals_by_solver),
         )
+        .route("/solve", post(solve::solve))
         .with_state(state)
 }
 
