@@ -98,6 +98,27 @@ pub async fn sign_proposal<S: Signer>(
     signer.sign_hash(&hash).await
 }
 
+sol! {
+    /// EIP-712 type for proposal cancellation. Signed by the sub-solver to
+    /// authorize DELETE /proposals/{id}. API-only type, not on-chain.
+    struct CancelProposal {
+        uint256 proposalId;
+    }
+}
+
+/// Recovers the sub-solver address from a cancellation signature.
+pub fn recover_canceller(
+    signature: &Signature,
+    domain: &Eip712Domain,
+    proposal_id: U256,
+) -> Result<Address, alloy::primitives::SignatureError> {
+    let cancel = CancelProposal {
+        proposalId: proposal_id,
+    };
+    let signing_hash = cancel.eip712_signing_hash(domain);
+    signature.recover_address_from_prehash(&signing_hash)
+}
+
 /// Recovers the sub-solver address that signed a proposal.
 ///
 /// Returns `Err` if the signature is invalid (does not recover to a valid
@@ -204,6 +225,29 @@ mod tests {
             .expect("recovery should succeed");
 
         assert_eq!(recovered, sub_solver, "recovered address must match signer");
+    }
+
+    #[tokio::test]
+    async fn cancel_proposal_sign_and_recover() {
+        let signer = PrivateKeySigner::random();
+        let sub_solver: Address = signer.address();
+
+        let factory = address!("00000000000000000000000000000000DeaDBeef");
+        let domain = byos_domain(1, factory);
+
+        let proposal_id = U256::from(42u64);
+        let cancel = CancelProposal {
+            proposalId: proposal_id,
+        };
+        let hash = cancel.eip712_signing_hash(&domain);
+        let sig = signer
+            .sign_hash(&hash)
+            .await
+            .expect("signing should succeed");
+
+        let recovered =
+            recover_canceller(&sig, &domain, proposal_id).expect("recovery should succeed");
+        assert_eq!(recovered, sub_solver);
     }
 
     #[tokio::test]
