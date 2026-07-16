@@ -2,3 +2,4 @@
 //! orderbook, RPC reserve fetching, CLI, and config.
 
 pub mod byos;
+pub mod orderbook;
