@@ -6,8 +6,7 @@
 //!   started in-process, the reference `subsolver` driven through the full
 //!   proposal → solve → settle → outcome flow, with the harness playing the
 //!   driver's role.
-//! - Tier 2 (`just test-e2e-full`, tests named `full_stack`): a running
-//!   [`cowdao-grants/offline-mode`](https://github.com/cowdao-grants/offline-mode)
+//! - Tier 2 (`just test-e2e-full`, tests named `full_stack`): a running [`cowdao-grants/offline-mode`](https://github.com/cowdao-grants/offline-mode)
 //!   stack with BYOS plugged into the real driver/autopilot as a competing
 //!   solver; isolation via `evm_snapshot`/`evm_revert`.
 //!
