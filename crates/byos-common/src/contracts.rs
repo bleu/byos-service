@@ -162,13 +162,3 @@ sol! {
         function totalSupply() external view returns (uint256);
     }
 }
-
-/// EIP-712 type hash for the `ProposalData` struct, matching the on-chain
-/// `PROPOSAL_TYPEHASH` in the Trampoline contract (contracts ADR-0005).
-///
-/// ```text
-/// keccak256("ProposalData(bytes32 orderUidHash,uint256 sellAmount,uint256 buyAmount,
-///            bytes32 interactionsHash,uint256 validUntil,uint256 nonce)")
-/// ```
-pub const PROPOSAL_TYPEHASH: alloy::primitives::B256 =
-    alloy::primitives::b256!("2045708f2cdb91d16aa77dec29e1d20d5d7bdc6bbbc2a4158457a9d0be739209");
