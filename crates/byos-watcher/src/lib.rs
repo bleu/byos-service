@@ -7,3 +7,5 @@
 //! The **escrow operator** consumes chain watcher output and submits on-chain
 //! transactions to the Escrow contract: Track A debits on revert, Track B
 //! freeze/unfreeze/debit on manual trigger.
+
+pub mod watcher;
