@@ -5,3 +5,4 @@
 //! example for external sub-solver teams.
 
 pub mod domain;
+pub mod infra;

@@ -31,6 +31,26 @@ sol! {
         uint256 value;
         bytes callData;
     }
+
+    /// API-authentication type for `DELETE /proposals/{id}` (ADR-0001).
+    /// Signed in the same domain as proposals but never verified on-chain,
+    /// so this repo owns it.
+    struct CancelProposal {
+        uint256 proposalId;
+    }
+}
+
+/// The digest signed to cancel proposal `proposal_id`.
+pub fn cancellation_digest(proposal_id: u64, domain: &Eip712Domain) -> B256 {
+    CancelProposal { proposalId: U256::from(proposal_id) }.eip712_signing_hash(domain)
+}
+
+/// Signs a `CancelProposal` message for `DELETE /proposals/{id}`.
+pub fn sign_cancellation(proposal_id: u64, domain: &Eip712Domain, signer: &PrivateKeySigner) -> Bytes {
+    let signature = signer
+        .sign_hash_sync(&cancellation_digest(proposal_id, domain))
+        .expect("in-memory ECDSA signing is infallible");
+    signature.as_bytes().into()
 }
 
 /// The EIP-712 domain proposal signatures are verified against: name "BYOS",
