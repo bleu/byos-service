@@ -7,3 +7,4 @@
 //! [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts) interfaces.
 
 pub mod contracts;
+pub mod eip712;
