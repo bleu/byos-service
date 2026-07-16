@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# Every dependency — internal and external — is declared once here; crates pull
+# them in with `{ workspace = true }`. See docs/adr/0004-cargo-workspace-and-tooling.md.
+[workspace.dependencies]
+# Internal crates
+byos = { path = "crates/byos" }
+e2e = { path = "crates/e2e" }
+proposal-dto = { path = "crates/proposal-dto" }
+subsolver = { path = "crates/subsolver" }
+
+# External
+alloy = { version = "1", default-features = false }
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+humantime-serde = "1"
+reqwest = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+toml = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[workspace.lints.clippy]
+cast_possible_wrap = "deny"

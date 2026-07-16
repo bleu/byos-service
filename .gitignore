@@ -1,0 +1,13 @@
+# Build artifacts
+/target/
+
+# Dotenv files
+.env
+.env.*
+
+# Local agent state
+.claude/
+.scratch/
+
+# OS noise
+.DS_Store

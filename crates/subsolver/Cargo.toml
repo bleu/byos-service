@@ -1,0 +1,19 @@
+[package]
+name = "subsolver"
+version = "0.1.0"
+edition = "2024"
+authors = ["bleu <dev@bleu.studio>"]
+license = "LGPL-3.0-or-later"
+description = "Reference sub-solver: example client for the BYOS proposal API, also used in e2e tests"
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "subsolver"
+path = "src/main.rs"
+
+[dependencies]

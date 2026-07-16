@@ -1,0 +1,13 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition = "2024"
+authors = ["bleu <dev@bleu.studio>"]
+license = "LGPL-3.0-or-later"
+description = "End-to-end tests: byos + reference subsolver against a local chain"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
