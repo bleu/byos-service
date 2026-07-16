@@ -1,0 +1,19 @@
+# Reference sub-solver configuration, mainnet flavor. This file is parsed in
+# tests (infra::config) so it cannot drift from the config struct.
+
+chain-id = 1
+
+# TrampolineFactory: the EIP-712 verifyingContract proposals are signed
+# against, and the oracle for this sub-solver's Trampoline address. No
+# canonical deployment yet — replace with the factory address of the BYOS
+# instance you are targeting.
+trampoline-factory = "0x0000000000000000000000000000000000000000"
+
+# Canonical Uniswap V2 mainnet deployment.
+uniswap-router = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+uniswap-factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+pair-init-code-hash = "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"
+
+# Proposal lifetime and polling cadence (defaults shown; both optional).
+proposal-ttl = "60s"
+# poll-interval = "2s"

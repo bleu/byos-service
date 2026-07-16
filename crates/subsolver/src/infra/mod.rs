@@ -3,4 +3,6 @@
 
 pub mod blockchain;
 pub mod byos;
+pub mod cli;
+pub mod config;
 pub mod orderbook;

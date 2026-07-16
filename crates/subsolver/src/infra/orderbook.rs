@@ -8,12 +8,13 @@
 //! sub-solver would be responsible for including in its route (ADR-0001) —
 //! hook decoding is out of scope for this testing tool.
 
-use alloy::primitives::{Address, B256, Bytes, U256};
-use reqwest::Url;
-use serde::Deserialize;
-use serde_with::{DisplayFromStr, serde_as};
-
-use crate::domain::proposal::{Order, OrderKind};
+use {
+    crate::domain::proposal::{Order, OrderKind},
+    alloy::primitives::{Address, B256, Bytes, U256},
+    reqwest::Url,
+    serde::Deserialize,
+    serde_with::{DisplayFromStr, serde_as},
+};
 
 /// Client for one CoW orderbook instance.
 pub struct OrderbookClient {
@@ -59,14 +60,27 @@ enum Kind {
 
 impl OrderbookClient {
     pub fn new(base_url: Url) -> Self {
-        Self { http: reqwest::Client::new(), base_url }
+        Self {
+            http: reqwest::Client::new(),
+            base_url,
+        }
     }
 
     /// Fetches the current auction and returns the orders this sub-solver is
     /// willing to route (see module docs for the eligibility rules).
     pub async fn solvable_orders(&self) -> Result<Vec<Order>, Error> {
-        let url = self.base_url.join("/api/v1/auction").expect("base url joined with a valid path");
-        let auction: Auction = self.http.get(url).send().await?.error_for_status()?.json().await?;
+        let url = self
+            .base_url
+            .join("/api/v1/auction")
+            .expect("base url joined with a valid path");
+        let auction: Auction = self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         Ok(auction
             .orders
             .into_iter()
@@ -88,14 +102,17 @@ impl OrderbookClient {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+    use {
+        super::*,
+        crate::domain::proposal::OrderKind,
+        serde_json::json,
+        wiremock::{
+            Mock,
+            MockServer,
+            ResponseTemplate,
+            matchers::{method, path},
+        },
     };
-
-    use super::*;
-    use crate::domain::proposal::OrderKind;
 
     #[tokio::test]
     async fn solvable_orders_keeps_default_app_data_fill_or_kill_orders_only() {

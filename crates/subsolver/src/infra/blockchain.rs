@@ -56,8 +56,20 @@ impl ChainClient {
     /// The sub-solver's Trampoline instance, as derived by the factory
     /// (`TrampolineFactory.addressOf`). Works whether or not the instance is
     /// deployed yet — the address is a pure CREATE2 derivation.
-    pub async fn trampoline(&self, factory: Address, sub_solver: Address) -> Result<Address, Error> {
-        let returned = self.call(factory, addressOfCall { subSolver: sub_solver }.abi_encode()).await?;
+    pub async fn trampoline(
+        &self,
+        factory: Address,
+        sub_solver: Address,
+    ) -> Result<Address, Error> {
+        let returned = self
+            .call(
+                factory,
+                addressOfCall {
+                    subSolver: sub_solver,
+                }
+                .abi_encode(),
+            )
+            .await?;
         Ok(addressOfCall::abi_decode_returns(&returned)?)
     }
 
@@ -69,25 +81,38 @@ impl ChainClient {
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::{Address, B256, Bytes, U256, address},
-        providers::{Provider, ProviderBuilder},
-        transports::mock::Asserter,
+    use {
+        super::*,
+        alloy::{
+            primitives::{Address, B256, Bytes, U256, address},
+            providers::{Provider, ProviderBuilder},
+            transports::mock::Asserter,
+        },
     };
-
-    use super::*;
 
     const WETH: Address = address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
     const USDC: Address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
     fn chain(asserter: &Asserter) -> ChainClient {
-        ChainClient::new(ProviderBuilder::new().connect_mocked_client(asserter.clone()).erased())
+        ChainClient::new(
+            ProviderBuilder::new()
+                .connect_mocked_client(asserter.clone())
+                .erased(),
+        )
     }
 
     /// ABI-encodes a `getReserves()` return: reserve0, reserve1, timestamp.
     fn reserves_return(reserve0: u64, reserve1: u64) -> Bytes {
-        let words = [U256::from(reserve0), U256::from(reserve1), U256::from(1_750_000_000u64)];
-        words.iter().flat_map(|word| B256::from(*word).0).collect::<Vec<u8>>().into()
+        let words = [
+            U256::from(reserve0),
+            U256::from(reserve1),
+            U256::from(1_750_000_000u64),
+        ];
+        words
+            .iter()
+            .flat_map(|word| B256::from(*word).0)
+            .collect::<Vec<u8>>()
+            .into()
     }
 
     #[tokio::test]
@@ -96,16 +121,20 @@ mod tests {
         // for USDC must see (reserve_sell = reserve1, reserve_buy = reserve0).
         let asserter = Asserter::new();
         asserter.push_success(&reserves_return(5_000_000, 2_000));
-        let (reserve_sell, reserve_buy) =
-            chain(&asserter).reserves(Address::ZERO, WETH, USDC).await.unwrap();
+        let (reserve_sell, reserve_buy) = chain(&asserter)
+            .reserves(Address::ZERO, WETH, USDC)
+            .await
+            .unwrap();
         assert_eq!(reserve_sell, U256::from(2_000));
         assert_eq!(reserve_buy, U256::from(5_000_000));
 
         // The opposite direction flips the orientation.
         let asserter = Asserter::new();
         asserter.push_success(&reserves_return(5_000_000, 2_000));
-        let (reserve_sell, reserve_buy) =
-            chain(&asserter).reserves(Address::ZERO, USDC, WETH).await.unwrap();
+        let (reserve_sell, reserve_buy) = chain(&asserter)
+            .reserves(Address::ZERO, USDC, WETH)
+            .await
+            .unwrap();
         assert_eq!(reserve_sell, U256::from(5_000_000));
         assert_eq!(reserve_buy, U256::from(2_000));
     }
@@ -114,10 +143,15 @@ mod tests {
     async fn trampoline_address_comes_from_the_factory() {
         let trampoline = address!("0x00000000000000000000000000000000f00dbabe");
         let asserter = Asserter::new();
-        asserter.push_success(&Bytes::from(B256::left_padding_from(trampoline.as_slice()).0));
+        asserter.push_success(&Bytes::from(
+            B256::left_padding_from(trampoline.as_slice()).0,
+        ));
 
         let resolved = chain(&asserter)
-            .trampoline(Address::ZERO, address!("0x00000000000000000000000000000000000a11ce"))
+            .trampoline(
+                Address::ZERO,
+                address!("0x00000000000000000000000000000000000a11ce"),
+            )
             .await
             .unwrap();
         assert_eq!(resolved, trampoline);

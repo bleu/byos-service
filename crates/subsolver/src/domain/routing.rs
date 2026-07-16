@@ -37,20 +37,31 @@ pub fn amount_in(amount_out: U256, reserve_in: U256, reserve_out: U256) -> Optio
 }
 
 /// Deterministic CREATE2 address of the Uniswap V2 pair for two tokens.
-pub fn pair_address(factory: Address, init_code_hash: B256, token_a: Address, token_b: Address) -> Address {
-    let (token0, token1) = if token_a < token_b { (token_a, token_b) } else { (token_b, token_a) };
+pub fn pair_address(
+    factory: Address,
+    init_code_hash: B256,
+    token_a: Address,
+    token_b: Address,
+) -> Address {
+    let (token0, token1) = if token_a < token_b {
+        (token_a, token_b)
+    } else {
+        (token_b, token_a)
+    };
     let salt = keccak256([token0.as_slice(), token1.as_slice()].concat());
     factory.create2(salt, init_code_hash)
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{U256, address, b256};
-
-    use super::*;
+    use {
+        super::*,
+        alloy::primitives::{U256, address, b256},
+    };
 
     /// Canonical Uniswap V2 mainnet deployment parameters.
-    const FACTORY: alloy::primitives::Address = address!("0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f");
+    const FACTORY: alloy::primitives::Address =
+        address!("0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f");
     const INIT_CODE_HASH: alloy::primitives::B256 =
         b256!("0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f");
 
@@ -78,15 +89,30 @@ mod tests {
     #[test]
     fn draining_or_exceeding_the_output_reserve_is_unfillable() {
         // Asking for the whole reserve (or more) can never be filled.
-        assert_eq!(amount_in(U256::from(10_000), U256::from(10_000), U256::from(10_000)), None);
-        assert_eq!(amount_in(U256::from(10_001), U256::from(10_000), U256::from(10_000)), None);
+        assert_eq!(
+            amount_in(U256::from(10_000), U256::from(10_000), U256::from(10_000)),
+            None
+        );
+        assert_eq!(
+            amount_in(U256::from(10_001), U256::from(10_000), U256::from(10_000)),
+            None
+        );
     }
 
     #[test]
     fn empty_reserves_are_unfillable() {
-        assert_eq!(amount_out(U256::from(1000), U256::ZERO, U256::from(10_000)), None);
-        assert_eq!(amount_out(U256::from(1000), U256::from(10_000), U256::ZERO), None);
-        assert_eq!(amount_in(U256::from(10), U256::ZERO, U256::from(10_000)), None);
+        assert_eq!(
+            amount_out(U256::from(1000), U256::ZERO, U256::from(10_000)),
+            None
+        );
+        assert_eq!(
+            amount_out(U256::from(1000), U256::from(10_000), U256::ZERO),
+            None
+        );
+        assert_eq!(
+            amount_in(U256::from(10), U256::ZERO, U256::from(10_000)),
+            None
+        );
     }
 
     #[test]

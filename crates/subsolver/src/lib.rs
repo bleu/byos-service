@@ -8,4 +8,4 @@ pub mod domain;
 pub mod infra;
 mod run;
 
-pub use run::{Config, Subsolver};
+pub use run::{Config, Subsolver, start};

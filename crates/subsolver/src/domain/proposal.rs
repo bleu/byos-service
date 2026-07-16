@@ -4,14 +4,15 @@
 //! extra interactions (e.g. routes that revert only at settlement time) —
 //! the sub-solver is fully responsible for its route (ADR-0001).
 
-use alloy::{
-    primitives::{Address, Bytes, U256},
-    signers::local::PrivateKeySigner,
-    sol,
-    sol_types::{Eip712Domain, SolCall},
+use {
+    crate::domain::{routing, signing::UnsignedProposal},
+    alloy::{
+        primitives::{Address, Bytes, U256},
+        signers::local::PrivateKeySigner,
+        sol,
+        sol_types::{Eip712Domain, SolCall},
+    },
 };
-
-use crate::domain::{routing, signing::UnsignedProposal};
 
 sol! {
     function approve(address spender, uint256 amount) returns (bool);
@@ -67,12 +68,14 @@ pub fn build_proposal(
 ) -> Option<proposal_dto::Proposal> {
     let (sell_amount, buy_amount) = match order.kind {
         OrderKind::Sell => {
-            let out = routing::amount_out(order.sell_amount, params.reserve_sell, params.reserve_buy)?;
+            let out =
+                routing::amount_out(order.sell_amount, params.reserve_sell, params.reserve_buy)?;
             (out >= order.buy_amount).then_some(())?;
             (order.sell_amount, out)
         }
         OrderKind::Buy => {
-            let cost = routing::amount_in(order.buy_amount, params.reserve_sell, params.reserve_buy)?;
+            let cost =
+                routing::amount_in(order.buy_amount, params.reserve_sell, params.reserve_buy)?;
             (cost <= order.sell_amount).then_some(())?;
             (cost, order.buy_amount)
         }
@@ -103,7 +106,12 @@ pub fn build_proposal(
         proposal_dto::Interaction {
             target: order.sell_token,
             value: U256::ZERO,
-            call_data: approveCall { spender: params.router, amount: sell_amount }.abi_encode().into(),
+            call_data: approveCall {
+                spender: params.router,
+                amount: sell_amount,
+            }
+            .abi_encode()
+            .into(),
         },
         proposal_dto::Interaction {
             target: params.router,
@@ -136,15 +144,16 @@ pub fn build_proposal(
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::{Address, Bytes, U256, address},
-        signers::local::PrivateKeySigner,
-        sol,
-        sol_types::SolCall,
+    use {
+        super::*,
+        crate::domain::signing::{UnsignedProposal, proposal_domain},
+        alloy::{
+            primitives::{Address, Bytes, U256, address},
+            signers::local::PrivateKeySigner,
+            sol,
+            sol_types::SolCall,
+        },
     };
-
-    use super::*;
-    use crate::domain::signing::{UnsignedProposal, proposal_domain};
 
     sol! {
         function approve(address spender, uint256 amount) returns (bool);
@@ -187,7 +196,8 @@ mod tests {
     #[test]
     fn sell_order_swaps_exact_sell_amount_and_proposes_the_amm_output() {
         let domain = proposal_domain(31337, Address::ZERO);
-        let proposal = build_proposal(&order(OrderKind::Sell), &params(vec![]), &domain, &signer()).unwrap();
+        let proposal =
+            build_proposal(&order(OrderKind::Sell), &params(vec![]), &domain, &signer()).unwrap();
 
         // 1000 in at 10000/10000 reserves yields 906 (see routing tests),
         // which beats the 900 limit.
@@ -206,7 +216,8 @@ mod tests {
         assert_eq!(approve.amount, U256::from(1000));
 
         assert_eq!(proposal.interactions[1].target, ROUTER);
-        let swap = swapExactTokensForTokensCall::abi_decode(&proposal.interactions[1].call_data).unwrap();
+        let swap =
+            swapExactTokensForTokensCall::abi_decode(&proposal.interactions[1].call_data).unwrap();
         assert_eq!(swap.amountIn, U256::from(1000));
         assert_eq!(swap.amountOutMin, U256::from(906));
         assert_eq!(swap.path, vec![SELL_TOKEN, BUY_TOKEN]);
@@ -236,7 +247,8 @@ mod tests {
         assert_eq!(proposal.sell_amount, U256::from(1000));
         assert_eq!(proposal.buy_amount, U256::from(906));
 
-        let swap = swapTokensForExactTokensCall::abi_decode(&proposal.interactions[1].call_data).unwrap();
+        let swap =
+            swapTokensForExactTokensCall::abi_decode(&proposal.interactions[1].call_data).unwrap();
         assert_eq!(swap.amountOut, U256::from(906));
         assert_eq!(swap.amountInMax, U256::from(1000));
     }
@@ -258,8 +270,13 @@ mod tests {
             value: U256::ZERO,
             call_data: Bytes::from(vec![0xde, 0xad]),
         };
-        let proposal =
-            build_proposal(&order(OrderKind::Sell), &params(vec![extra.clone()]), &domain, &signer()).unwrap();
+        let proposal = build_proposal(
+            &order(OrderKind::Sell),
+            &params(vec![extra.clone()]),
+            &domain,
+            &signer(),
+        )
+        .unwrap();
 
         assert_eq!(proposal.interactions.len(), 3);
         assert_eq!(proposal.interactions[2], extra);

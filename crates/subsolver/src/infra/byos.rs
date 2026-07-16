@@ -3,10 +3,11 @@
 //! `{kind, description}` shape so callers can react to the machine-readable
 //! reason.
 
-use alloy::{primitives::Bytes, signers::local::PrivateKeySigner, sol_types::Eip712Domain};
-use reqwest::{StatusCode, Url};
-
-use crate::domain::signing::sign_cancellation;
+use {
+    crate::domain::signing::sign_cancellation,
+    alloy::{primitives::Bytes, signers::local::PrivateKeySigner, sol_types::Eip712Domain},
+    reqwest::{StatusCode, Url},
+};
 
 /// Client for one BYOS instance's public proposal endpoints.
 pub struct ByosClient {
@@ -29,7 +30,10 @@ pub enum Error {
 
 impl ByosClient {
     pub fn new(base_url: Url) -> Self {
-        Self { http: reqwest::Client::new(), base_url }
+        Self {
+            http: reqwest::Client::new(),
+            base_url,
+        }
     }
 
     /// `POST /proposals`: submits a signed proposal, returning the
@@ -64,8 +68,9 @@ impl ByosClient {
         domain: &Eip712Domain,
         signer: &PrivateKeySigner,
     ) -> Result<(), Error> {
-        let cancellation =
-            proposal_dto::Cancellation { signature: sign_cancellation(proposal_id, domain, signer) };
+        let cancellation = proposal_dto::Cancellation {
+            signature: sign_cancellation(proposal_id, domain, signer),
+        };
         let response = self
             .http
             .delete(self.url(&format!("/proposals/{proposal_id}")))
@@ -79,10 +84,14 @@ impl ByosClient {
     }
 
     fn url(&self, path: &str) -> Url {
-        self.base_url.join(path).expect("base url joined with a valid path")
+        self.base_url
+            .join(path)
+            .expect("base url joined with a valid path")
     }
 
-    async fn parse<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T, Error> {
+    async fn parse<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+    ) -> Result<T, Error> {
         if response.status().is_success() {
             return Ok(response.json().await?);
         }
@@ -102,18 +111,21 @@ impl ByosClient {
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::{Address, Bytes, Signature, U256},
-        signers::local::PrivateKeySigner,
+    use {
+        super::*,
+        crate::domain::signing::{cancellation_digest, proposal_domain},
+        alloy::{
+            primitives::{Address, Bytes, Signature, U256},
+            signers::local::PrivateKeySigner,
+        },
+        serde_json::json,
+        wiremock::{
+            Mock,
+            MockServer,
+            ResponseTemplate,
+            matchers::{body_json, method, path},
+        },
     };
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
-    };
-
-    use super::*;
-    use crate::domain::signing::{cancellation_digest, proposal_domain};
 
     fn proposal() -> proposal_dto::Proposal {
         proposal_dto::Proposal {
@@ -200,9 +212,12 @@ mod tests {
         // The DELETE body must carry an EIP-712 CancelProposal signature the
         // server can recover the sub-solver from.
         let request = &server.received_requests().await.unwrap()[0];
-        let cancellation: proposal_dto::Cancellation = serde_json::from_slice(&request.body).unwrap();
+        let cancellation: proposal_dto::Cancellation =
+            serde_json::from_slice(&request.body).unwrap();
         let signature = Signature::from_raw(&cancellation.signature).unwrap();
-        let recovered = signature.recover_address_from_prehash(&cancellation_digest(42, &domain)).unwrap();
+        let recovered = signature
+            .recover_address_from_prehash(&cancellation_digest(42, &domain))
+            .unwrap();
         assert_eq!(recovered, signer.address());
     }
 }

@@ -5,9 +5,11 @@
 //! (ADR-0005). Conventions: camelCase JSON, 256-bit amounts as decimal
 //! strings, addresses and order UIDs as hex strings.
 
-use alloy::primitives::{Address, Bytes, U256};
-use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, serde_as};
+use {
+    alloy::primitives::{Address, Bytes, U256},
+    serde::{Deserialize, Serialize},
+    serde_with::{DisplayFromStr, serde_as},
+};
 
 /// Body of `POST /proposals`: one signed, immutable proposal (ADR-0001).
 #[serde_as]
@@ -113,10 +115,7 @@ pub enum Kind {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::U256;
-    use serde_json::json;
-
-    use super::*;
+    use {super::*, alloy::primitives::U256, serde_json::json};
 
     #[test]
     fn proposal_round_trips_the_adr_0001_wire_shape() {
@@ -160,7 +159,8 @@ mod tests {
 
     #[test]
     fn rejection_kinds_are_pascal_case_and_tolerate_future_kinds() {
-        let wire = json!({ "kind": "UnderCollateralized", "description": "escrow below gas + c_l" });
+        let wire =
+            json!({ "kind": "UnderCollateralized", "description": "escrow below gas + c_l" });
         let error: Error = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(error.kind, Kind::UnderCollateralized);
         assert_eq!(serde_json::to_value(&error).unwrap(), wire);

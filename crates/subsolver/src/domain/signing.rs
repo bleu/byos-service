@@ -42,11 +42,18 @@ sol! {
 
 /// The digest signed to cancel proposal `proposal_id`.
 pub fn cancellation_digest(proposal_id: u64, domain: &Eip712Domain) -> B256 {
-    CancelProposal { proposalId: U256::from(proposal_id) }.eip712_signing_hash(domain)
+    CancelProposal {
+        proposalId: U256::from(proposal_id),
+    }
+    .eip712_signing_hash(domain)
 }
 
 /// Signs a `CancelProposal` message for `DELETE /proposals/{id}`.
-pub fn sign_cancellation(proposal_id: u64, domain: &Eip712Domain, signer: &PrivateKeySigner) -> Bytes {
+pub fn sign_cancellation(
+    proposal_id: u64,
+    domain: &Eip712Domain,
+    signer: &PrivateKeySigner,
+) -> Bytes {
     let signature = signer
         .sign_hash_sync(&cancellation_digest(proposal_id, domain))
         .expect("in-memory ECDSA signing is infallible");
@@ -119,7 +126,8 @@ impl UnsignedProposal<'_> {
         self.proposal_data().eip712_hash_struct()
     }
 
-    /// The digest the sub-solver signs: `toTypedDataHash(domainSeparator, structHash)`.
+    /// The digest the sub-solver signs: `toTypedDataHash(domainSeparator,
+    /// structHash)`.
     pub fn signing_digest(&self, domain: &Eip712Domain) -> B256 {
         self.proposal_data().eip712_signing_hash(domain)
     }
@@ -136,14 +144,15 @@ impl UnsignedProposal<'_> {
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::{Address, Bytes, B256, U256},
-        signers::local::PrivateKeySigner,
+    use {
+        super::*,
+        alloy::{
+            primitives::{Address, B256, Bytes, U256},
+            signers::local::PrivateKeySigner,
+        },
+        serde::Deserialize,
+        serde_with::{DisplayFromStr, serde_as},
     };
-    use serde::Deserialize;
-    use serde_with::{DisplayFromStr, serde_as};
-
-    use super::*;
 
     /// Mirror of the vector file emitted by byos-contracts' `Eip712Vectors`.
     #[derive(Deserialize)]
@@ -212,7 +221,10 @@ mod tests {
                 nonce: vector.nonce,
             };
 
-            assert_eq!(interactions_hash(&vector.interactions), vector.interactions_hash);
+            assert_eq!(
+                interactions_hash(&vector.interactions),
+                vector.interactions_hash
+            );
             assert_eq!(unsigned.struct_hash(), vector.struct_hash);
             assert_eq!(unsigned.signing_digest(&domain), vector.digest);
             assert_eq!(unsigned.sign(&domain, &signer), vector.signature);

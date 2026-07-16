@@ -3,23 +3,23 @@
 //! proposal expires — BYOS drops proposals on expiry and simulation failure
 //! and never patches or retries them for us.
 
-use std::{collections::HashMap, time::Duration};
-
-use alloy::{
-    primitives::{Address, B256, Bytes, U256},
-    providers::DynProvider,
-    signers::local::PrivateKeySigner,
-    sol_types::Eip712Domain,
-};
-use reqwest::Url;
-
-use crate::{
-    domain::{
-        proposal::{Order, RouteParams, build_proposal},
-        routing,
-        signing::proposal_domain,
+use {
+    crate::{
+        domain::{
+            proposal::{Order, RouteParams, build_proposal},
+            routing,
+            signing::proposal_domain,
+        },
+        infra::{blockchain::ChainClient, byos::ByosClient, orderbook::OrderbookClient},
     },
-    infra::{blockchain::ChainClient, byos::ByosClient, orderbook::OrderbookClient},
+    alloy::{
+        primitives::{Address, B256, Bytes, U256},
+        providers::DynProvider,
+        signers::local::PrivateKeySigner,
+        sol_types::Eip712Domain,
+    },
+    reqwest::Url,
+    std::{collections::HashMap, time::Duration},
 };
 
 /// Everything a running sub-solver needs. The e2e crate builds this
@@ -35,7 +35,8 @@ pub struct Config {
     pub uniswap_router: Address,
     pub uniswap_factory: Address,
     pub pair_init_code_hash: B256,
-    /// How long each submitted proposal stays valid (`valid_until = now + ttl`).
+    /// How long each submitted proposal stays valid (`valid_until = now +
+    /// ttl`).
     pub proposal_ttl: Duration,
     /// Delay between polls when running the continuous loop.
     pub poll_interval: Duration,
@@ -72,7 +73,9 @@ impl Subsolver {
     /// this crate never sends transactions.
     pub async fn new(config: Config, provider: DynProvider) -> Result<Self, Error> {
         let chain = ChainClient::new(provider);
-        let trampoline = chain.trampoline(config.trampoline_factory, config.signer.address()).await?;
+        let trampoline = chain
+            .trampoline(config.trampoline_factory, config.signer.address())
+            .await?;
         Ok(Self {
             orderbook: OrderbookClient::new(config.orderbook_url.clone()),
             byos: ByosClient::new(config.byos_url.clone()),
@@ -119,7 +122,10 @@ impl Subsolver {
             order.sell_token,
             order.buy_token,
         );
-        let (reserve_sell, reserve_buy) = self.chain.reserves(pair, order.sell_token, order.buy_token).await?;
+        let (reserve_sell, reserve_buy) = self
+            .chain
+            .reserves(pair, order.sell_token, order.buy_token)
+            .await?;
 
         let valid_until = now + self.config.proposal_ttl.as_secs();
         let params = RouteParams {
@@ -131,7 +137,8 @@ impl Subsolver {
             nonce: U256::from(self.next_nonce),
             extra_interactions: self.config.extra_interactions.clone(),
         };
-        let Some(proposal) = build_proposal(order, &params, &self.domain, &self.config.signer) else {
+        let Some(proposal) = build_proposal(order, &params, &self.domain, &self.config.signer)
+        else {
             return Ok(None);
         };
         self.next_nonce += 1;
@@ -150,23 +157,87 @@ enum ProposeError {
     Byos(#[from] crate::infra::byos::Error),
 }
 
+/// Binary entry point: parse CLI + TOML, build the sub-solver, and poll
+/// until SIGINT. `main.rs` stays thin per ADR-0005.
+pub async fn start(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    use {alloy::providers::Provider, clap::Parser};
+
+    let args = crate::infra::cli::Args::parse_from(args);
+    tracing_subscriber::fmt()
+        .with_env_filter(args.log.clone())
+        .init();
+    tracing::info!(?args, version = env!("CARGO_PKG_VERSION"), "starting");
+
+    let file = crate::infra::config::Config::from_toml(&std::fs::read_to_string(&args.config)?)?;
+    let extra_interactions = if file.append_revert {
+        // An unknown selector on the router: no fallback, so the call — and
+        // with it every settlement carrying this route — reverts.
+        vec![proposal_dto::Interaction {
+            target: file.uniswap_router,
+            value: U256::ZERO,
+            call_data: vec![0xba, 0x5e, 0xba, 0x11].into(),
+        }]
+    } else {
+        vec![]
+    };
+    let config = Config {
+        orderbook_url: args.orderbook_url,
+        byos_url: args.byos_url,
+        signer: args.private_key,
+        chain_id: file.chain_id,
+        trampoline_factory: file.trampoline_factory,
+        uniswap_router: file.uniswap_router,
+        uniswap_factory: file.uniswap_factory,
+        pair_init_code_hash: file.pair_init_code_hash,
+        proposal_ttl: file.proposal_ttl,
+        poll_interval: file.poll_interval,
+        extra_interactions,
+    };
+
+    let provider = alloy::providers::ProviderBuilder::new()
+        .connect_http(args.rpc_url)
+        .erased();
+    let mut subsolver = Subsolver::new(config, provider).await?;
+
+    let mut interval = tokio::time::interval(subsolver.config.poll_interval);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock after the unix epoch")
+                    .as_secs();
+                if let Err(error) = subsolver.poll_once(now).await {
+                    tracing::warn!(%error, "poll failed; retrying next interval");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutting down");
+                return Ok(());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use alloy::{
-        primitives::{Address, B256, Bytes, Signature, U256, address, b256},
-        providers::{Provider, ProviderBuilder},
-        transports::mock::Asserter,
+    use {
+        super::*,
+        crate::domain::signing::{UnsignedProposal, proposal_domain},
+        alloy::{
+            primitives::{Address, B256, Bytes, Signature, U256, address, b256},
+            providers::{Provider, ProviderBuilder},
+            transports::mock::Asserter,
+        },
+        serde_json::json,
+        std::time::Duration,
+        wiremock::{
+            Mock,
+            MockServer,
+            ResponseTemplate,
+            matchers::{method, path},
+        },
     };
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
-
-    use super::*;
-    use crate::domain::signing::{UnsignedProposal, proposal_domain};
 
     const WETH: Address = address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
     const USDC: Address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
@@ -177,12 +248,17 @@ mod tests {
         Config {
             orderbook_url: orderbook.uri().parse().unwrap(),
             byos_url: byos.uri().parse().unwrap(),
-            signer: alloy::signers::local::PrivateKeySigner::from_bytes(&U256::from(0xA11CE).into()).unwrap(),
+            signer: alloy::signers::local::PrivateKeySigner::from_bytes(
+                &U256::from(0xA11CE).into(),
+            )
+            .unwrap(),
             chain_id: 31337,
             trampoline_factory: FACTORY,
             uniswap_router: address!("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"),
             uniswap_factory: address!("0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"),
-            pair_init_code_hash: b256!("0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"),
+            pair_init_code_hash: b256!(
+                "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"
+            ),
             proposal_ttl: Duration::from_secs(60),
             poll_interval: Duration::from_secs(2),
             extra_interactions: vec![],
@@ -190,8 +266,16 @@ mod tests {
     }
 
     fn reserves_return(reserve0: u64, reserve1: u64) -> Bytes {
-        let words = [U256::from(reserve0), U256::from(reserve1), U256::from(1_750_000_000u64)];
-        words.iter().flat_map(|word| B256::from(*word).0).collect::<Vec<u8>>().into()
+        let words = [
+            U256::from(reserve0),
+            U256::from(reserve1),
+            U256::from(1_750_000_000u64),
+        ];
+        words
+            .iter()
+            .flat_map(|word| B256::from(*word).0)
+            .collect::<Vec<u8>>()
+            .into()
     }
 
     async fn mock_auction(orderbook: &MockServer) {
@@ -226,7 +310,9 @@ mod tests {
             .await;
 
         let asserter = Asserter::new();
-        asserter.push_success(&Bytes::from(B256::left_padding_from(TRAMPOLINE.as_slice()).0));
+        asserter.push_success(&Bytes::from(
+            B256::left_padding_from(TRAMPOLINE.as_slice()).0,
+        ));
         // One getReserves per routed poll: the initial submission and the
         // post-expiry resubmission. The held poll in between must not hit RPC.
         asserter.push_success(&reserves_return(5_000_000, 10_000)); // USDC, WETH
@@ -234,7 +320,9 @@ mod tests {
 
         let config = config(&orderbook, &byos);
         let sub_solver_address = config.signer.address();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter).erased();
+        let provider = ProviderBuilder::new()
+            .connect_mocked_client(asserter)
+            .erased();
         let mut subsolver = Subsolver::new(config, provider).await.unwrap();
 
         let t0 = 1_750_000_000u64;
@@ -271,7 +359,9 @@ mod tests {
             nonce: first.nonce,
         };
         let signature = Signature::from_raw(&first.signature).unwrap();
-        let recovered = signature.recover_address_from_prehash(&unsigned.signing_digest(&domain)).unwrap();
+        let recovered = signature
+            .recover_address_from_prehash(&unsigned.signing_digest(&domain))
+            .unwrap();
         assert_eq!(recovered, sub_solver_address);
 
         // The resubmission is a fresh proposal: new lifetime, new nonce.
@@ -295,12 +385,18 @@ mod tests {
             .await;
 
         let asserter = Asserter::new();
-        asserter.push_success(&Bytes::from(B256::left_padding_from(TRAMPOLINE.as_slice()).0));
+        asserter.push_success(&Bytes::from(
+            B256::left_padding_from(TRAMPOLINE.as_slice()).0,
+        ));
         asserter.push_success(&reserves_return(5_000_000, 10_000));
         asserter.push_success(&reserves_return(5_000_000, 10_000));
 
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter).erased();
-        let mut subsolver = Subsolver::new(config(&orderbook, &byos), provider).await.unwrap();
+        let provider = ProviderBuilder::new()
+            .connect_mocked_client(asserter)
+            .erased();
+        let mut subsolver = Subsolver::new(config(&orderbook, &byos), provider)
+            .await
+            .unwrap();
 
         // A rejected proposal is not recorded as live: the next poll tries
         // again (sub-solvers naturally resubmit, ADR-0001).
