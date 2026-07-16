@@ -17,14 +17,23 @@ name = "subsolver"
 path = "src/main.rs"
 
 [dependencies]
-alloy = { workspace = true, features = ["std", "serde", "sol-types", "signer-local"] }
+alloy = { workspace = true, features = [
+  "std",
+  "serde",
+  "sol-types",
+  "signer-local",
+  "providers",
+  "rpc-types",
+  "reqwest",
+] }
 proposal-dto = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true }
 serde_with = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true }
 wiremock = { workspace = true }
