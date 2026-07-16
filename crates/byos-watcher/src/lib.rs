@@ -8,4 +8,5 @@
 //! transactions to the Escrow contract: Track A debits on revert, Track B
 //! freeze/unfreeze/debit on manual trigger.
 
+pub mod escrow;
 pub mod watcher;
