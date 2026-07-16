@@ -3,5 +3,5 @@
 //! it to the BYOS proposal API in a continuous polling loop. Doubles as the
 //! integration-test counterpart in the `e2e` crate and as the documented
 //! example for external sub-solver teams.
-//!
-//! Not implemented yet — this crate is a skeleton.
+
+pub mod domain;

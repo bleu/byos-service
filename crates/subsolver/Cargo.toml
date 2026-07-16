@@ -17,3 +17,11 @@ name = "subsolver"
 path = "src/main.rs"
 
 [dependencies]
+alloy = { workspace = true, features = ["std", "serde", "sol-types", "signer-local"] }
+proposal-dto = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_with = { workspace = true }
