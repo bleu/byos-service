@@ -11,3 +11,11 @@ publish = false
 workspace = true
 
 [dependencies]
+alloy.workspace = true
+byos.workspace = true
+byos-common.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+subsolver.workspace = true
+tokio.workspace = true
+tracing.workspace = true
