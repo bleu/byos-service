@@ -10,3 +10,9 @@ description = "Wire types for the BYOS proposal API, shared by server (byos) and
 workspace = true
 
 [dependencies]
+alloy = { workspace = true, features = ["std", "serde"] }
+serde = { workspace = true }
+serde_with = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
