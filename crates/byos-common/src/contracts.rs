@@ -26,8 +26,13 @@ sol! {
         bytes callData;
     }
 
-    /// Signed proposal fields (ADR-0005), minus `interactionsHash` which is
-    /// recomputed on-chain from the interactions actually being executed.
+    /// Fields passed to `ITrampoline::execute()` on-chain.
+    ///
+    /// **This is NOT the EIP-712 signing struct.** The on-chain signed struct is
+    /// [`ProposalData`] (6 fields, including `interactionsHash`). The derived
+    /// `SolStruct` typehash for this 5-field struct does not match
+    /// `PROPOSAL_TYPEHASH` — do not use `Proposal::eip712_hash_struct()` for
+    /// signing. Use `ProposalData` instead.
     struct Proposal {
         bytes32 orderUidHash;
         uint256 sellAmount;
@@ -130,6 +135,22 @@ sol! {
         function approve(address spender, uint256 amount) external returns (bool);
         function allowance(address owner, address spender) external view returns (uint256);
         function totalSupply() external view returns (uint256);
+    }
+}
+
+sol! {
+    /// EIP-712 signed proposal struct matching the on-chain `PROPOSAL_TYPEHASH`.
+    ///
+    /// Includes `interactionsHash` (recomputed on-chain from the interactions
+    /// actually being executed). Use `ProposalData::eip712_hash_struct()` for
+    /// signing — its derived typehash matches [`PROPOSAL_TYPEHASH`].
+    struct ProposalData {
+        bytes32 orderUidHash;
+        uint256 sellAmount;
+        uint256 buyAmount;
+        bytes32 interactionsHash;
+        uint256 validUntil;
+        uint256 nonce;
     }
 }
 
