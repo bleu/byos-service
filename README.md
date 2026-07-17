@@ -30,11 +30,12 @@ CoW protocol background (solver auctions, slashing policy, CIPs) is captured in 
 
 ## Development
 
-Prerequisites: stable Rust (via [rustup](https://rustup.rs); `rust-toolchain.toml` pins the channel), a nightly toolchain for rustfmt, [`just`](https://github.com/casey/just), and [`cargo-nextest`](https://nexte.st). E2e tests additionally need [Foundry](https://getfoundry.sh)'s anvil.
+Prerequisites: stable Rust (via [rustup](https://rustup.rs); `rust-toolchain.toml` pins the channel), a nightly toolchain for rustfmt, [`just`](https://github.com/casey/just), and [`cargo-nextest`](https://nexte.st). E2e tests additionally need [Foundry](https://getfoundry.sh)'s anvil. Running the service (and the DB-backed tests) needs Postgres — `docker compose up -d postgres` provides one.
 
 ```sh
 just build          # cargo build --workspace
 just test-unit      # cargo nextest run
+just test-db        # audit-trail tests against the compose Postgres
 just test-e2e       # e2e tier 1: in-process against plain anvil
 just test-e2e-full  # e2e tier 2: against a running offline-mode stack
 just clippy         # -D warnings, all features and targets

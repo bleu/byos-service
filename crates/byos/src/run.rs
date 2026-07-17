@@ -5,7 +5,10 @@
 use {
     crate::{
         domain::proposal::InMemoryProposalStore,
-        infra::api::{self, AppState},
+        infra::{
+            api::{self, AppState},
+            audit,
+        },
     },
     anyhow::Context,
     clap::Parser,
@@ -37,12 +40,17 @@ pub(crate) struct Args {
     /// TrampolineFactory contract address (EIP-712 `verifyingContract`).
     #[arg(long, env)]
     trampoline_factory: alloy::primitives::Address,
+
+    /// Postgres URL for the audit trail (ADR-0001 write-behind). Required:
+    /// the service refuses to boot without its evidence store.
+    #[arg(long, env)]
+    database_url: String,
 }
 
 /// Entry point for the binary — parses args from the process environment.
 pub async fn start(args: impl IntoIterator<Item = String>) {
     let args = Args::parse_from(args);
-    if let Err(e) = run_with(args, None).await {
+    if let Err(e) = run_with(args, None, None).await {
         eprintln!("fatal: {e:#}");
         std::process::exit(1);
     }
@@ -54,35 +62,65 @@ pub async fn run(
     bind_tx: oneshot::Sender<SocketAddr>,
 ) -> anyhow::Result<()> {
     let args = Args::parse_from(args);
-    run_with(args, Some(bind_tx)).await
+    run_with(args, Some(bind_tx), None).await
 }
 
-async fn run_with(args: Args, bind_tx: Option<oneshot::Sender<SocketAddr>>) -> anyhow::Result<()> {
+/// Like [`run`], but also stoppable via `shutdown_rx` — tests use this to
+/// exercise graceful shutdown (audit drain) without process signals.
+pub async fn run_until(
+    args: impl IntoIterator<Item = String>,
+    bind_tx: oneshot::Sender<SocketAddr>,
+    shutdown_rx: oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
+    let args = Args::parse_from(args);
+    run_with(args, Some(bind_tx), Some(shutdown_rx)).await
+}
+
+async fn run_with(
+    args: Args,
+    bind_tx: Option<oneshot::Sender<SocketAddr>>,
+    shutdown_rx: Option<oneshot::Receiver<()>>,
+) -> anyhow::Result<()> {
     init_tracing(&args.log, args.json_logs);
 
     tracing::info!(?args, "starting byos");
 
+    // Fail-fast: no audit database, no service (ADR-0001 — the audit trail
+    // is required by the slashing policy, so "up but not auditing" must be
+    // an impossible state).
+    let pool = audit::connect_and_migrate(&args.database_url).await?;
+    let last_id = audit::max_proposal_id(&pool).await?;
+
     let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
-    let store = InMemoryProposalStore::new();
+    let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
+    let writer = audit::spawn(pool, audit_rx);
+    let store = InMemoryProposalStore::new(audit_tx);
+    store.seed_next_id(last_id);
     let state = AppState::new(store, domain);
 
-    api::serve(args.public_addr, state, bind_tx)
+    api::serve(args.public_addr, state, bind_tx, shutdown_rx)
         .await
-        .context("public API server exited with error")
+        .context("public API server exited with error")?;
+
+    // The server dropped its state (and with it the audit sender) on the way
+    // out; awaiting the writer flushes everything still queued.
+    writer.await.context("audit writer task panicked")
 }
 
+// try_init: a second in-process instance (tests restart the service) must
+// not panic on the already-set global subscriber.
 fn init_tracing(filter: &str, json: bool) {
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
 
     if json {
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt::layer().json())
-            .init();
+            .try_init();
     } else {
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt::layer())
-            .init();
+            .try_init();
     }
 }

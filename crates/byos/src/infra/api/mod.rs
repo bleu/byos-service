@@ -60,11 +60,13 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Bind, serve, and wait for graceful shutdown.
+/// Bind, serve, and wait for graceful shutdown (ctrl-c, or `shutdown_rx` so
+/// tests can stop an in-process instance).
 pub async fn serve(
     addr: SocketAddr,
     state: AppState,
     bind_tx: Option<oneshot::Sender<SocketAddr>>,
+    shutdown_rx: Option<oneshot::Receiver<()>>,
 ) -> anyhow::Result<()> {
     let app = router(state);
 
@@ -78,15 +80,25 @@ pub async fn serve(
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_rx: Option<oneshot::Receiver<()>>) {
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
-    ctrl_c.await.ok();
+    match shutdown_rx {
+        Some(rx) => {
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = rx => {}
+            }
+        }
+        None => {
+            ctrl_c.await.ok();
+        }
+    }
     tracing::info!("shutdown signal received");
 }

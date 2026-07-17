@@ -14,6 +14,11 @@ clippy:
 test-unit:
     cargo nextest run --no-tests=pass
 
+# DB-backed service-level tests (audit trail). Needs the compose Postgres:
+# `docker compose up -d postgres`.
+test-db:
+    cargo nextest run -p byos --run-ignored ignored-only -E 'test(audit_db)'
+
 # E2e tier 1: byos + reference subsolver in-process against plain anvil
 # (preloaded state file). Ignored by default; single-threaded (shared chain state).
 test-e2e:

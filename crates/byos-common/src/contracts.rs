@@ -20,6 +20,7 @@ sol! {
 sol! {
     /// Shared interaction struct mirroring `GPv2Interaction.Data`, used by both
     /// the Trampoline and settlement interfaces.
+    #[derive(Debug)]
     struct Interaction {
         address target;
         uint256 value;
