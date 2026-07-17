@@ -1,10 +1,10 @@
 [package]
-name = "subsolver"
+name = "byos-watcher"
 version = "0.1.0"
 edition = "2024"
 authors = ["bleu <dev@bleu.studio>"]
 license = "LGPL-3.0-or-later"
-description = "Reference sub-solver: example client for the BYOS proposal API, also used in e2e tests"
+description = "Chain watcher and escrow operator for the BYOS service"
 
 [lints]
 workspace = true
@@ -12,16 +12,9 @@ workspace = true
 [lib]
 doctest = false
 
-[[bin]]
-name = "subsolver"
-path = "src/main.rs"
-
 [dependencies]
 alloy.workspace = true
 byos-common.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

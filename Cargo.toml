@@ -7,12 +7,31 @@ members = ["crates/*"]
 [workspace.dependencies]
 # Internal crates
 byos = { path = "crates/byos" }
+byos-common = { path = "crates/byos-common" }
+byos-watcher = { path = "crates/byos-watcher" }
 e2e = { path = "crates/e2e" }
-proposal-dto = { path = "crates/proposal-dto" }
 subsolver = { path = "crates/subsolver" }
 
+# cowprotocol/services — pinned to the driver API revision we target (ADR-0009)
+solvers-dto = { git = "https://github.com/cowprotocol/services", rev = "3480ee76" }
+
+# CoW Protocol SDK — GPv2Settlement, ERC20, domain types (replaces hand-written ABIs)
+cowprotocol-primitives = "0.1.1-alpha.1"
+
 # External
-alloy = { version = "1", default-features = false }
+alloy = { version = "1", default-features = false, features = [
+    "sol-types",
+    "signers",
+    "signer-local",
+    "providers",
+    "provider-http",
+    "network",
+    "contract",
+    "rpc-types",
+    "consensus",
+    "eips",
+    "serde",
+] }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
@@ -20,7 +39,8 @@ humantime-serde = "1"
 reqwest = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_with = "3"
+serde_with = "~3.8"
+strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 toml = "0.8"
