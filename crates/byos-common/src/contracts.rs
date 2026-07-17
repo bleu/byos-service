@@ -1,25 +1,25 @@
 //! Contract ABIs sourced from
 //! [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts) interfaces.
 //!
-//! These `sol!` definitions generate Rust types matching the on-chain ABI,
-//! used for calldata encoding, event parsing, and EIP-712 struct hashing.
+//! Standard CoW Protocol types (`GPv2Settlement`, `ERC20`, `GPv2TradeData`,
+//! `GPv2InteractionData`) are re-exported from
+//! [`cowprotocol-primitives`](https://crates.io/crates/cowprotocol-primitives).
+//! Bespoke BYOS types (Trampoline, Escrow, Proposal) remain hand-written here.
 
 use alloy::sol;
 
-sol! {
-    /// Minimal ERC-20 interface for token transfers during settlement encoding.
-    #[sol(rpc)]
-    interface IERC20 {
-        function transfer(address to, uint256 amount) external returns (bool);
-        function transferFrom(address from, address to, uint256 amount) external returns (bool);
-        function balanceOf(address account) external view returns (uint256);
-        function approve(address spender, uint256 amount) external returns (bool);
-    }
-}
+// Re-export standard CoW Protocol contract bindings so consumers don't need
+// a direct `cowprotocol-primitives` dependency.
+pub use cowprotocol_primitives::contracts::{
+    ERC20, GPv2InteractionData, GPv2Settlement, GPv2TradeData,
+};
 
 sol! {
-    /// Shared interaction struct mirroring `GPv2Interaction.Data`, used by both
-    /// the Trampoline and settlement interfaces.
+    /// Interaction struct mirroring `GPv2Interaction.Data`.
+    ///
+    /// Kept locally because `ITrampoline::execute` references it by name in
+    /// the same `sol!` block. ABI-identical to
+    /// [`GPv2InteractionData`](cowprotocol_primitives::contracts::GPv2InteractionData).
     struct Interaction {
         address target;
         uint256 value;
@@ -68,36 +68,6 @@ sol! {
         function ensureDeployed(address _subSolver) external returns (address _instance);
         function domainSeparator() external view returns (bytes32 _domainSeparator);
         function addressOf(address _subSolver) external view returns (address _trampoline);
-    }
-
-    /// Mirrors GPv2Trade.Data — the trade struct passed to `settle()`.
-    struct GPv2TradeData {
-        uint256 sellTokenIndex;
-        uint256 buyTokenIndex;
-        address receiver;
-        uint256 sellAmount;
-        uint256 buyAmount;
-        uint32 validTo;
-        bytes32 appData;
-        uint256 feeAmount;
-        uint256 flags;
-        uint256 executedAmount;
-        bytes signature;
-    }
-
-    /// Minimal interface of the CoW Protocol settlement contract.
-    #[sol(rpc)]
-    interface IGPv2Settlement {
-        function settle(
-            address[] calldata _tokens,
-            uint256[] calldata _clearingPrices,
-            GPv2TradeData[] calldata _trades,
-            Interaction[][3] calldata _interactions
-        ) external;
-
-        function domainSeparator() external view returns (bytes32 _domainSeparator);
-        function vaultRelayer() external view returns (address _vaultRelayer);
-        function authenticator() external view returns (address _authenticator);
     }
 }
 
