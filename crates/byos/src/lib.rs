@@ -9,5 +9,7 @@
 pub mod domain;
 pub mod infra;
 mod run;
+#[cfg(test)]
+mod tests;
 
 pub use run::{run, start};

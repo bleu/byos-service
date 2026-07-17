@@ -106,6 +106,22 @@ sol! {
     }
 }
 
+/// Signs a proposal cancellation on behalf of a sub-solver. Returns the raw
+/// signature bytes.
+///
+/// Used by the reference sub-solver and tests.
+pub async fn sign_cancellation<S: Signer>(
+    signer: &S,
+    domain: &Eip712Domain,
+    proposal_id: U256,
+) -> alloy::signers::Result<Signature> {
+    let cancel = CancelProposal {
+        proposalId: proposal_id,
+    };
+    let hash = cancel.eip712_signing_hash(domain);
+    signer.sign_hash(&hash).await
+}
+
 /// Recovers the sub-solver address from a cancellation signature.
 pub fn recover_canceller(
     signature: &Signature,
@@ -236,12 +252,7 @@ mod tests {
         let domain = byos_domain(1, factory);
 
         let proposal_id = U256::from(42u64);
-        let cancel = CancelProposal {
-            proposalId: proposal_id,
-        };
-        let hash = cancel.eip712_signing_hash(&domain);
-        let sig = signer
-            .sign_hash(&hash)
+        let sig = sign_cancellation(&signer, &domain, proposal_id)
             .await
             .expect("signing should succeed");
 
