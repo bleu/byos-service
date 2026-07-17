@@ -1167,6 +1167,7 @@ name = "byos-common"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "cowprotocol-primitives",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1390,6 +1391,20 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "cowprotocol-primitives"
+version = "0.1.1-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c31791fbae6d469b5e8911714bf921a05bbe71f32a3ea4890ffc8e4e4674da8"
+dependencies = [
+ "alloy-chains",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "serde",
+ "thiserror 2.0.18",
+ "url",
+]
 
 [[package]]
 name = "cpufeatures"
