@@ -27,7 +27,6 @@ use {
 pub fn encode_trampoline_interactions(
     trampoline: Address,
     sell_token: Address,
-    sell_amount: U256,
     proposal: &Proposal,
     interactions: &[Interaction],
     buy_token: Address,
@@ -36,7 +35,7 @@ pub fn encode_trampoline_interactions(
     // 1. ERC20 transfer: settlement → Trampoline
     let transfer_calldata = ERC20::transferCall {
         to: trampoline,
-        amount: sell_amount,
+        amount: proposal.sellAmount,
     }
     .abi_encode();
 
@@ -100,7 +99,6 @@ mod tests {
         let [transfer, _execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &interactions,
             address!("0000000000000000000000000000000000009abc"),
@@ -127,7 +125,6 @@ mod tests {
         let [_transfer, execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &interactions,
             buy_token,
@@ -158,7 +155,6 @@ mod tests {
         let [_transfer, execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &interactions,
             buy_token,
@@ -176,6 +172,8 @@ mod tests {
         assert_eq!(decoded._proposal.nonce, proposal.nonce);
         assert_eq!(decoded._interactions.len(), interactions.len());
         assert_eq!(decoded._interactions[0].target, interactions[0].target);
+        assert_eq!(decoded._interactions[0].value, interactions[0].value);
+        assert_eq!(decoded._interactions[0].callData, interactions[0].callData);
         assert_eq!(decoded._buyToken, buy_token);
         assert_eq!(decoded._signature, signature);
     }
@@ -191,7 +189,6 @@ mod tests {
         let [_transfer, execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &[],
             buy_token,
