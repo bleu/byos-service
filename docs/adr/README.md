@@ -17,9 +17,10 @@ This repo owns the service-scoped ADRs for BYOS. ADRs 0001–0003 were designed 
 | [0007](0007-error-handling.md) | Error handling (from cowprotocol/services) | accepted |
 | [0008](0008-observability.md) | Observability (from cowprotocol/services) | accepted |
 | [0009](0009-testing-strategy.md) | Testing strategy (from cowprotocol/services) | accepted |
+| [0010](0010-settlement-outcome-source.md) | Settlement outcome source & Track A trigger | **proposed** |
 
 ## Known open questions
 
-- **ADR-0002 is still proposed.** Its open questions (cross-sub-solver batching, thin vs fat Trampoline, ingestion-time profitability gate, driver callbacks for outcome observation) are the first things to settle in M2, several pending CoW core team input.
+- **ADR-0002 is still proposed.** Its open questions (cross-sub-solver batching, thin vs fat Trampoline, ingestion-time profitability gate) are the first things to settle in M2, several pending CoW core team input. The "driver callbacks for outcome observation" question is resolved by [ADR-0010](0010-settlement-outcome-source.md).
 - **Anvil-state regeneration procedure** — the e2e chain fixture bakes the BYOS contracts into offline-mode's `anvil-state.json` ([ADR-0009](0009-testing-strategy.md)); the exact regeneration workflow (and whether the deploy hook lands upstream in offline-mode) is settled when the e2e crate gains its first test.
 - **Reference-price source for scoring** — [ADR-0002](0002-solver-engine.md) assumes cached native-token reference prices for surplus/fee conversion; where they come from (auction payload, external feed) is unspecified.
