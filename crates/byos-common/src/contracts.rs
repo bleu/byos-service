@@ -163,3 +163,21 @@ sol! {
 /// ```
 pub const PROPOSAL_TYPEHASH: alloy::primitives::B256 =
     alloy::primitives::b256!("2045708f2cdb91d16aa77dec29e1d20d5d7bdc6bbbc2a4158457a9d0be739209");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::keccak256;
+
+    #[test]
+    fn proposal_typehash_matches_type_string() {
+        let computed = keccak256(
+            "ProposalData(bytes32 orderUidHash,uint256 sellAmount,uint256 buyAmount,\
+             bytes32 interactionsHash,uint256 validUntil,uint256 nonce)",
+        );
+        assert_eq!(
+            computed, PROPOSAL_TYPEHASH,
+            "PROPOSAL_TYPEHASH does not match keccak256 of the EIP-712 type string"
+        );
+    }
+}
