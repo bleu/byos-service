@@ -3,6 +3,8 @@
 Status: accepted
 
 > Ported from [`bleu/cow-byos-architecture` ADR-0004](https://github.com/bleu/cow-byos-architecture/blob/main/docs/adr/0004-proposal-api.md), where it was accepted during the grant proposal. The original ADR also settled the contract-side halves of this decision — the signature-gated `execute`, the EIP-712 `ProposalData` schema, and the factory-anchored domain. Those are owned and documented by [`bleu/byos-contracts` ADR-0005](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0005-trampoline-execution-authority.md) and are only referenced here, not restated. This ADR keeps the service-owned decisions: the HTTP API surface, validation pipeline, rate limiting, process topology, and persistence.
+>
+> Revised 2026-07 during the COW-1159 review (COW-1173): ingestion validation switched from synchronous to asynchronous. The request path now does signature checking only; escrow and simulation run in a background validator. The original synchronous design is preserved under Alternatives.
 
 ## Context
 
@@ -56,22 +58,33 @@ Same domain as proposals. `CancelProposal` is purely an API-authentication type 
 
 Per-proposal metadata: `id`, `solver`, `validUntil`, `status`. **No amounts, no interaction data.** Amounts would reveal pricing strategy; interactions would reveal routing — both are competitively sensitive. Solver addresses are already recoverable from on-chain settlement calldata (Trampoline CREATE2 address maps to sub-solver), so pre-settlement address visibility is an accepted trade-off.
 
-### Proposal lifecycle: permanent drop on simulation failure
+The public per-order view lists `Active` proposals only — a `Submitted` proposal has not passed gatekeeping, and showing it would leak submission attempts BYOS has not vouched for. The owner's own management view (`GET /proposals/by-solver/{address}`) includes `Submitted` alongside `Active`, so a sub-solver can see pending work.
 
-Five lifecycle events terminate a proposal:
-1. **`valid_until` expires** — BYOS drops it.
-2. **Settled** — order filled, proposal consumed.
-3. **Order canceled/filled by another solver** — order UID no longer valid.
-4. **Simulation failure** — proposal reverts against current block → permanently dropped. No suspension/retry. Sub-solver resubmits if conditions change.
-5. **Explicit cancellation** — signed `DELETE`.
+### Proposal lifecycle: explicit state machine, permanent drop on failure
 
-Permanent drop on simulation failure keeps the store simple (proposals are either active or gone), reduces simulation load (no re-checking failed proposals), and ensures fresh gatekeeping on resubmission. Sub-solvers run continuous polling loops and naturally resubmit.
+A proposal enters as `Submitted` (signature verified, awaiting validation) and moves through enforced transitions — every status write is a compare-and-swap against the expected current state, so concurrent events (a cancellation racing the validator) cannot resurrect or overwrite each other; the stale write is dropped:
+
+- `Submitted → Active` — background validation passed.
+- `Submitted → Rejected` — failed a gatekeeping rule (e.g. insufficient escrow). Carries a machine-readable `rejectionReason` (PascalCase enum per [ADR-0007](0007-error-handling.md)), exposed on `GET /proposal/{id}`.
+- `Submitted | Active → SimFailed` — simulation reverted.
+- `Submitted | Active → Expired` — `valid_until` passed.
+- `Submitted | Active → Cancelled` — signed `DELETE`. Only live proposals can be cancelled; a `DELETE` against a terminal state is a `409`.
+- `Active → Settled` — order filled by this proposal.
+- `Rejected`, `SimFailed`, `Expired`, `Cancelled`, `Settled` are terminal.
+
+`Rejected` and `SimFailed` are deliberately distinct verdicts: `Rejected` means "you are not eligible" (fix: deposit escrow), `SimFailed` means "your route does not work against current chain state" (fix: rebuild the route). Both are permanent — no suspension/retry. Permanent drop keeps the store simple, reduces simulation load (no re-checking failed proposals), and ensures fresh gatekeeping on resubmission; sub-solvers run continuous polling loops and naturally resubmit.
+
+Order-death signals (order filled by another solver, or cancelled in the orderbook) come from the driver, not from a chain watcher ([ADR-0010](0010-settlement-outcome-source.md)) and not from the simulation (its `settle()` uses empty trades, so GPv2 fill-tracking is never exercised): the auction contents on `/solve` say which orders are still live (a heuristic — absence from one auction is not proof of death), and the driver's settlement outcome is authoritative for our own fills. Wiring these signals into the validator loop is follow-up work.
 
 Proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signature form one signed unit, so there is no update operation on an existing proposal. Replacement is a new `POST` (optionally preceded by a `DELETE` of the old one) — which is why the API has no `PUT`.
 
-### Ingestion validation: synchronous, with verdict
+### Ingestion validation: async, signature-only request path
 
-`POST /proposals` runs the full validation pipeline inline and answers with the verdict: the proposal `id` on acceptance, a 4xx with a machine-readable reason on rejection. Sub-solvers need immediate feedback to iterate; silent drops or deferred verdicts make integration painful. The only heavy step is a single simulation `eth_call` (tens of milliseconds), and rate limiting bounds the aggregate load.
+`POST /proposals` does exactly two things inline: parse the request and recover the signer (`ecrecover`). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature failures still reject synchronously with a 4xx.
+
+All on-chain work — the escrow balance check and the simulation `eth_call` — runs in a background validator loop, off the request path. Each tick (configurable interval, default 12s, one mainnet block; block-driven ticking is a decision for the simulation work, COW-1162) sweeps expired proposals, then judges every `Submitted` proposal and flips it to `Active`, `Rejected`, or `SimFailed`. Sub-solvers poll `GET /proposal/{id}` for the verdict; a rejection carries its typed reason.
+
+The request API stays clean and light — no RPC call and no simulation ever blocks an HTTP response. The cost is verdict latency: feedback arrives within one tick interval rather than in the response body. That was the original reason for rejecting async ingestion, and it is acceptable because sub-solvers already run continuous polling loops — a one-interval delay costs them nothing they were not already paying — and because the validator and the re-simulation loop ([ADR-0002](0002-solver-engine.md)) become one code path instead of an inline pipeline plus a separate loop.
 
 ### Rate limiting: two-layer, escrow-tiered
 
@@ -80,12 +93,17 @@ Proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signatu
 
 The two layers are independent: the IP filter sheds floods before any cryptography; the signer limit caps each identity after recovery. Both numbers are placeholders — this ADR commits to the two-layer structure, and the actual limits are operational tuning parameters set at deployment.
 
-Escrow balance is cached with a short TTL (~1 block period) for rate-limiting. The per-request check is an in-memory read against that cache — no RPC on the request path; refreshing costs one call per known sub-solver per block. The authoritative escrow check that gates actual settlement happens at `/solve` selection ([ADR-0002](0002-solver-engine.md)). The reject-early pipeline:
+Escrow balance is cached with a short TTL (~1 block period) for rate-limiting. The per-request check is an in-memory read against that cache — no RPC on the request path; refreshing costs one call per known sub-solver per block. The authoritative escrow check that gates actual settlement happens at `/solve` selection ([ADR-0002](0002-solver-engine.md)). The reject-early pipeline, split across the sync/async boundary — everything on the request path is memory-only; the async-ingestion rule bans RPC and simulation from the sync side, not cheap in-memory checks:
+
+Synchronous (request path):
 1. IP filter (shed floods)
 2. Parse + `ecrecover` (identify signer)
 3. Signer rate limit check (shed per-identity spam)
-4. Cached escrow balance check (shed ineligible signers)
-5. Gatekeeping + simulation (expensive, only for eligible proposals)
+4. Cached escrow balance tier check (shed ineligible signers, in-memory read)
+
+Background validator:
+5. Authoritative escrow balance check (RPC)
+6. Gatekeeping + simulation `eth_call` (expensive, only for eligible proposals)
 
 ### API topology: two listeners, one process
 
@@ -110,13 +128,16 @@ Contract-side alternatives (BYOS-unilateral execution, amounts-only signing with
 - **GET returns amounts (Level 2 with pricing).** Rejected — amounts reveal pricing strategy, the most competitively sensitive data.
 - **Temporary suspension on simulation failure (retry loop).** Keeps failed proposals and re-simulates periodically. Rejected — adds complexity, wastes simulation cycles, and sub-solvers naturally resubmit via their polling loops.
 - **Escrow slash on simulation failure.** Debit sub-solvers whose proposals fail simulation, both as a spam deterrent and as a buffer for penalties BYOS cannot pass through. Rejected — simulation failures are usually environmental (pool state moved, order filled elsewhere), not misbehavior, so slashing them would punish honest participants and deter permissionless participation. Debits are reserved for provable faults ([ADR-0003](0003-slash-attribution-flow.md)); unattributable penalty shortfalls are absorbed by BYOS by design, and spam is handled by rate limiting.
-- **Async ingestion (202 + status polling).** Accept immediately with status `pending`, validate in the continuous-simulation loop ([ADR-0002](0002-solver-engine.md)), flip status to `active`/`rejected`. Rejected for v1 — the loop's 3–5 block interval delays feedback by up to a minute and forces sub-solvers to poll just to learn a rejection reason. Kept as the scaling fallback if synchronous simulation latency ever becomes a bottleneck.
+- **Synchronous ingestion (inline pipeline, verdict in the response).** The original v1 choice: run escrow check + simulation inline and answer `POST` with the final verdict — immediate feedback, no polling for rejection reasons, the only heavy step being a single simulation `eth_call` (tens of milliseconds). Reversed during the COW-1159 review: it puts RPC calls and simulation on the public request path, ties request latency and error behavior to RPC health, and forces the inline pipeline and the re-simulation loop to exist as two code paths doing the same judgment. The feedback-latency objection that originally killed async is softened by sub-solvers' existing polling loops and a tick interval targeting one block, not 3–5.
+- **Eager per-submission validation task (async, but validate immediately).** Keep the request path signature-only, but fire a background task per submission instead of waiting for the next loop tick — near-immediate verdicts. Rejected — two validation entry points to keep consistent for a latency win the polling loop doesn't need; the loop interval already bounds verdict delay to ~one block.
 - **Single listener for both public API and /solve.** Simpler, but public traffic can starve the latency-critical `/solve` endpoint. Rejected — `/solve` latency is a hard SLA.
 - **Pure in-memory (no persistence).** Simplest, but loses dispute evidence on restart. Track B claims arrive months later. Rejected — the audit trail is required by the slashing policy.
 - **Fully durable hot store (DB-backed /solve).** Proposals survive restarts without resubmission, but adds DB latency to the auction-critical path. Rejected — sub-solver resubmission on restart is acceptable given short proposal lifetimes and continuous polling.
 
 ## Consequences
 
+- **`POST` no longer answers with a verdict.** The `id` in the `202` means "accepted for validation"; sub-solver clients must poll `GET /proposal/{id}` to learn `active`/`rejected` and read the typed `rejectionReason`. Integration code written against the synchronous contract (treating a `2xx` as acceptance) is wrong under this design.
+- **Verdict latency is bounded by the validator tick interval** (default 12s), not by the request round-trip. Simulation (COW-1162) must be built inside the background validator from the start — not inline and then moved.
 - **Sub-solvers must include all required interactions (hooks, approvals) in their proposals.** BYOS can reject at gatekeeping but cannot patch proposals post-submission. A sub-solver who omits required hooks will be rejected; one who passes gatekeeping but causes an EBBO violation is still liable (gatekeeping is non-exculpatory per [ADR-0003](0003-slash-attribution-flow.md)).
 - **The signing schema is an external dependency.** The `ProposalData` struct, typehash, and domain are fixed by the contracts repo; a contracts redeployment (v2 factory) invalidates all outstanding signatures, and sub-solver clients (including `subsolver` and `proposal-dto` here) must update their domain configuration. Signature code in this repo must be tested against contract-provided vectors, not a local re-derivation.
 - **Pre-settlement information leakage via GET.** Solver addresses per order are visible before settlement. An observer can map which sub-solvers are competing on which orders. Accepted — addresses are recoverable post-settlement from on-chain data anyway, and the v1 sub-solver set is expected to be small.

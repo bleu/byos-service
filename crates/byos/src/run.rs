@@ -37,6 +37,10 @@ pub(crate) struct Args {
     /// TrampolineFactory contract address (EIP-712 `verifyingContract`).
     #[arg(long, env)]
     trampoline_factory: alloy::primitives::Address,
+
+    /// Seconds between background validation ticks (expiry sweep + verdicts).
+    #[arg(long, env, default_value_t = 12)]
+    validation_interval_secs: u64,
 }
 
 /// Entry point for the binary — parses args from the process environment.
@@ -63,8 +67,16 @@ async fn run_with(args: Args, bind_tx: Option<oneshot::Sender<SocketAddr>>) -> a
     tracing::info!(?args, "starting byos");
 
     let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
-    let store = InMemoryProposalStore::new();
-    let state = AppState::new(store, domain);
+    let store = std::sync::Arc::new(InMemoryProposalStore::new());
+    let state = AppState::new(store.clone(), domain);
+
+    // Background validator (ADR-0001, async ingestion). AcceptAll is the M1
+    // stub; COW-1162 swaps in the escrow + simulation validator.
+    let _validation_loop = crate::infra::validation::spawn(
+        store,
+        crate::domain::validator::AcceptAll,
+        std::time::Duration::from_secs(args.validation_interval_secs),
+    );
 
     api::serve(args.public_addr, state, bind_tx)
         .await
