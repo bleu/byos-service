@@ -10,11 +10,13 @@
 //! at commit `886ee9cdc03b24b11392403a83985ddb26f5c7fa`.
 
 use alloy::sol;
-
 // Re-export standard CoW Protocol contract bindings so consumers don't need
 // a direct `cowprotocol-primitives` dependency.
 pub use cowprotocol_primitives::contracts::{
-    ERC20, GPv2InteractionData, GPv2Settlement, GPv2TradeData,
+    ERC20,
+    GPv2InteractionData,
+    GPv2Settlement,
+    GPv2TradeData,
 };
 
 sol!(
@@ -67,14 +69,13 @@ pub const PROPOSAL_TYPEHASH: alloy::primitives::B256 =
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use alloy::primitives::keccak256;
+    use {super::*, alloy::primitives::keccak256};
 
     #[test]
     fn proposal_typehash_matches_type_string() {
         let computed = keccak256(
-            "ProposalData(bytes32 orderUidHash,uint256 sellAmount,uint256 buyAmount,\
-             bytes32 interactionsHash,uint256 validUntil,uint256 nonce)",
+            "ProposalData(bytes32 orderUidHash,uint256 sellAmount,uint256 buyAmount,bytes32 \
+             interactionsHash,uint256 validUntil,uint256 nonce)",
         );
         assert_eq!(
             computed, PROPOSAL_TYPEHASH,
