@@ -5,10 +5,11 @@ use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::score_proposal,
+        scoring::{ScoreInput, score_proposal},
     },
     alloy::primitives::{Address, U256},
     axum::{Json, extract::State},
+    std::time::{SystemTime, UNIX_EPOCH},
     byos_common::trampoline::encode_trampoline_interactions,
     solvers_dto::{
         auction::{self, Auction},
@@ -23,7 +24,12 @@ const M1_GAS_ESTIMATE: u64 = 200_000;
 /// POST /solve — the driver-facing solver engine endpoint.
 pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) -> Json<Solutions> {
     let mut solutions = Vec::new();
-    let mut solution_id: u64 = 0;
+    let now = U256::from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    );
 
     for order in &auction.orders {
         let order_uid = OrderUid(order.uid);
@@ -47,17 +53,18 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         // Score and select the best proposal for this order.
         let best = proposals
             .iter()
+            .filter(|p| p.valid_until > now)
             .filter_map(|p| {
-                let score = score_proposal(
-                    order.sell_amount,
-                    order.buy_amount,
-                    p.sell_amount,
-                    p.buy_amount,
-                    is_sell,
+                let score = score_proposal(&ScoreInput {
+                    order_sell: order.sell_amount,
+                    order_buy: order.buy_amount,
+                    proposal_sell: p.sell_amount,
+                    proposal_buy: p.buy_amount,
+                    is_sell_order: is_sell,
                     gas_cost,
                     native_price,
-                )?;
-                Some((p, score))
+                })?;
+                (score > U256::ZERO).then_some((p, score))
             })
             .max_by_key(|(_, score)| *score);
 
@@ -66,9 +73,8 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         };
 
         // Build the solution using solvers-dto types.
-        if let Some(sol) = build_solution(&mut solution_id, order, proposal) {
-            solutions.push(sol);
-        }
+        let id = solutions.len() as u64 + 1;
+        solutions.push(build_solution(id, order, proposal));
     }
 
     tracing::debug!(count = solutions.len(), "solve: returning solutions");
@@ -77,10 +83,10 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 }
 
 fn build_solution(
-    id_counter: &mut u64,
+    id: u64,
     order: &auction::Order,
     proposal: &Proposal,
-) -> Option<solution::Solution> {
+) -> solution::Solution {
     // We need a trampoline address to encode interactions. For M1, we use
     // Address::ZERO as a placeholder — in production this comes from
     // ITrampolineFactory.addressOf(subSolver) resolved at proposal ingestion.
@@ -136,10 +142,8 @@ fn build_solution(
         fee: None,
     });
 
-    *id_counter += 1;
-
-    Some(solution::Solution {
-        id: *id_counter,
+    solution::Solution {
+        id,
         prices,
         trades: vec![trade],
         pre_interactions: vec![],
@@ -148,5 +152,5 @@ fn build_solution(
         gas: Some(M1_GAS_ESTIMATE),
         flashloans: None,
         wrappers: vec![],
-    })
+    }
 }
