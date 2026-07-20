@@ -479,11 +479,7 @@ mod tests {
         sell_amount: u64,
         buy_amount: u64,
     ) {
-        let mut proposal = test_proposal(
-            OrderUid(ORDER_UID),
-            sub_solver,
-            ProposalStatus::Active,
-        );
+        let mut proposal = test_proposal(OrderUid(ORDER_UID), sub_solver, ProposalStatus::Active);
         proposal.sell_amount = U256::from(sell_amount);
         proposal.buy_amount = U256::from(buy_amount);
         state.store().insert(proposal);
@@ -519,7 +515,8 @@ mod tests {
         assert_eq!(solutions.len(), 1);
 
         let prices = &solutions[0]["prices"];
-        // sell_token price = proposal.buy_amount, buy_token price = proposal.sell_amount
+        // sell_token price = proposal.buy_amount, buy_token price =
+        // proposal.sell_amount
         assert_eq!(prices[SELL_TOKEN.to_string()], "950");
         assert_eq!(prices[BUY_TOKEN.to_string()], "1000");
     }

@@ -9,13 +9,15 @@ use {
     },
     alloy::primitives::{Address, U256},
     axum::{Json, extract::State},
-    std::time::{SystemTime, UNIX_EPOCH},
     byos_common::trampoline::encode_trampoline_interactions,
     solvers_dto::{
         auction::{self, Auction},
         solution::{self, Solutions},
     },
-    std::collections::HashMap,
+    std::{
+        collections::HashMap,
+        time::{SystemTime, UNIX_EPOCH},
+    },
 };
 
 /// Fixed gas estimate for M1 (no simulation-based estimate yet).
@@ -42,8 +44,13 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
         let gas_cost = U256::from(M1_GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
 
-        // The surplus token is the buy token for sell orders, sell token for buy orders.
-        let surplus_token = if is_sell { order.buy_token } else { order.sell_token };
+        // The surplus token is the buy token for sell orders, sell token for buy
+        // orders.
+        let surplus_token = if is_sell {
+            order.buy_token
+        } else {
+            order.sell_token
+        };
         let native_price = auction
             .tokens
             .get(&surplus_token)
@@ -82,11 +89,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
     Json(Solutions { solutions })
 }
 
-fn build_solution(
-    id: u64,
-    order: &auction::Order,
-    proposal: &Proposal,
-) -> solution::Solution {
+fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solution::Solution {
     // We need a trampoline address to encode interactions. For M1, we use
     // Address::ZERO as a placeholder — in production this comes from
     // ITrampolineFactory.addressOf(subSolver) resolved at proposal ingestion.
