@@ -18,7 +18,7 @@ async fn audit_db_write_behind_round_trip() {
 
     let resp = client
         .post(app.url("/proposals"))
-        .json(&setup::signed_proposal_body(&signer, order_uid))
+        .json(&setup::signed_proposal_body(&signer, order_uid).await)
         .send()
         .await
         .unwrap();
@@ -29,7 +29,7 @@ async fn audit_db_write_behind_round_trip() {
 
     let resp = client
         .delete(app.url(&format!("/proposal/{id}")))
-        .header("X-Signature", setup::cancel_signature_hex(&signer, id))
+        .header("X-Signature", setup::cancel_signature(&signer, id).await)
         .send()
         .await
         .unwrap();
@@ -76,7 +76,7 @@ async fn audit_db_validator_verdict_leaves_evidence() {
 
     let resp = client
         .post(app.url("/proposals"))
-        .json(&setup::signed_proposal_body(&signer, [0xcd; 56]))
+        .json(&setup::signed_proposal_body(&signer, [0xcd; 56]).await)
         .send()
         .await
         .unwrap();
@@ -106,7 +106,7 @@ async fn audit_db_ids_continue_across_restart() {
     let post = async |app: &TestApp, uid: [u8; 56]| {
         let resp = client
             .post(app.url("/proposals"))
-            .json(&setup::signed_proposal_body(&signer, uid))
+            .json(&setup::signed_proposal_body(&signer, uid).await)
             .send()
             .await
             .unwrap();
@@ -146,7 +146,7 @@ async fn audit_db_shutdown_drains_queued_events() {
         uid[0] = u8::try_from(i).unwrap();
         let resp = client
             .post(app.url("/proposals"))
-            .json(&setup::signed_proposal_body(&signer, uid))
+            .json(&setup::signed_proposal_body(&signer, uid).await)
             .send()
             .await
             .unwrap();
@@ -182,7 +182,7 @@ async fn audit_db_writer_retries_until_database_recovers() {
 
     let resp = client
         .post(app.url("/proposals"))
-        .json(&setup::signed_proposal_body(&signer, [0xab; 56]))
+        .json(&setup::signed_proposal_body(&signer, [0xab; 56]).await)
         .send()
         .await
         .unwrap();

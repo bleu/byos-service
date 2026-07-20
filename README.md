@@ -35,7 +35,7 @@ Prerequisites: stable Rust (via [rustup](https://rustup.rs); `rust-toolchain.tom
 ```sh
 just build          # cargo build --workspace
 just test-unit      # cargo nextest run
-just test-db        # audit-trail tests against the compose Postgres
+just test-db        # service-level tests against the compose Postgres
 just test-e2e       # e2e tier 1: in-process against plain anvil
 just test-e2e-full  # e2e tier 2: against a running offline-mode stack
 just clippy         # -D warnings, all features and targets

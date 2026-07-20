@@ -149,6 +149,9 @@ async fn run_with(
 fn init_tracing(filter: &str, json: bool) {
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
 
+    // `try_init` rather than `init`: service-level tests call `run()` once per
+    // test, and under plain `cargo test` (shared process, unlike nextest) the
+    // second init would panic. Only the first subscriber wins; that's fine.
     if json {
         let _ = tracing_subscriber::registry()
             .with(env_filter)
