@@ -152,7 +152,7 @@ pub async fn get_proposal(
     Ok(Json(GetProposalResponse {
         id: proposal.id,
         sub_solver: proposal.sub_solver,
-        order_uid: format!("0x{}", alloy::hex::encode(proposal.order_uid.0)),
+        order_uid: proposal.order_uid.to_string(),
         sell_amount: proposal.sell_amount.to_string(),
         buy_amount: proposal.buy_amount.to_string(),
         valid_until: proposal.valid_until.to_string(),

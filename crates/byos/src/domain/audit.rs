@@ -17,9 +17,6 @@ pub type Sender = tokio::sync::mpsc::UnboundedSender<AuditEvent>;
 /// A proposal lifecycle event worth keeping as dispute evidence.
 #[derive(Clone, Debug)]
 pub struct AuditEvent {
-    pub proposal_id: ProposalId,
-    pub sub_solver: Address,
-    pub order_uid: OrderUid,
     /// Wall-clock time at emission — the evidentiary timestamp. The hot
     /// store's `created_at` stays monotonic (`Instant`); evidence needs an
     /// absolute clock.
@@ -29,21 +26,51 @@ pub struct AuditEvent {
 
 #[derive(Clone, Debug)]
 pub enum AuditKind {
-    /// Proposal accepted into the store; carries the full body as evidence.
-    /// Boxed: the body dwarfs the other variants.
+    /// Proposal accepted into the store; carries the full body as evidence
+    /// (the dispute-query keys come out of it). Boxed: the body dwarfs the
+    /// other variants.
     Received { proposal: Box<Proposal> },
-    /// Cancelled by its sub-solver via a signed `CancelProposal`.
-    Cancelled,
+    /// Cancelled by its sub-solver via a signed `CancelProposal`. Carries the
+    /// dispute-query keys explicitly — the body already sits in the
+    /// `received` row.
+    Cancelled {
+        proposal_id: ProposalId,
+        sub_solver: Address,
+        order_uid: OrderUid,
+    },
 }
 
 impl AuditEvent {
+    /// Dispute-query keys for the indexed columns, extracted per variant so
+    /// body-carrying events don't have to duplicate them.
+    pub fn proposal_id(&self) -> ProposalId {
+        match &self.kind {
+            AuditKind::Received { proposal } => proposal.id,
+            AuditKind::Cancelled { proposal_id, .. } => *proposal_id,
+        }
+    }
+
+    pub fn sub_solver(&self) -> Address {
+        match &self.kind {
+            AuditKind::Received { proposal } => proposal.sub_solver,
+            AuditKind::Cancelled { sub_solver, .. } => *sub_solver,
+        }
+    }
+
+    pub fn order_uid(&self) -> &OrderUid {
+        match &self.kind {
+            AuditKind::Received { proposal } => &proposal.order_uid,
+            AuditKind::Cancelled { order_uid, .. } => order_uid,
+        }
+    }
+
     /// Wire name for the `event_type` column. New lifecycle events (driver
     /// outcomes, ingestion states) add variants here — the column is TEXT, so
     /// additions are migration-free.
     pub fn event_type(&self) -> &'static str {
         match self.kind {
             AuditKind::Received { .. } => "received",
-            AuditKind::Cancelled => "cancelled",
+            AuditKind::Cancelled { .. } => "cancelled",
         }
     }
 
@@ -55,21 +82,16 @@ impl AuditEvent {
     pub fn payload(&self) -> serde_json::Value {
         match &self.kind {
             AuditKind::Received { proposal } => received_payload(proposal),
-            AuditKind::Cancelled => serde_json::json!({}),
+            AuditKind::Cancelled { .. } => serde_json::json!({}),
         }
     }
-}
-
-/// Hex-encode the 56-byte order UID with a `0x` prefix.
-pub fn order_uid_hex(order_uid: &OrderUid) -> String {
-    alloy::hex::encode_prefixed(order_uid.0)
 }
 
 fn received_payload(p: &Proposal) -> serde_json::Value {
     serde_json::json!({
         "id": p.id,
         "subSolver": p.sub_solver,
-        "orderUid": order_uid_hex(&p.order_uid),
+        "orderUid": p.order_uid.to_string(),
         "orderUidHash": p.order_uid_hash,
         "sellAmount": p.sell_amount.to_string(),
         "buyAmount": p.buy_amount.to_string(),
@@ -119,16 +141,32 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
         AuditEvent {
-            proposal_id: 7,
-            sub_solver: proposal.sub_solver,
-            order_uid: proposal.order_uid.clone(),
             occurred_at: SystemTime::now(),
             kind: match kind_of {
                 "received" => AuditKind::Received {
                     proposal: Box::new(proposal),
                 },
-                _ => AuditKind::Cancelled,
+                _ => AuditKind::Cancelled {
+                    proposal_id: proposal.id,
+                    sub_solver: proposal.sub_solver,
+                    order_uid: proposal.order_uid.clone(),
+                },
             },
+        }
+    }
+
+    /// Both variants must yield the same dispute-query keys — `received`
+    /// extracts them from the body, `cancelled` carries them explicitly.
+    #[test]
+    fn dispute_keys_agree_across_variants() {
+        for kind_of in ["received", "cancelled"] {
+            let event = event_for(kind_of);
+            assert_eq!(event.proposal_id(), 7);
+            assert_eq!(
+                event.sub_solver(),
+                address!("00000000000000000000000000000000000000aa")
+            );
+            assert_eq!(*event.order_uid(), OrderUid([0xab; 56]));
         }
     }
 

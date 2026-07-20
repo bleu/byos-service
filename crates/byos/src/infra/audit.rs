@@ -3,7 +3,7 @@
 //! evidence is never dropped by design, only by process death.
 
 use {
-    crate::domain::audit::{self, AuditEvent},
+    crate::domain::audit::AuditEvent,
     anyhow::Context,
     sqlx::postgres::{PgPool, PgPoolOptions},
     std::time::Duration,
@@ -62,7 +62,7 @@ async fn insert_with_retry(pool: &PgPool, event: &AuditEvent, queued: usize) {
             Err(err) => {
                 tracing::error!(
                     %err,
-                    proposal_id = event.proposal_id,
+                    proposal_id = event.proposal_id(),
                     event_type = event.event_type(),
                     queued,
                     backoff_ms = backoff.as_millis() as u64,
@@ -80,10 +80,10 @@ async fn insert(pool: &PgPool, event: &AuditEvent) -> Result<(), sqlx::Error> {
         "INSERT INTO audit_events (proposal_id, event_type, sub_solver, order_uid, \
          settlement_tx_hash, payload, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
-    .bind(i64::try_from(event.proposal_id).expect("proposal id exceeds i64"))
+    .bind(i64::try_from(event.proposal_id()).expect("proposal id exceeds i64"))
     .bind(event.event_type())
-    .bind(format!("{:#x}", event.sub_solver))
-    .bind(audit::order_uid_hex(&event.order_uid))
+    .bind(format!("{:#x}", event.sub_solver()))
+    .bind(event.order_uid().to_string())
     // No settling event types exist yet; reserved for ADR-0010 outcomes.
     .bind(Option::<String>::None)
     .bind(event.payload())

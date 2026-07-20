@@ -22,6 +22,13 @@ pub type ProposalId = u64;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OrderUid(pub [u8; 56]);
 
+/// `0x`-prefixed hex — the wire and evidence representation.
+impl std::fmt::Display for OrderUid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&alloy::hex::encode_prefixed(self.0))
+    }
+}
+
 /// Lifecycle state of a proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, strum::Display)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +116,7 @@ impl InMemoryProposalStore {
     fn emit(&self, event: audit::AuditEvent) {
         if let Err(err) = self.audit.send(event) {
             tracing::error!(
-                proposal_id = err.0.proposal_id,
+                proposal_id = err.0.proposal_id(),
                 "audit writer gone; evidence event dropped"
             );
         }
@@ -137,9 +144,6 @@ impl InMemoryProposalStore {
         }
 
         self.emit(audit::AuditEvent {
-            proposal_id: id,
-            sub_solver: proposal.sub_solver,
-            order_uid: proposal.order_uid.clone(),
             occurred_at: SystemTime::now(),
             kind: audit::AuditKind::Received {
                 proposal: Box::new(proposal),
@@ -203,11 +207,12 @@ impl InMemoryProposalStore {
         };
 
         self.emit(audit::AuditEvent {
-            proposal_id: id,
-            sub_solver,
-            order_uid,
             occurred_at: SystemTime::now(),
-            kind: audit::AuditKind::Cancelled,
+            kind: audit::AuditKind::Cancelled {
+                proposal_id: id,
+                sub_solver,
+                order_uid,
+            },
         });
         Ok(())
     }
@@ -258,9 +263,9 @@ mod tests {
         let id = store.insert(make_proposal(test_order_uid(), solver));
 
         let event = audit.try_recv().expect("insert should emit an audit event");
-        assert_eq!(event.proposal_id, id);
-        assert_eq!(event.sub_solver, solver);
-        assert_eq!(event.order_uid, test_order_uid());
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.sub_solver(), solver);
+        assert_eq!(*event.order_uid(), test_order_uid());
         match event.kind {
             AuditKind::Received { proposal } => {
                 assert_eq!(proposal.id, id);
@@ -339,10 +344,10 @@ mod tests {
         store.cancel(id, solver).expect("should succeed");
 
         let event = audit.try_recv().expect("cancel should emit an audit event");
-        assert_eq!(event.proposal_id, id);
-        assert_eq!(event.sub_solver, solver);
-        assert_eq!(event.order_uid, test_order_uid());
-        assert!(matches!(event.kind, AuditKind::Cancelled));
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.sub_solver(), solver);
+        assert_eq!(*event.order_uid(), test_order_uid());
+        assert!(matches!(event.kind, AuditKind::Cancelled { .. }));
     }
 
     #[test]

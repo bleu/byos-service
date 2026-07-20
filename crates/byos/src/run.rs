@@ -42,9 +42,30 @@ pub(crate) struct Args {
     trampoline_factory: alloy::primitives::Address,
 
     /// Postgres URL for the audit trail (ADR-0001 write-behind). Required:
-    /// the service refuses to boot without its evidence store.
+    /// the service refuses to boot without its evidence store. Prefer the
+    /// DATABASE_URL env var in production — CLI arguments (and the password
+    /// in this one) are visible to other users via `ps`.
     #[arg(long, env)]
-    database_url: String,
+    database_url: DatabaseUrl,
+}
+
+/// Connection-string wrapper whose `Debug` hides the value, so the startup
+/// `?args` log can't leak the password (ADR-0006: secrets redact themselves).
+#[derive(Clone)]
+struct DatabaseUrl(String);
+
+impl std::str::FromStr for DatabaseUrl {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_owned()))
+    }
+}
+
+impl std::fmt::Debug for DatabaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// Entry point for the binary — parses args from the process environment.
@@ -88,7 +109,7 @@ async fn run_with(
     // Fail-fast: no audit database, no service (ADR-0001 — the audit trail
     // is required by the slashing policy, so "up but not auditing" must be
     // an impossible state).
-    let pool = audit::connect_and_migrate(&args.database_url).await?;
+    let pool = audit::connect_and_migrate(&args.database_url.0).await?;
     let last_id = audit::max_proposal_id(&pool).await?;
 
     let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
