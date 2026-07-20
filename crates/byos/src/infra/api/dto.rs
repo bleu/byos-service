@@ -76,6 +76,9 @@ pub struct GetProposalResponse {
     pub buy_amount: String,
     pub valid_until: String,
     pub status: String,
+    /// Only present when `status` is `rejected`. PascalCase enum (ADR-0007).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
 }
 
 // ---------------------------------------------------------------------------

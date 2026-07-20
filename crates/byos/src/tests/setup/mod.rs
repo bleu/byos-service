@@ -1,7 +1,7 @@
-//! Harness: spawns the real server on an ephemeral port via `run()`'s bind
-//! channel, plus signed-request fixtures. Tests assert on raw JSON so the
-//! wire format (camelCase keys, PascalCase kinds, decimal-string amounts)
-//! stays pinned to the ADR-0001 contract.
+//! Harness: per-test databases, in-process service instances, and EIP-712
+//! signing fixtures mirroring what a real sub-solver client does. Tests
+//! assert on raw JSON so the wire format (camelCase keys, PascalCase kinds,
+//! decimal-string amounts) stays pinned to the ADR-0001 contract.
 
 use {
     alloy::{
@@ -15,89 +15,173 @@ use {
     },
     reqwest::StatusCode,
     serde_json::{Value, json},
+    sqlx::postgres::PgPool,
+    std::{
+        net::SocketAddr,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    },
+    tokio::{sync::oneshot, task::JoinHandle},
 };
 
-/// Chain id passed to the spawned server.
+/// Chain ID and factory address baked into every test instance; signing
+/// helpers must use the same EIP-712 domain.
 pub const CHAIN_ID: u64 = 1;
+pub const TRAMPOLINE_FACTORY: Address =
+    alloy::primitives::address!("00000000000000000000000000000000000000cc");
 
-/// TrampolineFactory address passed to the spawned server (EIP-712
-/// `verifyingContract`).
-pub const TRAMPOLINE_FACTORY: &str = "0x00000000000000000000000000000000DeaDBeef";
-
-// ---------------------------------------------------------------------------
-// TestServer
-// ---------------------------------------------------------------------------
-
-/// A running byos server and an HTTP client pointed at it.
-pub struct TestServer {
-    base_url: String,
-    client: reqwest::Client,
+fn admin_url() -> String {
+    std::env::var("BYOS_TEST_DB_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".into())
 }
 
-impl TestServer {
-    /// Spawns the real server (full `run()` path) on an ephemeral port and
-    /// waits for the bound address. The bind channel fires after the listener
-    /// is bound, so the server accepts connections as soon as this returns.
-    pub async fn spawn() -> Self {
-        let (bind_tx, bind_rx) = tokio::sync::oneshot::channel();
-        let args = [
-            "byos".to_string(),
-            "--public-addr".to_string(),
-            "127.0.0.1:0".to_string(),
-            "--chain-id".to_string(),
-            CHAIN_ID.to_string(),
-            "--trampoline-factory".to_string(),
-            TRAMPOLINE_FACTORY.to_string(),
-        ];
-        // Detach: the server task runs until the test's runtime is torn down.
-        drop(tokio::spawn(crate::run(args, bind_tx)));
-        let addr = bind_rx.await.expect("server failed to bind");
+fn domain() -> Eip712Domain {
+    eip712::byos_domain(CHAIN_ID, TRAMPOLINE_FACTORY)
+}
+
+// ---------------------------------------------------------------------------
+// TestDb
+// ---------------------------------------------------------------------------
+
+/// A uniquely-named database created for one test. Left behind on purpose —
+/// the compose Postgres is ephemeral, and keeping it avoids async-drop
+/// gymnastics.
+pub struct TestDb {
+    pub url: String,
+}
+
+impl TestDb {
+    pub async fn create() -> Self {
+        // PID + timestamp + counter: nextest runs each test in its own
+        // process, so a timestamp alone collides when tests start within the
+        // clock's resolution.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!(
+            "byos_test_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+
+        let admin = PgPool::connect(&format!("{}/postgres", admin_url()))
+            .await
+            .expect("test Postgres unreachable — run `docker compose up -d postgres`");
+        sqlx::query(&format!(r#"CREATE DATABASE "{name}""#))
+            .execute(&admin)
+            .await
+            .expect("create test database");
+
         Self {
-            base_url: format!("http://{addr}"),
-            client: reqwest::Client::new(),
+            url: format!("{}/{name}", admin_url()),
         }
     }
 
-    /// The EIP-712 domain matching the spawned server's args.
-    pub fn domain(&self) -> Eip712Domain {
-        eip712::byos_domain(CHAIN_ID, TRAMPOLINE_FACTORY.parse().unwrap())
+    pub async fn pool(&self) -> PgPool {
+        PgPool::connect(&self.url).await.expect("connect test db")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestApp
+// ---------------------------------------------------------------------------
+
+/// One in-process service instance and an HTTP client pointed at it.
+pub struct TestApp {
+    pub addr: SocketAddr,
+    client: reqwest::Client,
+    shutdown: oneshot::Sender<()>,
+    handle: JoinHandle<anyhow::Result<()>>,
+}
+
+impl TestApp {
+    pub async fn spawn(database_url: &str) -> Self {
+        // Background validation parked far out: several tests count exact
+        // audit rows or pin the `submitted` status, so ticks must not flip
+        // proposals mid-test.
+        Self::spawn_with_validation_interval(database_url, 3600).await
+    }
+
+    pub async fn spawn_with_validation_interval(
+        database_url: &str,
+        validation_interval_secs: u64,
+    ) -> Self {
+        let args = [
+            "byos",
+            "--public-addr",
+            "127.0.0.1:0",
+            "--chain-id",
+            &CHAIN_ID.to_string(),
+            "--trampoline-factory",
+            &TRAMPOLINE_FACTORY.to_string(),
+            "--database-url",
+            database_url,
+            "--validation-interval-secs",
+            &validation_interval_secs.to_string(),
+        ]
+        .map(String::from);
+
+        let (bind_tx, bind_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(crate::run_until(args, bind_tx, shutdown_rx));
+        let addr = bind_rx.await.expect("service failed to bind");
+
+        Self {
+            addr,
+            client: reqwest::Client::new(),
+            shutdown: shutdown_tx,
+            handle,
+        }
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
     }
 
     /// POST a JSON body; returns status and response JSON.
     pub async fn post_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let resp = self
             .client
-            .post(format!("{}{path}", self.base_url))
-            // Manual header + string body: the workspace reqwest has no
-            // `json` feature.
-            .header("content-type", "application/json")
-            .body(body.to_string())
+            .post(self.url(path))
+            .json(body)
             .send()
             .await
             .expect("request failed");
         json_of(resp).await
     }
 
-    /// GET a path; returns status and response JSON.
-    pub async fn get_json(&self, path: &str) -> (StatusCode, Value) {
-        let resp = self
-            .client
-            .get(format!("{}{path}", self.base_url))
-            .send()
-            .await
-            .expect("request failed");
+    /// GET a path, optionally with an `X-Signature` `ReadAuth` bearer token
+    /// (ADR-0011); returns status and response JSON.
+    pub async fn get_json(&self, path: &str, signature: Option<&str>) -> (StatusCode, Value) {
+        let mut req = self.client.get(self.url(path));
+        if let Some(sig) = signature {
+            req = req.header("X-Signature", sig);
+        }
+        let resp = req.send().await.expect("request failed");
         json_of(resp).await
     }
 
     /// DELETE a path, optionally with an `X-Signature` header; returns status
     /// and response JSON (`Null` for empty bodies, e.g. 204).
     pub async fn delete(&self, path: &str, signature: Option<&str>) -> (StatusCode, Value) {
-        let mut req = self.client.delete(format!("{}{path}", self.base_url));
+        let mut req = self.client.delete(self.url(path));
         if let Some(sig) = signature {
             req = req.header("X-Signature", sig);
         }
         let resp = req.send().await.expect("request failed");
         json_of(resp).await
+    }
+
+    /// Graceful shutdown; returns only after the audit writer has flushed.
+    pub async fn stop(self) {
+        let _ = self.shutdown.send(());
+        self.handle
+            .await
+            .expect("service task panicked")
+            .expect("service exited with error");
     }
 }
 
@@ -131,12 +215,14 @@ impl Default for ProposalFixture {
             order_uid: [0xab; 56],
             sell_amount: U256::from(1_000_000u64),
             buy_amount: U256::from(990_000u64),
-            valid_until: U256::from(1_700_000_000u64),
+            // Far future: the background expiry sweep must never reap a
+            // fixture mid-test.
+            valid_until: U256::from(u32::MAX),
             nonce: U256::from(1u64),
             interactions: vec![Interaction {
-                target: Address::repeat_byte(0x11),
+                target: alloy::primitives::address!("00000000000000000000000000000000000000dd"),
                 value: U256::ZERO,
-                callData: vec![0x01, 0x02].into(),
+                callData: vec![0xde, 0xad].into(),
             }],
         }
     }
@@ -155,23 +241,23 @@ impl ProposalFixture {
     }
 
     /// Signs the fixture and renders the `POST /proposals` JSON body.
-    pub async fn signed_body(&self, signer: &PrivateKeySigner, domain: &Eip712Domain) -> Value {
-        let sig = eip712::sign_proposal(signer, domain, &self.as_proposal(), &self.interactions)
+    pub async fn signed_body(&self, signer: &PrivateKeySigner) -> Value {
+        let sig = eip712::sign_proposal(signer, &domain(), &self.as_proposal(), &self.interactions)
             .await
             .expect("signing should succeed");
-        self.body_with_signature(&hex_bytes(&sig.as_bytes()))
+        self.body_with_signature(&alloy::hex::encode_prefixed(sig.as_bytes()))
     }
 
     /// Renders the JSON body with an arbitrary signature string.
     pub fn body_with_signature(&self, signature: &str) -> Value {
         json!({
-            "orderUid": hex_bytes(&self.order_uid),
+            "orderUid": alloy::hex::encode_prefixed(self.order_uid),
             "sellAmount": self.sell_amount.to_string(),
             "buyAmount": self.buy_amount.to_string(),
             "interactions": self.interactions.iter().map(|i| json!({
                 "target": i.target.to_string(),
                 "value": i.value.to_string(),
-                "callData": hex_bytes(&i.callData),
+                "callData": alloy::hex::encode_prefixed(&i.callData),
             })).collect::<Vec<_>>(),
             "validUntil": self.valid_until.to_string(),
             "nonce": self.nonce.to_string(),
@@ -180,19 +266,87 @@ impl ProposalFixture {
     }
 }
 
-/// Signs a `CancelProposal` message and renders it as an `X-Signature` value.
-pub async fn cancel_signature(
-    signer: &PrivateKeySigner,
-    domain: &Eip712Domain,
-    proposal_id: u64,
-) -> String {
-    let sig = eip712::sign_cancellation(signer, domain, U256::from(proposal_id))
-        .await
-        .expect("signing should succeed");
-    hex_bytes(&sig.as_bytes())
+/// Build a validly-signed POST /proposals body, the way a sub-solver would.
+pub async fn signed_proposal_body(signer: &PrivateKeySigner, order_uid: [u8; 56]) -> Value {
+    ProposalFixture {
+        order_uid,
+        ..Default::default()
+    }
+    .signed_body(signer)
+    .await
 }
 
-/// `0x`-prefixed lowercase hex.
-pub fn hex_bytes(bytes: &[u8]) -> String {
-    format!("0x{}", alloy::hex::encode(bytes))
+/// Sign the `CancelProposal` message for DELETE's `X-Signature` header.
+pub async fn cancel_signature(signer: &PrivateKeySigner, proposal_id: u64) -> String {
+    let sig = eip712::sign_cancellation(signer, &domain(), U256::from(proposal_id))
+        .await
+        .expect("signing should succeed");
+    alloy::hex::encode_prefixed(sig.as_bytes())
+}
+
+/// Sign the `ReadAuth` bearer message for GET's `X-Signature` header
+/// (ADR-0011).
+pub async fn read_auth_signature(signer: &PrivateKeySigner) -> String {
+    let sig = eip712::sign_read_auth(signer, &domain())
+        .await
+        .expect("signing should succeed");
+    alloy::hex::encode_prefixed(sig.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
+
+/// Poll `GET /proposal/{id}` until its status matches `want` (background
+/// validation is async).
+pub async fn wait_for_status(app: &TestApp, id: u64, read_auth: &str, want: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, got) = app
+            .get_json(&format!("/proposal/{id}"), Some(read_auth))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        if got["status"] == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for proposal {id} to become {want}, still {}",
+            got["status"]
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll until `audit_events` holds `expected` rows (write-behind is async).
+pub async fn wait_for_audit_rows(pool: &PgPool, expected: usize) -> Vec<AuditRow> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows: Vec<AuditRow> = sqlx::query_as(
+            "SELECT proposal_id, event_type, sub_solver, order_uid, settlement_tx_hash, payload \
+             FROM audit_events ORDER BY id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        if rows.len() >= expected {
+            return rows;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} audit rows, have {}",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub struct AuditRow {
+    pub proposal_id: i64,
+    pub event_type: String,
+    pub sub_solver: String,
+    pub order_uid: String,
+    pub settlement_tx_hash: Option<String>,
+    pub payload: serde_json::Value,
 }
