@@ -3,6 +3,7 @@
 pub mod dto;
 pub mod error;
 pub mod routes;
+pub mod solve;
 
 use {
     crate::domain::proposal::InMemoryProposalStore,
@@ -58,6 +59,7 @@ fn router(state: AppState) -> Router {
             "/proposals/by-solver",
             get(routes::list_proposals_by_solver),
         )
+        .route("/solve", post(solve::solve))
         .with_state(state)
 }
 
@@ -418,5 +420,161 @@ mod tests {
         let (status, _) = get(state, &format!("/proposal/{id}"), None).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // /solve tests
+    // -----------------------------------------------------------------------
+
+    const SELL_TOKEN: Address = address!("1111111111111111111111111111111111111111");
+    const BUY_TOKEN: Address = address!("2222222222222222222222222222222222222222");
+    const ORDER_UID: [u8; 56] = [0xaa; 56];
+
+    /// Builds a minimal valid auction JSON with one order.
+    fn auction_json(kind: &str, sell_amount: &str, buy_amount: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tokens": {
+                SELL_TOKEN.to_string(): {
+                    "referencePrice": "1000000000000000000",
+                    "availableBalance": "0",
+                    "trusted": false
+                },
+                BUY_TOKEN.to_string(): {
+                    "referencePrice": "1000000000000000000",
+                    "availableBalance": "0",
+                    "trusted": false
+                }
+            },
+            "orders": [{
+                "uid": format!("0x{}", alloy::hex::encode(ORDER_UID)),
+                "sellToken": SELL_TOKEN.to_string(),
+                "buyToken": BUY_TOKEN.to_string(),
+                "sellAmount": sell_amount,
+                "fullSellAmount": sell_amount,
+                "buyAmount": buy_amount,
+                "fullBuyAmount": buy_amount,
+                "validTo": 4_294_967_295u32,
+                "kind": kind,
+                "owner": Address::ZERO.to_string(),
+                "partiallyFillable": false,
+                "preInteractions": [],
+                "postInteractions": [],
+                "sellTokenSource": "erc20",
+                "buyTokenDestination": "erc20",
+                "class": "limit",
+                "appData": format!("0x{}", alloy::hex::encode([0u8; 32])),
+                "signingScheme": "eip712",
+                "signature": "0x"
+            }],
+            "liquidity": [],
+            "effectiveGasPrice": "0",
+            "deadline": "2099-01-01T00:00:00Z",
+            "surplusCapturingJitOrderOwners": []
+        })
+    }
+
+    fn insert_active_proposal(
+        state: &AppState,
+        sub_solver: Address,
+        sell_amount: u64,
+        buy_amount: u64,
+    ) {
+        let mut proposal = test_proposal(OrderUid(ORDER_UID), sub_solver, ProposalStatus::Active);
+        proposal.sell_amount = U256::from(sell_amount);
+        proposal.buy_amount = U256::from(buy_amount);
+        state.store().insert(proposal);
+    }
+
+    async fn post_solve(app: &Router, auction: &serde_json::Value) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/solve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(auction.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        json_body(response).await
+    }
+
+    #[tokio::test]
+    async fn solve_sell_order_prices_are_cross_multiplied() {
+        let state = test_state();
+        let app = router(state.clone());
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+
+        let auction = auction_json("sell", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        let solutions = result["solutions"].as_array().unwrap();
+        assert_eq!(solutions.len(), 1);
+
+        let prices = &solutions[0]["prices"];
+        // sell_token price = proposal.buy_amount, buy_token price =
+        // proposal.sell_amount
+        assert_eq!(prices[SELL_TOKEN.to_string()], "950");
+        assert_eq!(prices[BUY_TOKEN.to_string()], "1000");
+    }
+
+    #[tokio::test]
+    async fn solve_sell_order_executed_amount_is_sell() {
+        let state = test_state();
+        let app = router(state.clone());
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+
+        let auction = auction_json("sell", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        let trade = &result["solutions"][0]["trades"][0];
+        assert_eq!(trade["executedAmount"], "1000");
+    }
+
+    #[tokio::test]
+    async fn solve_buy_order_executed_amount_is_buy() {
+        let state = test_state();
+        let app = router(state.clone());
+        insert_active_proposal(&state, Address::ZERO, 950, 900);
+
+        let auction = auction_json("buy", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        let trade = &result["solutions"][0]["trades"][0];
+        assert_eq!(trade["executedAmount"], "900");
+    }
+
+    #[tokio::test]
+    async fn solve_selects_best_of_n_proposals() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        // Two proposals for the same order; second has more surplus.
+        insert_active_proposal(&state, Address::ZERO, 1_000, 920);
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+
+        let auction = auction_json("sell", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        let solutions = result["solutions"].as_array().unwrap();
+        assert_eq!(solutions.len(), 1);
+        // Best proposal has buy_amount=950, which becomes the sell_token price.
+        assert_eq!(solutions[0]["prices"][SELL_TOKEN.to_string()], "950");
+    }
+
+    #[tokio::test]
+    async fn solve_no_proposals_returns_empty() {
+        let state = test_state();
+        let app = router(state.clone());
+        // No proposals inserted.
+
+        let auction = auction_json("sell", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        let solutions = result["solutions"].as_array().unwrap();
+        assert!(solutions.is_empty());
     }
 }
