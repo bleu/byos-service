@@ -36,6 +36,14 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
         let gas_cost = U256::from(M1_GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
 
+        // The surplus token is the buy token for sell orders, sell token for buy orders.
+        let surplus_token = if is_sell { order.buy_token } else { order.sell_token };
+        let native_price = auction
+            .tokens
+            .get(&surplus_token)
+            .and_then(|t| t.reference_price)
+            .unwrap_or(U256::ZERO);
+
         // Score and select the best proposal for this order.
         let best = proposals
             .iter()
@@ -47,6 +55,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                     p.buy_amount,
                     is_sell,
                     gas_cost,
+                    native_price,
                 )?;
                 Some((p, score))
             })
