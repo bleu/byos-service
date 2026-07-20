@@ -1,16 +1,14 @@
-//! Proposal simulation via `eth_call` against GPv2Settlement.
+//! Calldata builder for proposal simulation via `eth_call` against
+//! GPv2Settlement.
 //!
-//! **Ingestion simulation:** after signature + escrow checks pass, build a
-//! minimal `settle()` calldata and `eth_call` it. If it reverts, reject the
-//! proposal.
-//!
-//! **Re-simulation loop:** every N blocks, re-run the same simulation for all
-//! active proposals. Permanently drop on revert.
-//!
-//! The simulation uses empty trades and three intra-interactions (ADR-0002):
-//! 1. `sellToken.transferFrom(user, settlement, sellAmount)` — simulation-only
+//! Builds a minimal `settle()` calldata with empty trades and three
+//! intra-interactions (ADR-0002):
+//! 1. `sellToken.transfer(settlement, sellAmount)` — simulation-only
 //! 2. `sellToken.transfer(trampoline, sellAmount)` — real BYOS interaction
 //! 3. `trampoline.execute(proposal, interactions, buyToken, signature)` — real
+//!
+//! The actual `eth_call` dispatch (ingestion check) and the periodic
+//! re-simulation loop are not yet implemented.
 
 use {
     alloy::{
@@ -25,7 +23,6 @@ pub struct SimulationParams {
     pub settlement: Address,
     pub sell_token: Address,
     pub buy_token: Address,
-    pub user: Address,
     pub trampoline: Address,
     pub proposal: Proposal,
     pub interactions: Vec<Interaction>,
@@ -35,11 +32,20 @@ pub struct SimulationParams {
 /// Builds the `settle()` calldata for simulating a proposal via `eth_call`.
 ///
 /// Uses empty tokens/prices/trades arrays and three intra-interactions.
-/// The `transferFrom` in slot 0 is a simulation workaround — in production,
-/// GPv2 pulls user tokens via vault relayer during trade processing.
+///
+/// # Warning
+///
+/// This calldata is intended **only** for `eth_call` simulation. It must
+/// never be submitted as a real transaction — the first interaction fakes
+/// token movement that the vault relayer handles in production.
 pub fn build_simulation_calldata(params: &SimulationParams) -> Bytes {
-    // Intra-interaction 0: transfer(settlement, sellAmount) —
-    // simulation-only, moves user tokens into settlement.
+    // Intra-interaction 0: transfer(settlement, sellAmount).
+    // Simulation-only — in production the vault relayer moves tokens into
+    // settlement during trade processing.  We keep the two-hop path
+    // (user→settlement→trampoline) instead of a direct user→trampoline
+    // transfer so the simulation exercises the exact interactions submitted
+    // on-chain and catches fee-on-transfer tokens where less than sellAmount
+    // lands in settlement.
     let transfer_from = GPv2InteractionData {
         target: params.sell_token,
         value: U256::ZERO,
@@ -91,13 +97,11 @@ mod tests {
         alloy::primitives::{address, b256},
     };
 
-    #[test]
-    fn simulation_calldata_encodes_without_panic() {
-        let params = SimulationParams {
+    fn sample_params() -> SimulationParams {
+        SimulationParams {
             settlement: address!("9008D19f58AAbD9eD0D60971565AA8510560ab41"),
             sell_token: address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
             buy_token: address!("6B175474E89094C44Da98b954EedeAC495271d0F"),
-            user: address!("0000000000000000000000000000000000000001"),
             trampoline: address!("0000000000000000000000000000000000000002"),
             proposal: Proposal {
                 orderUidHash: b256!(
@@ -114,16 +118,51 @@ mod tests {
                 callData: vec![0xab, 0xcd].into(),
             }],
             signature: Bytes::from(vec![0u8; 65]),
-        };
+        }
+    }
 
+    #[test]
+    fn settle_calldata_has_correct_structure() {
+        let params = sample_params();
         let calldata = build_simulation_calldata(&params);
 
-        // Should start with the settle() selector.
-        let settle_selector = &alloy::primitives::keccak256(
-            "settle(address[],uint256[],(uint256,uint256,address,uint256,uint256,uint32,bytes32,\
-             uint256,uint256,uint256,bytes)[],(address,uint256,bytes)[][3])",
-        )[..4];
-        assert_eq!(&calldata[..4], settle_selector);
-        assert!(calldata.len() > 100, "calldata should be non-trivial");
+        let decoded =
+            GPv2Settlement::settleCall::abi_decode(&calldata).expect("should decode as settle()");
+
+        assert!(decoded.tokens.is_empty());
+        assert!(decoded.clearingPrices.is_empty());
+        assert!(decoded.trades.is_empty());
+
+        assert!(
+            decoded.interactions[0].is_empty(),
+            "pre-interactions should be empty"
+        );
+        assert_eq!(
+            decoded.interactions[1].len(),
+            3,
+            "intra-interactions: transfer + 2 trampoline"
+        );
+        assert!(
+            decoded.interactions[2].is_empty(),
+            "post-interactions should be empty"
+        );
+    }
+
+    #[test]
+    fn first_intra_interaction_is_transfer_to_settlement() {
+        let params = sample_params();
+        let calldata = build_simulation_calldata(&params);
+
+        let decoded =
+            GPv2Settlement::settleCall::abi_decode(&calldata).expect("should decode as settle()");
+
+        let transfer = &decoded.interactions[1][0];
+        assert_eq!(transfer.target, params.sell_token);
+        assert_eq!(transfer.value, U256::ZERO);
+
+        let transfer_decoded = ERC20::transferCall::abi_decode(&transfer.callData)
+            .expect("should decode as ERC20.transfer()");
+        assert_eq!(transfer_decoded.to, params.settlement);
+        assert_eq!(transfer_decoded.amount, params.proposal.sellAmount);
     }
 }
