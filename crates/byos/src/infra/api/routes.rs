@@ -4,8 +4,13 @@ use {
     super::{
         AppState,
         dto::{
-            CreateProposalRequest, CreateProposalResponse, GetProposalResponse,
-            ListProposalsResponse, ProposalMetadata, parse_hex, parse_u256,
+            CreateProposalRequest,
+            CreateProposalResponse,
+            GetProposalResponse,
+            ListProposalsResponse,
+            ProposalMetadata,
+            parse_hex,
+            parse_u256,
         },
         error::{Error, Kind},
     },

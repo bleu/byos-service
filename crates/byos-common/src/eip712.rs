@@ -2,7 +2,7 @@
 //!
 //! Sub-solvers sign a [`ProposalData`] message (6 fields, including
 //! `interactionsHash`) using the EIP-712 domain anchored to the
-//! [`TrampolineFactory`](crate::contracts::ITrampolineFactory) contract. The
+//! [`TrampolineFactory`](crate::contracts::TrampolineFactory) contract. The
 //! BYOS service verifies these signatures to authenticate proposals; the
 //! signing helper is used by the reference sub-solver and tests.
 //!
