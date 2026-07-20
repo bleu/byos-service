@@ -472,9 +472,15 @@ fn is_terminal(status: ProposalStatus) -> bool {
 fn prune_indexes(inner: &mut Inner, id: ProposalId, order_uid: &OrderUid, sub_solver: Address) {
     if let Some(ids) = inner.by_order_uid.get_mut(order_uid) {
         ids.retain(|&pid| pid != id);
+        if ids.is_empty() {
+            inner.by_order_uid.remove(order_uid);
+        }
     }
     if let Some(ids) = inner.by_sub_solver.get_mut(&sub_solver) {
         ids.retain(|&pid| pid != id);
+        if ids.is_empty() {
+            inner.by_sub_solver.remove(&sub_solver);
+        }
     }
 }
 

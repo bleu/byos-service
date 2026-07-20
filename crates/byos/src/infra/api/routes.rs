@@ -4,12 +4,8 @@ use {
     super::{
         AppState,
         dto::{
-            CreateProposalRequest,
-            CreateProposalResponse,
-            GetProposalResponse,
-            ListProposalsResponse,
-            ProposalMetadata,
-            parse_hex,
+            CreateProposalRequest, CreateProposalResponse, GetProposalResponse,
+            ListProposalsResponse, ProposalMetadata, parse_hex, parse_u256,
         },
         error::{Error, Kind},
     },
@@ -44,13 +40,22 @@ pub async fn create_proposal(
     State(state): State<AppState>,
     Json(body): Json<CreateProposalRequest>,
 ) -> Result<impl IntoResponse, Error> {
-    // 1. Parse and validate fields. U256 amounts and signature bytes are already
-    //    deserialized by serde (dto.rs custom deserializers); only the order UID
-    //    needs domain-level validation here.
+    // 1. Parse and validate fields.
     let order_uid = OrderUid::from_hex(&body.order_uid)
         .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
-    let signature = Signature::try_from(body.signature.as_slice())
+    let sell_amount = parse_u256(&body.sell_amount)
+        .map_err(|_| Error::new(Kind::BadRequest, "invalid sellAmount"))?;
+    let buy_amount = parse_u256(&body.buy_amount)
+        .map_err(|_| Error::new(Kind::BadRequest, "invalid buyAmount"))?;
+    let valid_until = parse_u256(&body.valid_until)
+        .map_err(|_| Error::new(Kind::BadRequest, "invalid validUntil"))?;
+    let nonce =
+        parse_u256(&body.nonce).map_err(|_| Error::new(Kind::BadRequest, "invalid nonce"))?;
+
+    let signature_bytes = parse_hex(&body.signature)
+        .map_err(|_| Error::new(Kind::BadRequest, "invalid signature hex"))?;
+    let signature = Signature::try_from(signature_bytes.as_slice())
         .map_err(|_| Error::from(Kind::InvalidSignature))?;
 
     // 2. Convert interactions.
@@ -67,10 +72,10 @@ pub async fn create_proposal(
     // 4. Build the on-chain Proposal struct for signature recovery.
     let proposal = Proposal {
         orderUidHash: order_uid_hash,
-        sellAmount: body.sell_amount,
-        buyAmount: body.buy_amount,
-        validUntil: body.valid_until,
-        nonce: body.nonce,
+        sellAmount: sell_amount,
+        buyAmount: buy_amount,
+        validUntil: valid_until,
+        nonce,
     };
 
     // 5. Recover the sub-solver address.
@@ -88,13 +93,13 @@ pub async fn create_proposal(
         sub_solver,
         order_uid,
         order_uid_hash,
-        sell_amount: body.sell_amount,
-        buy_amount: body.buy_amount,
+        sell_amount,
+        buy_amount,
         interactions,
         interactions_hash,
-        valid_until: body.valid_until,
-        nonce: body.nonce,
-        signature: Bytes::from(body.signature),
+        valid_until,
+        nonce,
+        signature: Bytes::from(signature_bytes),
         status: ProposalStatus::Submitted,
         rejection_reason: None,
         created_at: Instant::now(),
