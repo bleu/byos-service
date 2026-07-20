@@ -20,16 +20,17 @@ use {
 // ---------------------------------------------------------------------------
 
 struct AppStateInner {
-    store: InMemoryProposalStore,
+    store: Arc<InMemoryProposalStore>,
     domain: Eip712Domain,
 }
 
-/// Shared application state, cheaply cloneable via `Arc`.
+/// Shared application state, cheaply cloneable via `Arc`. The store is
+/// separately `Arc`ed because the background validation loop shares it.
 #[derive(Clone)]
 pub struct AppState(Arc<AppStateInner>);
 
 impl AppState {
-    pub fn new(store: InMemoryProposalStore, domain: Eip712Domain) -> Self {
+    pub fn new(store: Arc<InMemoryProposalStore>, domain: Eip712Domain) -> Self {
         Self(Arc::new(AppStateInner { store, domain }))
     }
 
@@ -95,54 +96,187 @@ async fn shutdown_signal() {
 mod tests {
     use {
         super::*,
-        crate::domain::proposal::{OrderUid, Proposal, ProposalStatus},
-        alloy::primitives::{Address, B256, Bytes, U256, address, keccak256},
+        crate::domain::proposal::{OrderUid, ProposalStatus, test_proposal},
+        alloy::{
+            primitives::{Address, U256, address, keccak256},
+            signers::local::PrivateKeySigner,
+        },
         axum::{
             body::Body,
             http::{Request, StatusCode},
         },
-        std::time::Instant,
+        byos_common::{contracts, eip712},
         tower::ServiceExt,
     };
 
-    /// EIP-712 domain anchored to a dummy factory, matching what tests sign
-    /// against.
+    const CHAIN_ID: u64 = 1;
+
+    fn factory() -> Address {
+        Address::repeat_byte(0x42)
+    }
+
     fn test_state() -> AppState {
-        let domain = byos_common::eip712::byos_domain(
-            1,
-            address!("00000000000000000000000000000000DeaDBeef"),
-        );
-        AppState::new(
-            crate::domain::proposal::InMemoryProposalStore::new(),
-            domain,
-        )
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+        AppState::new(Arc::new(InMemoryProposalStore::new()), domain)
+    }
+
+    /// Builds a valid signed POST /proposals JSON body and returns it along
+    /// with the signer's address.
+    async fn signed_proposal_body_for(signer: &PrivateKeySigner) -> (serde_json::Value, Address) {
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+
+        let order_uid = [0xaa_u8; 56];
+        let proposal = contracts::Proposal {
+            orderUidHash: keccak256(order_uid),
+            sellAmount: U256::from(1_000_000_u64),
+            buyAmount: U256::from(990_000_u64),
+            validUntil: U256::from(99_999_999_999_u64),
+            nonce: U256::from(1_u64),
+        };
+        let interactions: Vec<contracts::Interaction> = vec![];
+
+        let signature = eip712::sign_proposal(signer, &domain, &proposal, &interactions)
+            .await
+            .expect("signing must succeed");
+
+        let body = serde_json::json!({
+            "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
+            "sellAmount": "1000000",
+            "buyAmount": "990000",
+            "interactions": [],
+            "validUntil": "99999999999",
+            "nonce": "1",
+            "signature": format!("0x{}", alloy::hex::encode(signature.as_bytes())),
+        });
+        (body, signer.address())
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        serde_json::from_slice(&bytes).expect("body must be JSON")
+    }
+
+    async fn post_proposal(app: &Router, body: &serde_json::Value) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/proposals")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    struct RejectAll;
+
+    impl crate::domain::validator::ProposalValidator for RejectAll {
+        async fn validate(
+            &self,
+            _proposal: &crate::domain::proposal::Proposal,
+        ) -> crate::domain::validator::Verdict {
+            crate::domain::validator::Verdict::Reject(
+                crate::domain::validator::RejectionReason::InsufficientEscrow,
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_proposal_exposes_reason_on_the_wire() {
+        let state = test_state();
+        let app = router(state.clone());
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
+
+        let response = post_proposal(&app, &body).await;
+        let id = json_body(response).await["id"].as_u64().expect("id");
+
+        crate::infra::validation::run_tick(state.store(), &RejectAll, 0).await;
+
+        let header = read_auth_header(&signer, &state).await;
+        let (status, body) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "rejected");
+        assert_eq!(body["rejectionReason"], "InsufficientEscrow");
+    }
+
+    #[tokio::test]
+    async fn double_cancel_returns_conflict() {
+        use alloy::sol_types::SolStruct;
+
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+        let state = AppState::new(Arc::new(InMemoryProposalStore::new()), domain.clone());
+        let app = router(state);
+
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
+        let response = post_proposal(&app, &body).await;
+        let id = json_body(response).await["id"].as_u64().expect("id");
+
+        let cancel = eip712::CancelProposal {
+            proposalId: U256::from(id),
+        };
+        let signature =
+            alloy::signers::Signer::sign_hash(&signer, &cancel.eip712_signing_hash(&domain))
+                .await
+                .expect("signing must succeed");
+
+        let delete = |app: Router| {
+            let sig_hex = format!("0x{}", alloy::hex::encode(signature.as_bytes()));
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/proposal/{id}"))
+                        .header("X-Signature", sig_hex)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Cancelling a Submitted proposal works…
+        let first = delete(app.clone()).await;
+        assert_eq!(first.status(), StatusCode::NO_CONTENT);
+
+        // …cancelling it again conflicts with its terminal state.
+        let second = delete(app.clone()).await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_returns_202_and_proposal_is_submitted() {
+        let state = test_state();
+        let app = router(state.clone());
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
+
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let id = json_body(response).await["id"].as_u64().expect("id");
+
+        let header = read_auth_header(&signer, &state).await;
+        let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "submitted");
     }
 
     fn insert_proposal(state: &AppState, sub_solver: Address) -> u64 {
-        let order_uid = OrderUid([0xaa; 56]);
-        let order_uid_hash = keccak256(order_uid.0);
-        state.store().insert(Proposal {
-            id: 0,
+        state.store().insert(test_proposal(
+            OrderUid([0xaa; 56]),
             sub_solver,
-            order_uid,
-            order_uid_hash,
-            sell_amount: U256::from(1_000_000u64),
-            buy_amount: U256::from(990_000u64),
-            interactions: vec![],
-            interactions_hash: B256::ZERO,
-            valid_until: U256::from(u64::MAX),
-            nonce: U256::from(1u64),
-            signature: Bytes::new(),
-            status: ProposalStatus::Active,
-            created_at: Instant::now(),
-        })
+            ProposalStatus::Active,
+        ))
     }
 
     /// Signs the `ReadAuth` bearer message and formats it for `X-Signature`.
-    async fn read_auth_header(
-        signer: &alloy::signers::local::PrivateKeySigner,
-        state: &AppState,
-    ) -> String {
+    async fn read_auth_header(signer: &PrivateKeySigner, state: &AppState) -> String {
         let sig = byos_common::eip712::sign_read_auth(signer, state.domain())
             .await
             .expect("signing should succeed");

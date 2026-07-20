@@ -97,10 +97,9 @@ pub async fn create_proposal(
 
     tracing::info!(%sub_solver, "proposal signature verified");
 
-    // 6. [M1 placeholder] Escrow balance check — accept unconditionally.
-    // Actual on-chain check comes in COW-1162 (proposal simulation).
-
-    // 7. Store the proposal.
+    // 6. Store as Submitted. The background validator (escrow + simulation,
+    // COW-1162) picks it up and flips it to Active or Rejected; sub-solvers
+    // poll GET /proposal/{id} for the verdict.
     let stored = crate::domain::proposal::Proposal {
         id: 0,
         sub_solver,
@@ -113,15 +112,16 @@ pub async fn create_proposal(
         valid_until,
         nonce,
         signature: Bytes::from(signature_bytes),
-        status: ProposalStatus::Active,
+        status: ProposalStatus::Submitted,
+        rejection_reason: None,
         created_at: Instant::now(),
     };
 
     let id = state.store().insert(stored);
 
-    tracing::info!(id, %sub_solver, "proposal accepted");
+    tracing::info!(id, %sub_solver, "proposal accepted for validation");
 
-    Ok((StatusCode::CREATED, Json(CreateProposalResponse { id })))
+    Ok((StatusCode::ACCEPTED, Json(CreateProposalResponse { id })))
 }
 
 fn dto_to_interaction(dto: &InteractionDto) -> Result<Interaction, Error> {
@@ -163,6 +163,7 @@ pub async fn get_proposal(
         buy_amount: proposal.buy_amount.to_string(),
         valid_until: proposal.valid_until.to_string(),
         status: proposal.status.to_string(),
+        rejection_reason: proposal.rejection_reason,
     }))
 }
 
@@ -238,6 +239,9 @@ pub async fn cancel_proposal(
     state.store().cancel(id, signer).map_err(|e| match e {
         crate::domain::proposal::StoreError::NotFound(_) => Error::from(Kind::ProposalNotFound),
         crate::domain::proposal::StoreError::NotOwner(_, _) => Error::from(Kind::NotProposalOwner),
+        crate::domain::proposal::StoreError::StaleTransition { .. } => {
+            Error::from(Kind::ProposalNotCancellable)
+        }
     })?;
 
     tracing::info!(id, %signer, "proposal cancelled");

@@ -26,7 +26,11 @@ pub struct OrderUid(pub [u8; 56]);
 #[serde(rename_all = "camelCase")]
 #[strum(serialize_all = "camelCase")]
 pub enum ProposalStatus {
+    /// Signature verified, awaiting background validation.
+    Submitted,
     Active,
+    /// Failed background gatekeeping (e.g. insufficient escrow).
+    Rejected,
     Expired,
     Settled,
     SimFailed,
@@ -49,6 +53,9 @@ pub struct Proposal {
     pub nonce: U256,
     pub signature: Bytes,
     pub status: ProposalStatus,
+    /// Why the background validator rejected this proposal. Only ever set by
+    /// the `Submitted → Rejected` transition.
+    pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
     pub created_at: Instant,
 }
 
@@ -60,6 +67,38 @@ pub enum StoreError {
     NotFound(ProposalId),
     #[error("proposal {0} not owned by {1}")]
     NotOwner(ProposalId, Address),
+    #[error("proposal {id} is {actual}, expected {expected}")]
+    StaleTransition {
+        id: ProposalId,
+        expected: ProposalStatus,
+        actual: ProposalStatus,
+    },
+}
+
+/// Test fixture: a minimal proposal in the given status.
+#[cfg(test)]
+pub(crate) fn test_proposal(
+    order_uid: OrderUid,
+    sub_solver: Address,
+    status: ProposalStatus,
+) -> Proposal {
+    let order_uid_hash = alloy::primitives::keccak256(order_uid.0);
+    Proposal {
+        id: 0,
+        sub_solver,
+        order_uid,
+        order_uid_hash,
+        sell_amount: U256::from(1_000_000_u64),
+        buy_amount: U256::from(990_000_u64),
+        interactions: vec![],
+        interactions_hash: B256::ZERO,
+        valid_until: U256::from(u64::MAX),
+        nonce: U256::from(1_u64),
+        signature: Bytes::new(),
+        status,
+        rejection_reason: None,
+        created_at: Instant::now(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +179,9 @@ impl InMemoryProposalStore {
             .unwrap_or_default()
     }
 
-    /// List active proposals for a given sub-solver address.
+    /// List live (`Submitted` or `Active`) proposals for a given sub-solver
+    /// address. This is the owner's management view, so pending submissions
+    /// are included.
     pub fn list_by_sub_solver(&self, sub_solver: Address) -> Vec<Proposal> {
         let inner = self.inner.read().unwrap();
         inner
@@ -149,15 +190,90 @@ impl InMemoryProposalStore {
             .map(|ids| {
                 ids.iter()
                     .filter_map(|id| inner.proposals.get(id))
-                    .filter(|p| p.status == ProposalStatus::Active)
+                    .filter(|p| {
+                        matches!(p.status, ProposalStatus::Submitted | ProposalStatus::Active)
+                    })
                     .cloned()
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Cancel a proposal. Returns `Err` if not found or not owned by the given
-    /// sub-solver.
+    /// Clone out every proposal currently in one of the given statuses. Used
+    /// by the background validator to work on a snapshot without holding the
+    /// lock — one lock acquisition and one scan per tick.
+    pub fn snapshot_by_statuses(&self, statuses: &[ProposalStatus]) -> Vec<Proposal> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .proposals
+            .values()
+            .filter(|p| statuses.contains(&p.status))
+            .cloned()
+            .collect()
+    }
+
+    /// Transition a proposal from `from` to `to`, only if it is still in
+    /// `from`. A mismatch means someone else (e.g. a cancellation) won the
+    /// race — the caller's verdict is stale and must be dropped.
+    pub fn transition(
+        &self,
+        id: ProposalId,
+        from: ProposalStatus,
+        to: ProposalStatus,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.inner.write().unwrap();
+        let proposal = inner
+            .proposals
+            .get_mut(&id)
+            .ok_or(StoreError::NotFound(id))?;
+        if proposal.status != from {
+            return Err(StoreError::StaleTransition {
+                id,
+                expected: from,
+                actual: proposal.status,
+            });
+        }
+        proposal.status = to;
+        Ok(())
+    }
+
+    /// Apply a validator verdict to a `Submitted` proposal. Only the
+    /// `Rejected` outcome writes a rejection reason. Fails with
+    /// `StaleTransition` if the proposal already left `Submitted` (e.g. a
+    /// cancellation raced the validator).
+    pub fn resolve_submitted(
+        &self,
+        id: ProposalId,
+        verdict: crate::domain::validator::Verdict,
+    ) -> Result<ProposalStatus, StoreError> {
+        use crate::domain::validator::Verdict;
+
+        let mut inner = self.inner.write().unwrap();
+        let proposal = inner
+            .proposals
+            .get_mut(&id)
+            .ok_or(StoreError::NotFound(id))?;
+        if proposal.status != ProposalStatus::Submitted {
+            return Err(StoreError::StaleTransition {
+                id,
+                expected: ProposalStatus::Submitted,
+                actual: proposal.status,
+            });
+        }
+        proposal.status = match verdict {
+            Verdict::Accept => ProposalStatus::Active,
+            Verdict::Reject(reason) => {
+                proposal.rejection_reason = Some(reason);
+                ProposalStatus::Rejected
+            }
+            Verdict::SimFailed => ProposalStatus::SimFailed,
+        };
+        Ok(proposal.status)
+    }
+
+    /// Cancel a proposal. Only live proposals (`Submitted`/`Active`) can be
+    /// cancelled; returns `Err` if not found, not owned by the given
+    /// sub-solver, or already in a terminal state.
     pub fn cancel(&self, id: ProposalId, sub_solver: Address) -> Result<(), StoreError> {
         let mut inner = self.inner.write().unwrap();
         let proposal = inner
@@ -167,6 +283,16 @@ impl InMemoryProposalStore {
         if proposal.sub_solver != sub_solver {
             return Err(StoreError::NotOwner(id, sub_solver));
         }
+        if !matches!(
+            proposal.status,
+            ProposalStatus::Submitted | ProposalStatus::Active
+        ) {
+            return Err(StoreError::StaleTransition {
+                id,
+                expected: ProposalStatus::Active,
+                actual: proposal.status,
+            });
+        }
         proposal.status = ProposalStatus::Cancelled;
         Ok(())
     }
@@ -174,28 +300,10 @@ impl InMemoryProposalStore {
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*,
-        alloy::primitives::{address, keccak256},
-    };
+    use {super::*, alloy::primitives::address};
 
     fn make_proposal(order_uid: OrderUid, sub_solver: Address) -> Proposal {
-        let order_uid_hash = keccak256(order_uid.0);
-        Proposal {
-            id: 0,
-            sub_solver,
-            order_uid,
-            order_uid_hash,
-            sell_amount: U256::from(1_000_000u64),
-            buy_amount: U256::from(990_000u64),
-            interactions: vec![],
-            interactions_hash: B256::ZERO,
-            valid_until: U256::from(u64::MAX),
-            nonce: U256::from(1u64),
-            signature: Bytes::new(),
-            status: ProposalStatus::Active,
-            created_at: Instant::now(),
-        }
+        test_proposal(order_uid, sub_solver, ProposalStatus::Active)
     }
 
     fn test_order_uid() -> OrderUid {
@@ -249,6 +357,21 @@ mod tests {
     }
 
     #[test]
+    fn submitted_visible_to_owner_but_not_in_order_view() {
+        let store = InMemoryProposalStore::new();
+        let uid = test_order_uid();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(uid.clone(), solver);
+        proposal.status = ProposalStatus::Submitted;
+        store.insert(proposal);
+
+        // The owner manages pending submissions through the by-solver view…
+        assert_eq!(store.list_by_sub_solver(solver).len(), 1);
+        // …but the public per-order view only shows gatekept proposals.
+        assert!(store.list_by_order_uid(&uid).is_empty());
+    }
+
+    #[test]
     fn cancel_sets_status() {
         let store = InMemoryProposalStore::new();
         let solver = address!("0000000000000000000000000000000000000001");
@@ -269,6 +392,35 @@ mod tests {
         let id = store.insert(make_proposal(test_order_uid(), solver));
         let err = store.cancel(id, other).unwrap_err();
         assert!(matches!(err, StoreError::NotOwner(_, _)));
+    }
+
+    #[test]
+    fn cancel_terminal_state_fails() {
+        let store = InMemoryProposalStore::new();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(test_order_uid(), solver);
+        proposal.status = ProposalStatus::Settled;
+
+        let id = store.insert(proposal);
+        let err = store.cancel(id, solver).unwrap_err();
+        assert!(matches!(err, StoreError::StaleTransition { .. }));
+        assert_eq!(
+            store.get(id).unwrap().status,
+            ProposalStatus::Settled,
+            "a settled proposal must stay settled"
+        );
+    }
+
+    #[test]
+    fn cancel_submitted_proposal_succeeds() {
+        let store = InMemoryProposalStore::new();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(test_order_uid(), solver);
+        proposal.status = ProposalStatus::Submitted;
+
+        let id = store.insert(proposal);
+        store.cancel(id, solver).expect("cancel before verdict");
+        assert_eq!(store.get(id).unwrap().status, ProposalStatus::Cancelled);
     }
 
     #[test]
