@@ -4,8 +4,12 @@ use {
     super::{
         AppState,
         dto::{
-            CreateProposalRequest, CreateProposalResponse, GetProposalResponse,
-            ListProposalsResponse, ProposalMetadata, parse_hex,
+            CreateProposalRequest,
+            CreateProposalResponse,
+            GetProposalResponse,
+            ListProposalsResponse,
+            ProposalMetadata,
+            parse_hex,
         },
         error::{Error, Kind},
     },
@@ -40,9 +44,9 @@ pub async fn create_proposal(
     State(state): State<AppState>,
     Json(body): Json<CreateProposalRequest>,
 ) -> Result<impl IntoResponse, Error> {
-    // 1. Parse and validate fields. U256 amounts and signature bytes are
-    //    already deserialized by serde (dto.rs custom deserializers); only the
-    //    order UID needs domain-level validation here.
+    // 1. Parse and validate fields. U256 amounts and signature bytes are already
+    //    deserialized by serde (dto.rs custom deserializers); only the order UID
+    //    needs domain-level validation here.
     let order_uid = OrderUid::from_hex(&body.order_uid)
         .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
