@@ -82,6 +82,15 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn spawn(database_url: &str) -> Self {
+        // Background validation parked far out: several tests count exact
+        // audit rows, so ticks must not inject verdict events mid-test.
+        Self::spawn_with_validation_interval(database_url, 3600).await
+    }
+
+    pub async fn spawn_with_validation_interval(
+        database_url: &str,
+        validation_interval_secs: u64,
+    ) -> Self {
         let args = [
             "byos",
             "--public-addr",
@@ -92,6 +101,8 @@ impl TestApp {
             &TRAMPOLINE_FACTORY.to_string(),
             "--database-url",
             database_url,
+            "--validation-interval-secs",
+            &validation_interval_secs.to_string(),
         ]
         .map(String::from);
 

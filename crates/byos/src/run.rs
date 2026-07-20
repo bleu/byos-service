@@ -47,6 +47,10 @@ pub(crate) struct Args {
     /// in this one) are visible to other users via `ps`.
     #[arg(long, env)]
     database_url: DatabaseUrl,
+
+    /// Seconds between background validation ticks (expiry sweep + verdicts).
+    #[arg(long, env, default_value_t = 12)]
+    validation_interval_secs: u64,
 }
 
 /// Connection-string wrapper whose `Debug` hides the value, so the startup
@@ -115,16 +119,28 @@ async fn run_with(
     let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
     let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
     let writer = audit::spawn(pool, audit_rx);
-    let store = InMemoryProposalStore::new(audit_tx);
+    let store = std::sync::Arc::new(InMemoryProposalStore::new(audit_tx));
     store.seed_next_id(last_id);
-    let state = AppState::new(store, domain);
+    let state = AppState::new(store.clone(), domain);
+
+    // Background validator (ADR-0001, async ingestion). AcceptAll is the M1
+    // stub; COW-1162 swaps in the escrow + simulation validator.
+    let validation_loop = crate::infra::validation::spawn(
+        store,
+        crate::domain::validator::AcceptAll,
+        std::time::Duration::from_secs(args.validation_interval_secs),
+    );
 
     api::serve(args.public_addr, state, bind_tx, shutdown_rx)
         .await
         .context("public API server exited with error")?;
 
-    // The server dropped its state (and with it the audit sender) on the way
-    // out; awaiting the writer flushes everything still queued.
+    // The validation loop holds the store — and with it an audit sender — so
+    // stop it first, or the writer's channel never closes and the drain below
+    // hangs. A verdict lost mid-tick to the abort is moot: the in-memory
+    // store vanishes at shutdown anyway. Then awaiting the writer flushes
+    // everything still queued.
+    validation_loop.abort();
     writer.await.context("audit writer task panicked")
 }
 

@@ -97,10 +97,9 @@ pub async fn create_proposal(
 
     tracing::info!(%sub_solver, "proposal signature verified");
 
-    // 6. [M1 placeholder] Escrow balance check — accept unconditionally.
-    // Actual on-chain check comes in COW-1162 (proposal simulation).
-
-    // 7. Store the proposal.
+    // 6. Store as Submitted. The background validator (escrow + simulation,
+    // COW-1162) picks it up and flips it to Active or Rejected; sub-solvers
+    // poll GET /proposal/{id} for the verdict.
     let stored = crate::domain::proposal::Proposal {
         id: 0,
         sub_solver,
@@ -113,15 +112,16 @@ pub async fn create_proposal(
         valid_until,
         nonce,
         signature: Bytes::from(signature_bytes),
-        status: ProposalStatus::Active,
+        status: ProposalStatus::Submitted,
+        rejection_reason: None,
         created_at: Instant::now(),
     };
 
     let id = state.store().insert(stored);
 
-    tracing::info!(id, %sub_solver, "proposal accepted");
+    tracing::info!(id, %sub_solver, "proposal accepted for validation");
 
-    Ok((StatusCode::CREATED, Json(CreateProposalResponse { id })))
+    Ok((StatusCode::ACCEPTED, Json(CreateProposalResponse { id })))
 }
 
 fn dto_to_interaction(dto: &InteractionDto) -> Result<Interaction, Error> {
@@ -143,10 +143,16 @@ fn dto_to_interaction(dto: &InteractionDto) -> Result<Interaction, Error> {
 pub async fn get_proposal(
     State(state): State<AppState>,
     Path(id): Path<u64>,
+    headers: HeaderMap,
 ) -> Result<Json<GetProposalResponse>, Error> {
+    let reader = authenticate_reader(&headers, state.domain())?;
+
     let proposal = state
         .store()
         .get(id)
+        // Non-owners get the same 404 as a genuine miss so proposal IDs
+        // cannot be probed for existence (ADR-0011).
+        .filter(|p| p.sub_solver == reader)
         .ok_or(Error::from(Kind::ProposalNotFound))?;
 
     Ok(Json(GetProposalResponse {
@@ -157,6 +163,7 @@ pub async fn get_proposal(
         buy_amount: proposal.buy_amount.to_string(),
         valid_until: proposal.valid_until.to_string(),
         status: proposal.status.to_string(),
+        rejection_reason: proposal.rejection_reason,
     }))
 }
 
@@ -167,7 +174,10 @@ pub async fn get_proposal(
 pub async fn list_proposals(
     State(state): State<AppState>,
     Path(order_uid_hex): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ListProposalsResponse>, Error> {
+    let reader = authenticate_reader(&headers, state.domain())?;
+
     let order_uid_bytes = parse_hex(&order_uid_hex)
         .map_err(|_| Error::new(Kind::BadRequest, "invalid orderUid hex"))?;
     if order_uid_bytes.len() != 56 {
@@ -179,23 +189,30 @@ pub async fn list_proposals(
     let proposals = state.store().list_by_order_uid(&OrderUid(arr));
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals.iter().map(proposal_to_metadata).collect(),
+        proposals: proposals
+            .iter()
+            // Owner-scoped reads (ADR-0011): competitors' proposals on the
+            // same order are invisible to the caller.
+            .filter(|p| p.sub_solver == reader)
+            .map(proposal_to_metadata)
+            .collect(),
     }))
 }
 
 // ---------------------------------------------------------------------------
-// GET /proposals/by-solver/{address}
+// GET /proposals/by-solver
 // ---------------------------------------------------------------------------
 
+/// Lists the caller's own active proposals. The caller's identity comes
+/// entirely from the `X-Signature` header — there is no address parameter
+/// (ADR-0011).
 pub async fn list_proposals_by_solver(
     State(state): State<AppState>,
-    Path(address_hex): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ListProposalsResponse>, Error> {
-    let address: alloy::primitives::Address = address_hex
-        .parse()
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid address"))?;
+    let reader = authenticate_reader(&headers, state.domain())?;
 
-    let proposals = state.store().list_by_sub_solver(address);
+    let proposals = state.store().list_by_sub_solver(reader);
 
     Ok(Json(ListProposalsResponse {
         proposals: proposals.iter().map(proposal_to_metadata).collect(),
@@ -222,6 +239,9 @@ pub async fn cancel_proposal(
     state.store().cancel(id, signer).map_err(|e| match e {
         crate::domain::proposal::StoreError::NotFound(_) => Error::from(Kind::ProposalNotFound),
         crate::domain::proposal::StoreError::NotOwner(_, _) => Error::from(Kind::NotProposalOwner),
+        crate::domain::proposal::StoreError::StaleTransition { .. } => {
+            Error::from(Kind::ProposalNotCancellable)
+        }
     })?;
 
     tracing::info!(id, %signer, "proposal cancelled");
@@ -240,6 +260,18 @@ fn proposal_to_metadata(p: &crate::domain::proposal::Proposal) -> ProposalMetada
         valid_until: p.valid_until.to_string(),
         status: p.status.to_string(),
     }
+}
+
+/// Authenticates a GET request: extracts the `X-Signature` bearer token and
+/// recovers the reader's address from the `ReadAuth` EIP-712 message
+/// (ADR-0011). The returned address scopes what the caller may read.
+fn authenticate_reader(
+    headers: &HeaderMap,
+    domain: &alloy::sol_types::Eip712Domain,
+) -> Result<alloy::primitives::Address, Error> {
+    let signature = signature_from_header(headers)?;
+    eip712::recover_reader(&signature, domain)
+        .map_err(|_| Error::from(Kind::SignatureRecoveryFailed))
 }
 
 fn signature_from_header(headers: &HeaderMap) -> Result<Signature, Error> {

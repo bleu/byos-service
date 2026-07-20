@@ -34,7 +34,11 @@ impl std::fmt::Display for OrderUid {
 #[serde(rename_all = "camelCase")]
 #[strum(serialize_all = "camelCase")]
 pub enum ProposalStatus {
+    /// Signature verified, awaiting background validation.
+    Submitted,
     Active,
+    /// Failed background gatekeeping (e.g. insufficient escrow).
+    Rejected,
     Expired,
     Settled,
     SimFailed,
@@ -57,6 +61,9 @@ pub struct Proposal {
     pub nonce: U256,
     pub signature: Bytes,
     pub status: ProposalStatus,
+    /// Why the background validator rejected this proposal. Only ever set by
+    /// the `Submitted → Rejected` transition.
+    pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
     pub created_at: Instant,
 }
 
@@ -68,6 +75,38 @@ pub enum StoreError {
     NotFound(ProposalId),
     #[error("proposal {0} not owned by {1}")]
     NotOwner(ProposalId, Address),
+    #[error("proposal {id} is {actual}, expected {expected}")]
+    StaleTransition {
+        id: ProposalId,
+        expected: ProposalStatus,
+        actual: ProposalStatus,
+    },
+}
+
+/// Test fixture: a minimal proposal in the given status.
+#[cfg(test)]
+pub(crate) fn test_proposal(
+    order_uid: OrderUid,
+    sub_solver: Address,
+    status: ProposalStatus,
+) -> Proposal {
+    let order_uid_hash = alloy::primitives::keccak256(order_uid.0);
+    Proposal {
+        id: 0,
+        sub_solver,
+        order_uid,
+        order_uid_hash,
+        sell_amount: U256::from(1_000_000_u64),
+        buy_amount: U256::from(990_000_u64),
+        interactions: vec![],
+        interactions_hash: B256::ZERO,
+        valid_until: U256::from(u64::MAX),
+        nonce: U256::from(1_u64),
+        signature: Bytes::new(),
+        status,
+        rejection_reason: None,
+        created_at: Instant::now(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +213,9 @@ impl InMemoryProposalStore {
             .unwrap_or_default()
     }
 
-    /// List active proposals for a given sub-solver address.
+    /// List live (`Submitted` or `Active`) proposals for a given sub-solver
+    /// address. This is the owner's management view, so pending submissions
+    /// are included.
     pub fn list_by_sub_solver(&self, sub_solver: Address) -> Vec<Proposal> {
         let inner = self.inner.read().unwrap();
         inner
@@ -183,15 +224,131 @@ impl InMemoryProposalStore {
             .map(|ids| {
                 ids.iter()
                     .filter_map(|id| inner.proposals.get(id))
-                    .filter(|p| p.status == ProposalStatus::Active)
+                    .filter(|p| {
+                        matches!(p.status, ProposalStatus::Submitted | ProposalStatus::Active)
+                    })
                     .cloned()
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Cancel a proposal. Returns `Err` if not found or not owned by the given
-    /// sub-solver.
+    /// Clone out every proposal currently in one of the given statuses. Used
+    /// by the background validator to work on a snapshot without holding the
+    /// lock — one lock acquisition and one scan per tick.
+    pub fn snapshot_by_statuses(&self, statuses: &[ProposalStatus]) -> Vec<Proposal> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .proposals
+            .values()
+            .filter(|p| statuses.contains(&p.status))
+            .cloned()
+            .collect()
+    }
+
+    /// Transition a proposal from `from` to `to`, only if it is still in
+    /// `from`. A mismatch means someone else (e.g. a cancellation) won the
+    /// race — the caller's verdict is stale and must be dropped. A successful
+    /// transition emits a status-changed audit event.
+    pub fn transition(
+        &self,
+        id: ProposalId,
+        from: ProposalStatus,
+        to: ProposalStatus,
+    ) -> Result<(), StoreError> {
+        let (sub_solver, order_uid) = {
+            let mut inner = self.inner.write().unwrap();
+            let proposal = inner
+                .proposals
+                .get_mut(&id)
+                .ok_or(StoreError::NotFound(id))?;
+            if proposal.status != from {
+                return Err(StoreError::StaleTransition {
+                    id,
+                    expected: from,
+                    actual: proposal.status,
+                });
+            }
+            proposal.status = to;
+            (proposal.sub_solver, proposal.order_uid.clone())
+        };
+
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::StatusChanged {
+                proposal_id: id,
+                sub_solver,
+                order_uid,
+                from,
+                to,
+                rejection_reason: None,
+            },
+        });
+        Ok(())
+    }
+
+    /// Apply a validator verdict to a `Submitted` proposal. Only the
+    /// `Rejected` outcome writes a rejection reason. Fails with
+    /// `StaleTransition` if the proposal already left `Submitted` (e.g. a
+    /// cancellation raced the validator). A landed verdict emits a
+    /// status-changed audit event carrying the rejection reason, if any.
+    pub fn resolve_submitted(
+        &self,
+        id: ProposalId,
+        verdict: crate::domain::validator::Verdict,
+    ) -> Result<ProposalStatus, StoreError> {
+        use crate::domain::validator::Verdict;
+
+        let (status, sub_solver, order_uid, rejection_reason) = {
+            let mut inner = self.inner.write().unwrap();
+            let proposal = inner
+                .proposals
+                .get_mut(&id)
+                .ok_or(StoreError::NotFound(id))?;
+            if proposal.status != ProposalStatus::Submitted {
+                return Err(StoreError::StaleTransition {
+                    id,
+                    expected: ProposalStatus::Submitted,
+                    actual: proposal.status,
+                });
+            }
+            let rejection_reason = match verdict {
+                Verdict::Reject(reason) => Some(reason),
+                Verdict::Accept | Verdict::SimFailed => None,
+            };
+            proposal.status = match verdict {
+                Verdict::Accept => ProposalStatus::Active,
+                Verdict::Reject(reason) => {
+                    proposal.rejection_reason = Some(reason);
+                    ProposalStatus::Rejected
+                }
+                Verdict::SimFailed => ProposalStatus::SimFailed,
+            };
+            (
+                proposal.status,
+                proposal.sub_solver,
+                proposal.order_uid.clone(),
+                rejection_reason,
+            )
+        };
+
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::StatusChanged {
+                proposal_id: id,
+                sub_solver,
+                order_uid,
+                from: ProposalStatus::Submitted,
+                to: status,
+                rejection_reason,
+            },
+        });
+        Ok(status)
+    }
+
+    /// Cancel a proposal. Only live proposals (`Submitted`/`Active`) can be
+    /// cancelled; returns `Err` if not found, not owned by the given
+    /// sub-solver, or already in a terminal state.
     pub fn cancel(&self, id: ProposalId, sub_solver: Address) -> Result<(), StoreError> {
         let order_uid = {
             let mut inner = self.inner.write().unwrap();
@@ -201,6 +358,16 @@ impl InMemoryProposalStore {
                 .ok_or(StoreError::NotFound(id))?;
             if proposal.sub_solver != sub_solver {
                 return Err(StoreError::NotOwner(id, sub_solver));
+            }
+            if !matches!(
+                proposal.status,
+                ProposalStatus::Submitted | ProposalStatus::Active
+            ) {
+                return Err(StoreError::StaleTransition {
+                    id,
+                    expected: ProposalStatus::Active,
+                    actual: proposal.status,
+                });
             }
             proposal.status = ProposalStatus::Cancelled;
             proposal.order_uid.clone()
@@ -223,7 +390,7 @@ mod tests {
     use {
         super::*,
         crate::domain::audit::{AuditEvent, AuditKind},
-        alloy::primitives::{address, keccak256},
+        alloy::primitives::address,
         tokio::sync::mpsc,
     };
 
@@ -233,22 +400,7 @@ mod tests {
     }
 
     fn make_proposal(order_uid: OrderUid, sub_solver: Address) -> Proposal {
-        let order_uid_hash = keccak256(order_uid.0);
-        Proposal {
-            id: 0,
-            sub_solver,
-            order_uid,
-            order_uid_hash,
-            sell_amount: U256::from(1_000_000u64),
-            buy_amount: U256::from(990_000u64),
-            interactions: vec![],
-            interactions_hash: B256::ZERO,
-            valid_until: U256::from(u64::MAX),
-            nonce: U256::from(1u64),
-            signature: Bytes::new(),
-            status: ProposalStatus::Active,
-            created_at: Instant::now(),
-        }
+        test_proposal(order_uid, sub_solver, ProposalStatus::Active)
     }
 
     fn test_order_uid() -> OrderUid {
@@ -322,6 +474,21 @@ mod tests {
     }
 
     #[test]
+    fn submitted_visible_to_owner_but_not_in_order_view() {
+        let (store, _audit) = test_store();
+        let uid = test_order_uid();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(uid.clone(), solver);
+        proposal.status = ProposalStatus::Submitted;
+        store.insert(proposal);
+
+        // The owner manages pending submissions through the by-solver view…
+        assert_eq!(store.list_by_sub_solver(solver).len(), 1);
+        // …but the public per-order view only shows gatekept proposals.
+        assert!(store.list_by_order_uid(&uid).is_empty());
+    }
+
+    #[test]
     fn cancel_sets_status() {
         let (store, _audit) = test_store();
         let solver = address!("0000000000000000000000000000000000000001");
@@ -368,11 +535,108 @@ mod tests {
     }
 
     #[test]
+    fn cancel_terminal_state_fails() {
+        let (store, _audit) = test_store();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(test_order_uid(), solver);
+        proposal.status = ProposalStatus::Settled;
+
+        let id = store.insert(proposal);
+        let err = store.cancel(id, solver).unwrap_err();
+        assert!(matches!(err, StoreError::StaleTransition { .. }));
+        assert_eq!(
+            store.get(id).unwrap().status,
+            ProposalStatus::Settled,
+            "a settled proposal must stay settled"
+        );
+    }
+
+    #[test]
+    fn cancel_submitted_proposal_succeeds() {
+        let (store, _audit) = test_store();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(test_order_uid(), solver);
+        proposal.status = ProposalStatus::Submitted;
+
+        let id = store.insert(proposal);
+        store.cancel(id, solver).expect("cancel before verdict");
+        assert_eq!(store.get(id).unwrap().status, ProposalStatus::Cancelled);
+    }
+
+    #[test]
     fn cancel_nonexistent_fails() {
         let (store, _audit) = test_store();
         let solver = address!("0000000000000000000000000000000000000001");
         let err = store.cancel(999, solver).unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn resolve_submitted_emits_status_changed_event() {
+        let (store, mut audit) = test_store();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let mut proposal = make_proposal(test_order_uid(), solver);
+        proposal.status = ProposalStatus::Submitted;
+
+        let id = store.insert(proposal);
+        let _received = audit.try_recv().expect("insert event");
+
+        let reason = crate::domain::validator::RejectionReason::InsufficientEscrow;
+        store
+            .resolve_submitted(id, crate::domain::validator::Verdict::Reject(reason))
+            .expect("verdict lands");
+
+        let event = audit.try_recv().expect("verdict should emit an event");
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.event_type(), "rejected");
+        match event.kind {
+            AuditKind::StatusChanged {
+                from,
+                to,
+                rejection_reason,
+                ..
+            } => {
+                assert_eq!(from, ProposalStatus::Submitted);
+                assert_eq!(to, ProposalStatus::Rejected);
+                assert_eq!(rejection_reason, Some(reason));
+            }
+            other => panic!("expected StatusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transition_emits_status_changed_event() {
+        let (store, mut audit) = test_store();
+        let solver = address!("0000000000000000000000000000000000000001");
+
+        let id = store.insert(make_proposal(test_order_uid(), solver));
+        let _received = audit.try_recv().expect("insert event");
+
+        store
+            .transition(id, ProposalStatus::Active, ProposalStatus::Expired)
+            .expect("transition lands");
+
+        let event = audit.try_recv().expect("transition should emit an event");
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.event_type(), "expired");
+    }
+
+    #[test]
+    fn stale_transition_emits_nothing() {
+        let (store, mut audit) = test_store();
+        let solver = address!("0000000000000000000000000000000000000001");
+
+        let id = store.insert(make_proposal(test_order_uid(), solver));
+        let _received = audit.try_recv().expect("insert event");
+
+        let err = store
+            .transition(id, ProposalStatus::Submitted, ProposalStatus::Expired)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::StaleTransition { .. }));
+        assert!(
+            audit.try_recv().is_err(),
+            "a dropped transition must not leave evidence"
+        );
     }
 
     #[test]

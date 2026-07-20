@@ -4,7 +4,10 @@
 //! arrive months after a trade, so these records outlive the hot store.
 
 use {
-    super::proposal::{OrderUid, Proposal, ProposalId},
+    super::{
+        proposal::{OrderUid, Proposal, ProposalId, ProposalStatus},
+        validator::RejectionReason,
+    },
     alloy::primitives::Address,
     std::time::SystemTime,
 };
@@ -38,6 +41,17 @@ pub enum AuditKind {
         sub_solver: Address,
         order_uid: OrderUid,
     },
+    /// Background lifecycle transition (expiry sweep, validator verdict).
+    /// Body-less like `Cancelled` for the same reason.
+    StatusChanged {
+        proposal_id: ProposalId,
+        sub_solver: Address,
+        order_uid: OrderUid,
+        from: ProposalStatus,
+        to: ProposalStatus,
+        /// Set only when the validator rejected the proposal.
+        rejection_reason: Option<RejectionReason>,
+    },
 }
 
 impl AuditEvent {
@@ -46,21 +60,25 @@ impl AuditEvent {
     pub fn proposal_id(&self) -> ProposalId {
         match &self.kind {
             AuditKind::Received { proposal } => proposal.id,
-            AuditKind::Cancelled { proposal_id, .. } => *proposal_id,
+            AuditKind::Cancelled { proposal_id, .. }
+            | AuditKind::StatusChanged { proposal_id, .. } => *proposal_id,
         }
     }
 
     pub fn sub_solver(&self) -> Address {
         match &self.kind {
             AuditKind::Received { proposal } => proposal.sub_solver,
-            AuditKind::Cancelled { sub_solver, .. } => *sub_solver,
+            AuditKind::Cancelled { sub_solver, .. }
+            | AuditKind::StatusChanged { sub_solver, .. } => *sub_solver,
         }
     }
 
     pub fn order_uid(&self) -> &OrderUid {
         match &self.kind {
             AuditKind::Received { proposal } => &proposal.order_uid,
-            AuditKind::Cancelled { order_uid, .. } => order_uid,
+            AuditKind::Cancelled { order_uid, .. } | AuditKind::StatusChanged { order_uid, .. } => {
+                order_uid
+            }
         }
     }
 
@@ -71,6 +89,17 @@ impl AuditEvent {
         match self.kind {
             AuditKind::Received { .. } => "received",
             AuditKind::Cancelled { .. } => "cancelled",
+            // Named for the transition's meaning, not the raw status, so a
+            // dispute query reads as a verb history.
+            AuditKind::StatusChanged { to, .. } => match to {
+                ProposalStatus::Active => "validated",
+                ProposalStatus::Rejected => "rejected",
+                ProposalStatus::Expired => "expired",
+                ProposalStatus::SimFailed => "sim_failed",
+                ProposalStatus::Settled => "settled",
+                ProposalStatus::Cancelled => "cancelled",
+                ProposalStatus::Submitted => "resubmitted",
+            },
         }
     }
 
@@ -83,6 +112,16 @@ impl AuditEvent {
         match &self.kind {
             AuditKind::Received { proposal } => received_payload(proposal),
             AuditKind::Cancelled { .. } => serde_json::json!({}),
+            AuditKind::StatusChanged {
+                from,
+                to,
+                rejection_reason,
+                ..
+            } => serde_json::json!({
+                "from": from,
+                "to": to,
+                "rejectionReason": rejection_reason,
+            }),
         }
     }
 }
@@ -138,6 +177,7 @@ mod tests {
             nonce: U256::from(3u64),
             signature: Bytes::from(vec![0x11; 65]),
             status: ProposalStatus::Active,
+            rejection_reason: None,
             created_at: std::time::Instant::now(),
         };
         AuditEvent {
@@ -145,6 +185,19 @@ mod tests {
             kind: match kind_of {
                 "received" => AuditKind::Received {
                     proposal: Box::new(proposal),
+                },
+                "validated" | "rejected" => AuditKind::StatusChanged {
+                    proposal_id: proposal.id,
+                    sub_solver: proposal.sub_solver,
+                    order_uid: proposal.order_uid.clone(),
+                    from: crate::domain::proposal::ProposalStatus::Submitted,
+                    to: if kind_of == "validated" {
+                        crate::domain::proposal::ProposalStatus::Active
+                    } else {
+                        crate::domain::proposal::ProposalStatus::Rejected
+                    },
+                    rejection_reason: (kind_of == "rejected")
+                        .then_some(RejectionReason::InsufficientEscrow),
                 },
                 _ => AuditKind::Cancelled {
                     proposal_id: proposal.id,
@@ -155,11 +208,11 @@ mod tests {
         }
     }
 
-    /// Both variants must yield the same dispute-query keys — `received`
-    /// extracts them from the body, `cancelled` carries them explicitly.
+    /// Every variant must yield the same dispute-query keys — `received`
+    /// extracts them from the body, the body-less ones carry them explicitly.
     #[test]
     fn dispute_keys_agree_across_variants() {
-        for kind_of in ["received", "cancelled"] {
+        for kind_of in ["received", "cancelled", "validated"] {
             let event = event_for(kind_of);
             assert_eq!(event.proposal_id(), 7);
             assert_eq!(
@@ -205,5 +258,26 @@ mod tests {
         let event = event_for("cancelled");
         assert_eq!(event.event_type(), "cancelled");
         assert_eq!(event.payload(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn status_changed_payload_records_the_transition() {
+        let event = event_for("validated");
+        assert_eq!(event.event_type(), "validated");
+        assert_eq!(
+            event.payload(),
+            serde_json::json!({
+                "from": "submitted",
+                "to": "active",
+                "rejectionReason": null,
+            })
+        );
+    }
+
+    #[test]
+    fn rejected_payload_carries_the_reason() {
+        let event = event_for("rejected");
+        assert_eq!(event.event_type(), "rejected");
+        assert_eq!(event.payload()["rejectionReason"], "InsufficientEscrow");
     }
 }

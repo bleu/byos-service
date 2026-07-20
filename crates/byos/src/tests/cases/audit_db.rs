@@ -22,7 +22,7 @@ async fn audit_db_write_behind_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let id = resp.json::<serde_json::Value>().await.unwrap()["id"]
         .as_u64()
         .unwrap();
@@ -63,6 +63,36 @@ async fn audit_db_write_behind_round_trip() {
     app.stop().await;
 }
 
+/// Background validator verdicts are evidence too: with a fast tick, the
+/// AcceptAll stub flips the submitted proposal to Active and a `validated`
+/// row lands next to the `received` one.
+#[ignore]
+#[tokio::test]
+async fn audit_db_validator_verdict_leaves_evidence() {
+    let db = TestDb::create().await;
+    let app = TestApp::spawn_with_validation_interval(&db.url, 1).await;
+    let signer = PrivateKeySigner::random();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(app.url("/proposals"))
+        .json(&setup::signed_proposal_body(&signer, [0xcd; 56]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let rows = setup::wait_for_audit_rows(&db.pool().await, 2).await;
+    assert_eq!(rows[0].event_type, "received");
+    let validated = &rows[1];
+    assert_eq!(validated.event_type, "validated");
+    assert_eq!(validated.proposal_id, rows[0].proposal_id);
+    assert_eq!(validated.payload["from"], "submitted");
+    assert_eq!(validated.payload["to"], "active");
+
+    app.stop().await;
+}
+
 /// Proposal IDs must stay unique across restarts — the audit trail is the ID
 /// authority. Otherwise a `cancelled` event for id 42 could attach to the
 /// wrong `received` row months later, in a dispute.
@@ -80,7 +110,7 @@ async fn audit_db_ids_continue_across_restart() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 201);
+        assert_eq!(resp.status(), 202);
         resp.json::<serde_json::Value>().await.unwrap()["id"]
             .as_u64()
             .unwrap()
@@ -120,7 +150,7 @@ async fn audit_db_shutdown_drains_queued_events() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 201);
+        assert_eq!(resp.status(), 202);
     }
 
     app.stop().await;
@@ -158,7 +188,7 @@ async fn audit_db_writer_retries_until_database_recovers() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        201,
+        202,
         "audit outage must not block the hot path"
     );
 
