@@ -41,7 +41,7 @@ pub struct InteractionDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProposalResponse {
-    pub id: u64,
+    pub id: crate::domain::proposal::ProposalId,
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ pub struct ListProposalsResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposalMetadata {
-    pub id: u64,
+    pub id: crate::domain::proposal::ProposalId,
     pub sub_solver: Address,
     pub valid_until: String,
     pub status: String,
@@ -70,7 +70,7 @@ pub struct ProposalMetadata {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetProposalResponse {
-    pub id: u64,
+    pub id: crate::domain::proposal::ProposalId,
     pub sub_solver: Address,
     pub order_uid: String,
     pub sell_amount: String,

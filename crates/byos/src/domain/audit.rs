@@ -157,7 +157,7 @@ mod tests {
 
     fn event_for(kind_of: &str) -> AuditEvent {
         let proposal = Proposal {
-            id: 7,
+            id: ProposalId(7),
             sub_solver: address!("00000000000000000000000000000000000000aa"),
             order_uid: OrderUid([0xab; 56]),
             order_uid_hash: b256!(
@@ -214,7 +214,7 @@ mod tests {
     fn dispute_keys_agree_across_variants() {
         for kind_of in ["received", "cancelled", "validated"] {
             let event = event_for(kind_of);
-            assert_eq!(event.proposal_id(), 7);
+            assert_eq!(event.proposal_id(), ProposalId(7));
             assert_eq!(
                 event.sub_solver(),
                 address!("00000000000000000000000000000000000000aa")

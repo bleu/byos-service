@@ -28,12 +28,13 @@ pub async fn connect_and_migrate(database_url: &str) -> anyhow::Result<PgPool> {
 /// Highest proposal ID ever recorded, or 0 on a fresh trail. The audit trail
 /// is the ID authority: the in-memory counter reseeds from here at boot so
 /// IDs stay unique across restarts and evidence rows stay unambiguous.
-pub async fn max_proposal_id(pool: &PgPool) -> anyhow::Result<u64> {
+pub async fn max_proposal_id(pool: &PgPool) -> anyhow::Result<crate::domain::proposal::ProposalId> {
     let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(proposal_id), 0) FROM audit_events")
         .fetch_one(pool)
         .await
         .context("reading max proposal id from audit trail")?;
-    u64::try_from(max).context("negative proposal id in audit trail")
+    let id = u64::try_from(max).context("negative proposal id in audit trail")?;
+    Ok(crate::domain::proposal::ProposalId(id))
 }
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -62,7 +63,7 @@ async fn insert_with_retry(pool: &PgPool, event: &AuditEvent, queued: usize) {
             Err(err) => {
                 tracing::error!(
                     %err,
-                    proposal_id = event.proposal_id(),
+                    proposal_id = %event.proposal_id(),
                     event_type = event.event_type(),
                     queued,
                     backoff_ms = backoff.as_millis() as u64,
@@ -80,7 +81,7 @@ async fn insert(pool: &PgPool, event: &AuditEvent) -> Result<(), sqlx::Error> {
         "INSERT INTO audit_events (proposal_id, event_type, sub_solver, order_uid, \
          settlement_tx_hash, payload, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
-    .bind(i64::try_from(event.proposal_id()).expect("proposal id exceeds i64"))
+    .bind(i64::try_from(event.proposal_id().0).expect("proposal id exceeds i64"))
     .bind(event.event_type())
     .bind(format!("{:#x}", event.sub_solver()))
     .bind(event.order_uid().to_string())

@@ -14,8 +14,25 @@ use {
     },
 };
 
-/// Server-assigned proposal identifier.
-pub type ProposalId = u64;
+/// Server-assigned proposal identifier (newtype for type safety — a
+/// `ProposalId` cannot be accidentally confused with any other `u64`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct ProposalId(pub u64);
+
+impl std::fmt::Display for ProposalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for ProposalId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>().map(Self)
+    }
+}
 
 /// CoW Protocol order UID (56 bytes: 32-byte hash + 20-byte owner + 4-byte
 /// validTo).
@@ -123,7 +140,7 @@ pub(crate) fn test_proposal(
 ) -> Proposal {
     let order_uid_hash = alloy::primitives::keccak256(order_uid.0);
     Proposal {
-        id: 0,
+        id: ProposalId(0),
         sub_solver,
         order_uid,
         order_uid_hash,
@@ -178,7 +195,7 @@ impl InMemoryProposalStore {
     /// Resume ID assignment after `last` — used at boot to continue from the
     /// audit trail's high-water mark so restarts never reissue an ID.
     pub fn seed_next_id(&self, last: ProposalId) {
-        self.next_id.store(last + 1, Ordering::Relaxed);
+        self.next_id.store(last.0 + 1, Ordering::Relaxed);
     }
 
     /// The audit channel is unbounded, so a send only fails if the writer
@@ -186,7 +203,7 @@ impl InMemoryProposalStore {
     fn emit(&self, event: audit::AuditEvent) {
         if let Err(err) = self.audit.send(event) {
             tracing::error!(
-                proposal_id = err.0.proposal_id(),
+                proposal_id = %err.0.proposal_id(),
                 "audit writer gone; evidence event dropped"
             );
         }
@@ -195,7 +212,7 @@ impl InMemoryProposalStore {
     /// Insert a validated proposal. The `id` field on the input is ignored —
     /// the store assigns a fresh one and returns it.
     pub fn insert(&self, mut proposal: Proposal) -> ProposalId {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = ProposalId(self.next_id.fetch_add(1, Ordering::Relaxed));
         proposal.id = id;
 
         {
@@ -468,7 +485,7 @@ mod tests {
         let p = make_proposal(test_order_uid(), solver);
 
         let id = store.insert(p);
-        assert!(id > 0);
+        assert!(id.0 > 0);
 
         let fetched = store.get(id).expect("should exist");
         assert_eq!(fetched.id, id);
@@ -478,7 +495,7 @@ mod tests {
     #[test]
     fn get_nonexistent_returns_none() {
         let (store, _audit) = test_store();
-        assert!(store.get(999).is_none());
+        assert!(store.get(ProposalId(999)).is_none());
     }
 
     #[test]
@@ -601,7 +618,7 @@ mod tests {
     fn cancel_nonexistent_fails() {
         let (store, _audit) = test_store();
         let solver = SOLVER_A;
-        let err = store.cancel(999, solver).unwrap_err();
+        let err = store.cancel(ProposalId(999), solver).unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
     }
 

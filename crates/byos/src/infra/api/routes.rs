@@ -9,7 +9,7 @@ use {
         },
         error::{Error, Kind},
     },
-    crate::domain::proposal::{OrderUid, ProposalStatus},
+    crate::domain::proposal::{OrderUid, ProposalId, ProposalStatus},
     alloy::primitives::{Bytes, Signature, U256, keccak256},
     axum::{
         Json,
@@ -89,7 +89,7 @@ pub async fn create_proposal(
     // COW-1162) picks it up and flips it to Active or Rejected; sub-solvers
     // poll GET /proposal/{id} for the verdict.
     let stored = crate::domain::proposal::Proposal {
-        id: 0,
+        id: ProposalId(0),
         sub_solver,
         order_uid,
         order_uid_hash,
@@ -107,7 +107,7 @@ pub async fn create_proposal(
 
     let id = state.store().insert(stored);
 
-    tracing::info!(id, %sub_solver, "proposal accepted for validation");
+    tracing::info!(%id, %sub_solver, "proposal accepted for validation");
 
     Ok((StatusCode::ACCEPTED, Json(CreateProposalResponse { id })))
 }
@@ -118,7 +118,7 @@ pub async fn create_proposal(
 
 pub async fn get_proposal(
     State(state): State<AppState>,
-    Path(id): Path<u64>,
+    Path(id): Path<ProposalId>,
     headers: HeaderMap,
 ) -> Result<Json<GetProposalResponse>, Error> {
     let reader = authenticate_reader(&headers, state.domain())?;
@@ -196,14 +196,14 @@ pub async fn list_proposals_by_solver(
 
 pub async fn cancel_proposal(
     State(state): State<AppState>,
-    Path(id): Path<u64>,
+    Path(id): Path<ProposalId>,
     headers: HeaderMap,
 ) -> Result<StatusCode, Error> {
     // 1. Extract signature from X-Signature header.
     let signature = signature_from_header(&headers)?;
 
     // 2. Recover signer from CancelProposal EIP-712 message.
-    let signer = eip712::recover_canceller(&signature, state.domain(), U256::from(id))
+    let signer = eip712::recover_canceller(&signature, state.domain(), U256::from(id.0))
         .map_err(|_| Error::from(Kind::SignatureRecoveryFailed))?;
 
     // 3. Cancel the proposal (store checks ownership).
@@ -215,7 +215,7 @@ pub async fn cancel_proposal(
         }
     })?;
 
-    tracing::info!(id, %signer, "proposal cancelled");
+    tracing::info!(%id, %signer, "proposal cancelled");
 
     Ok(StatusCode::NO_CONTENT)
 }

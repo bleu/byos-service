@@ -61,6 +61,16 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Typed error for the public API server (ADR-0007: library functions avoid
+/// `anyhow::Result`; callers can match on failure modes).
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError {
+    #[error("failed to bind listener")]
+    Bind(#[source] std::io::Error),
+    #[error("server error")]
+    Serve(#[source] std::io::Error),
+}
+
 /// Bind, serve, and wait for graceful shutdown (ctrl-c, or `shutdown_rx` so
 /// tests can stop an in-process instance).
 pub async fn serve(
@@ -68,11 +78,13 @@ pub async fn serve(
     state: AppState,
     bind_tx: Option<oneshot::Sender<SocketAddr>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
-) -> anyhow::Result<()> {
+) -> Result<(), ServeError> {
     let app = router(state);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(ServeError::Bind)?;
+    let local_addr = listener.local_addr().map_err(ServeError::Bind)?;
 
     tracing::info!(port = local_addr.port(), "serving public API");
 
@@ -82,7 +94,8 @@ pub async fn serve(
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_rx))
-        .await?;
+        .await
+        .map_err(ServeError::Serve)?;
 
     Ok(())
 }
@@ -283,7 +296,7 @@ mod tests {
         assert_eq!(json["status"], "submitted");
     }
 
-    fn insert_proposal(state: &AppState, sub_solver: Address) -> u64 {
+    fn insert_proposal(state: &AppState, sub_solver: Address) -> crate::domain::proposal::ProposalId {
         state.store().insert(test_proposal(
             OrderUid([0xaa; 56]),
             sub_solver,
@@ -332,7 +345,7 @@ mod tests {
         let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["id"], id);
+        assert_eq!(json["id"], id.0);
         assert_eq!(json["sellAmount"], "1000000");
         assert_eq!(json["buyAmount"], "990000");
     }

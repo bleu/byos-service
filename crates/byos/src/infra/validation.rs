@@ -64,8 +64,8 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalVa
     for proposal in live {
         if proposal.valid_until < alloy::primitives::U256::from(now) {
             match store.transition(proposal.id, proposal.status, ProposalStatus::Expired) {
-                Ok(()) => tracing::info!(id = proposal.id, "proposal expired"),
-                Err(e) => tracing::debug!(id = proposal.id, %e, "stale expiry dropped"),
+                Ok(()) => tracing::info!(id = %proposal.id, "proposal expired"),
+                Err(e) => tracing::debug!(id = %proposal.id, %e, "stale expiry dropped"),
             }
         } else if proposal.status == ProposalStatus::Submitted {
             to_validate.push(proposal);
@@ -75,8 +75,8 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalVa
     for proposal in to_validate {
         let verdict = validator.validate(&proposal).await;
         match store.resolve_submitted(proposal.id, verdict) {
-            Ok(status) => tracing::info!(id = proposal.id, %status, "proposal validated"),
-            Err(e) => tracing::debug!(id = proposal.id, %e, "stale verdict dropped"),
+            Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
+            Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
         }
     }
 }
