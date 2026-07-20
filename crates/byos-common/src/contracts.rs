@@ -20,7 +20,7 @@ pub use cowprotocol_primitives::contracts::{
 };
 
 sol!(
-    #[sol(rpc)]
+    #[sol(rpc, all_derives)]
     Trampoline,
     "abis/Trampoline.json"
 );

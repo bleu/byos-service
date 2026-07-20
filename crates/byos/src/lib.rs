@@ -1,7 +1,15 @@
-//! The BYOS service: the public proposal API and the solver-engine half of a
-//! CoW driver + solver pair, in a single process with two listeners
-//! (ADR-0001). Internal layout will follow the `domain/` / `infra/` split
-//! described in ADR-0005.
+//! BYOS service: public proposal API + CoW solver engine.
 //!
-//! Not implemented yet — this crate is a skeleton. Start with
-//! `docs/adr/README.md`.
+//! Two listeners share an in-memory proposal store (ADR-0001):
+//! - **Public** (`/proposals`): sub-solver-facing CRUD
+//! - **Internal** (`/solve`): driver-facing solver engine (COW-1163)
+//!
+//! Internal split: `domain/` is pure logic, `infra/` owns IO (ADR-0005).
+
+pub mod domain;
+pub mod infra;
+mod run;
+#[cfg(test)]
+mod tests;
+
+pub use run::{run, run_until, start};

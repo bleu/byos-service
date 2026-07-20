@@ -34,14 +34,25 @@ alloy = { version = "1", default-features = false, features = [
 ] }
 anyhow = "1"
 axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 humantime-serde = "1"
-reqwest = "0.12"
+parking_lot = "0.12"
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Capped at 3.14: serde_with 3.15 removed the `serde_with::serde` re-export
 # that `app-data` (via the pinned cowprotocol/services rev above) still uses.
 serde_with = "~3.14"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "migrate",
+    "macros",
+    "json",
+    "chrono",
+] }
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
