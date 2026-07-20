@@ -199,14 +199,15 @@ impl InMemoryProposalStore {
             .unwrap_or_default()
     }
 
-    /// Clone out every proposal currently in the given status. Used by the
-    /// background validator to work on a snapshot without holding the lock.
-    pub fn snapshot_by_status(&self, status: ProposalStatus) -> Vec<Proposal> {
+    /// Clone out every proposal currently in one of the given statuses. Used
+    /// by the background validator to work on a snapshot without holding the
+    /// lock — one lock acquisition and one scan per tick.
+    pub fn snapshot_by_statuses(&self, statuses: &[ProposalStatus]) -> Vec<Proposal> {
         let inner = self.inner.read().unwrap();
         inner
             .proposals
             .values()
-            .filter(|p| p.status == status)
+            .filter(|p| statuses.contains(&p.status))
             .cloned()
             .collect()
     }

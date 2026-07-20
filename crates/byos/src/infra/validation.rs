@@ -53,22 +53,26 @@ pub fn spawn(
 /// when we stop showing/simulating a proposal — the chain enforces the real
 /// deadline.
 ///
-/// Works on snapshots; each write is a compare-and-swap transition, so a
-/// proposal cancelled mid-validation keeps its cancellation (the stale
-/// verdict is dropped).
+/// Works on a single snapshot of all live proposals (one lock acquisition,
+/// one scan); each write is a compare-and-swap transition, so a proposal
+/// cancelled mid-validation keeps its cancellation (the stale verdict is
+/// dropped).
 pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalValidator, now: u64) {
-    for status in [ProposalStatus::Submitted, ProposalStatus::Active] {
-        for proposal in store.snapshot_by_status(status) {
-            if proposal.valid_until < alloy::primitives::U256::from(now) {
-                match store.transition(proposal.id, status, ProposalStatus::Expired) {
-                    Ok(()) => tracing::info!(id = proposal.id, "proposal expired"),
-                    Err(e) => tracing::debug!(id = proposal.id, %e, "stale expiry dropped"),
-                }
+    let live = store.snapshot_by_statuses(&[ProposalStatus::Submitted, ProposalStatus::Active]);
+
+    let mut to_validate = Vec::new();
+    for proposal in live {
+        if proposal.valid_until < alloy::primitives::U256::from(now) {
+            match store.transition(proposal.id, proposal.status, ProposalStatus::Expired) {
+                Ok(()) => tracing::info!(id = proposal.id, "proposal expired"),
+                Err(e) => tracing::debug!(id = proposal.id, %e, "stale expiry dropped"),
             }
+        } else if proposal.status == ProposalStatus::Submitted {
+            to_validate.push(proposal);
         }
     }
 
-    for proposal in store.snapshot_by_status(ProposalStatus::Submitted) {
+    for proposal in to_validate {
         let verdict = validator.validate(&proposal).await;
         match store.resolve_submitted(proposal.id, verdict) {
             Ok(status) => tracing::info!(id = proposal.id, %status, "proposal validated"),

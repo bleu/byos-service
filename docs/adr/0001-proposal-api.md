@@ -67,7 +67,7 @@ The public per-order view lists `Active` proposals only — a `Submitted` propos
 A proposal enters as `Submitted` (signature verified, awaiting validation) and moves through enforced transitions — every status write is a compare-and-swap against the expected current state, so concurrent events (a cancellation racing the validator) cannot resurrect or overwrite each other; the stale write is dropped:
 
 - `Submitted → Active` — background validation passed.
-- `Submitted → Rejected` — failed a gatekeeping rule (e.g. insufficient escrow). Carries a machine-readable `rejectionReason` (PascalCase enum per [ADR-0007](0007-error-handling.md)), exposed on `GET /proposal/{id}`.
+- `Submitted → Rejected` — failed a gatekeeping rule (e.g. insufficient escrow, order no longer in the orderbook). Carries a machine-readable `rejectionReason` (PascalCase enum per [ADR-0007](0007-error-handling.md)), exposed on `GET /proposal/{id}`.
 - `Submitted | Active → SimFailed` — simulation reverted.
 - `Submitted | Active → Expired` — `valid_until` passed.
 - `Submitted | Active → Cancelled` — signed `DELETE`. Only live proposals can be cancelled; a `DELETE` against a terminal state is a `409`.
@@ -85,8 +85,6 @@ Proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signatu
 `POST /proposals` does exactly two things inline: parse the request and recover the signer (`ecrecover`). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature failures still reject synchronously with a 4xx.
 
 All on-chain work — the escrow balance check and the simulation `eth_call` — runs in a background validator loop, off the request path. Each tick (configurable interval, default 12s, one mainnet block; block-driven ticking is a decision for the simulation work, COW-1162) sweeps expired proposals, then judges every `Submitted` proposal and flips it to `Active`, `Rejected`, or `SimFailed`. Sub-solvers poll `GET /proposal/{id}` for the verdict; a rejection carries its typed reason.
-
-The request API stays clean and light — no RPC call and no simulation ever blocks an HTTP response. The cost is verdict latency: feedback arrives within one tick interval rather than in the response body. That was the original reason for rejecting async ingestion, and it is acceptable because sub-solvers already run continuous polling loops — a one-interval delay costs them nothing they were not already paying — and because the validator and the re-simulation loop ([ADR-0002](0002-solver-engine.md)) become one code path instead of an inline pipeline plus a separate loop.
 
 ### Rate limiting: two-layer, escrow-tiered
 
