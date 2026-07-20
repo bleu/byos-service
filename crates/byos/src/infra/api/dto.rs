@@ -17,17 +17,22 @@ pub struct CreateProposalRequest {
     /// 56-byte order UID as a hex string (with or without `0x` prefix).
     pub order_uid: String,
     /// Sell amount as a decimal string.
-    pub sell_amount: String,
+    #[serde(with = "decimal_u256")]
+    pub sell_amount: U256,
     /// Buy amount as a decimal string.
-    pub buy_amount: String,
+    #[serde(with = "decimal_u256")]
+    pub buy_amount: U256,
     /// Sub-solver's interactions.
     pub interactions: Vec<InteractionDto>,
     /// Unix timestamp after which the proposal expires.
-    pub valid_until: String,
+    #[serde(with = "decimal_u256")]
+    pub valid_until: U256,
     /// Sub-solver-chosen nonce (no ordering or uniqueness enforcement).
-    pub nonce: String,
+    #[serde(with = "decimal_u256")]
+    pub nonce: U256,
     /// EIP-712 signature as a hex string (65 bytes).
-    pub signature: String,
+    #[serde(with = "hex_bytes")]
+    pub signature: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -110,6 +115,42 @@ impl TryFrom<&InteractionDto> for byos_common::contracts::Interaction {
             value,
             callData: call_data.into(),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serde modules
+// ---------------------------------------------------------------------------
+
+/// Deserialize a decimal string into `U256`. The `serialize` half exists
+/// for symmetry but is currently only consumed by deserialization.
+pub(crate) mod decimal_u256 {
+    use {alloy::primitives::U256, serde::Deserialize};
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<U256, D::Error> {
+        let s = String::deserialize(d)?;
+        U256::from_str_radix(&s, 10).map_err(serde::de::Error::custom)
+    }
+
+    #[expect(dead_code)]
+    pub fn serialize<S: serde::Serializer>(v: &U256, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+}
+
+/// Deserialize a hex string (with optional `0x` prefix) into `Vec<u8>`.
+pub(crate) mod hex_bytes {
+    use serde::Deserialize;
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        alloy::hex::decode(s).map_err(serde::de::Error::custom)
+    }
+
+    #[expect(dead_code)]
+    pub fn serialize<S: serde::Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&alloy::hex::encode_prefixed(v))
     }
 }
 
