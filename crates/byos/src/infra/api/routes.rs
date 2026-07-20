@@ -4,14 +4,8 @@ use {
     super::{
         AppState,
         dto::{
-            CreateProposalRequest,
-            CreateProposalResponse,
-            GetProposalResponse,
-            InteractionDto,
-            ListProposalsResponse,
-            ProposalMetadata,
-            parse_hex,
-            parse_u256,
+            CreateProposalRequest, CreateProposalResponse, GetProposalResponse,
+            ListProposalsResponse, ProposalMetadata, parse_hex, parse_u256,
         },
         error::{Error, Kind},
     },
@@ -47,14 +41,8 @@ pub async fn create_proposal(
     Json(body): Json<CreateProposalRequest>,
 ) -> Result<impl IntoResponse, Error> {
     // 1. Parse and validate fields.
-    let order_uid_bytes = parse_hex(&body.order_uid)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid orderUid hex"))?;
-    if order_uid_bytes.len() != 56 {
-        return Err(Error::new(Kind::BadRequest, "orderUid must be 56 bytes"));
-    }
-    let mut order_uid_arr = [0u8; 56];
-    order_uid_arr.copy_from_slice(&order_uid_bytes);
-    let order_uid = OrderUid(order_uid_arr);
+    let order_uid = OrderUid::from_hex(&body.order_uid)
+        .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
     let sell_amount = parse_u256(&body.sell_amount)
         .map_err(|_| Error::new(Kind::BadRequest, "invalid sellAmount"))?;
@@ -74,7 +62,7 @@ pub async fn create_proposal(
     let interactions: Vec<Interaction> = body
         .interactions
         .iter()
-        .map(dto_to_interaction)
+        .map(Interaction::try_from)
         .collect::<Result<_, _>>()?;
 
     // 3. Compute hashes.
@@ -124,18 +112,6 @@ pub async fn create_proposal(
     Ok((StatusCode::ACCEPTED, Json(CreateProposalResponse { id })))
 }
 
-fn dto_to_interaction(dto: &InteractionDto) -> Result<Interaction, Error> {
-    let value = parse_u256(&dto.value)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid interaction value"))?;
-    let call_data = parse_hex(&dto.call_data)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid interaction callData"))?;
-    Ok(Interaction {
-        target: dto.target,
-        value,
-        callData: call_data.into(),
-    })
-}
-
 // ---------------------------------------------------------------------------
 // GET /proposal/{id}
 // ---------------------------------------------------------------------------
@@ -178,15 +154,10 @@ pub async fn list_proposals(
 ) -> Result<Json<ListProposalsResponse>, Error> {
     let reader = authenticate_reader(&headers, state.domain())?;
 
-    let order_uid_bytes = parse_hex(&order_uid_hex)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid orderUid hex"))?;
-    if order_uid_bytes.len() != 56 {
-        return Err(Error::new(Kind::BadRequest, "orderUid must be 56 bytes"));
-    }
-    let mut arr = [0u8; 56];
-    arr.copy_from_slice(&order_uid_bytes);
+    let order_uid = OrderUid::from_hex(&order_uid_hex)
+        .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
-    let proposals = state.store().list_by_order_uid(&OrderUid(arr));
+    let proposals = state.store().list_by_order_uid(&order_uid);
 
     Ok(Json(ListProposalsResponse {
         proposals: proposals
@@ -194,7 +165,7 @@ pub async fn list_proposals(
             // Owner-scoped reads (ADR-0011): competitors' proposals on the
             // same order are invisible to the caller.
             .filter(|p| p.sub_solver == reader)
-            .map(proposal_to_metadata)
+            .map(ProposalMetadata::from)
             .collect(),
     }))
 }
@@ -215,7 +186,7 @@ pub async fn list_proposals_by_solver(
     let proposals = state.store().list_by_sub_solver(reader);
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals.iter().map(proposal_to_metadata).collect(),
+        proposals: proposals.iter().map(ProposalMetadata::from).collect(),
     }))
 }
 
@@ -252,15 +223,6 @@ pub async fn cancel_proposal(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn proposal_to_metadata(p: &crate::domain::proposal::Proposal) -> ProposalMetadata {
-    ProposalMetadata {
-        id: p.id,
-        sub_solver: p.sub_solver,
-        valid_until: p.valid_until.to_string(),
-        status: p.status.to_string(),
-    }
-}
 
 /// Authenticates a GET request: extracts the `X-Signature` bearer token and
 /// recovers the reader's address from the `ReadAuth` EIP-712 message

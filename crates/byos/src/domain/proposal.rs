@@ -29,6 +29,37 @@ impl std::fmt::Display for OrderUid {
     }
 }
 
+/// Parse error for `OrderUid::from_hex`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OrderUidError {
+    #[error("invalid hex: {0}")]
+    Hex(#[from] alloy::hex::FromHexError),
+    #[error("expected 56 bytes, got {0}")]
+    Length(usize),
+}
+
+impl OrderUid {
+    /// Parse a `0x`-prefixed (or bare) hex string into an `OrderUid`.
+    pub fn from_hex(s: &str) -> Result<Self, OrderUidError> {
+        let bytes = alloy::hex::decode(s.strip_prefix("0x").unwrap_or(s))?;
+        if bytes.len() != 56 {
+            return Err(OrderUidError::Length(bytes.len()));
+        }
+        let mut arr = [0u8; 56];
+        arr.copy_from_slice(&bytes);
+        Ok(Self(arr))
+    }
+}
+
+impl std::str::FromStr for OrderUid {
+    type Err = OrderUidError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
+    }
+}
+
 /// Lifecycle state of a proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, strum::Display)]
 #[serde(rename_all = "camelCase")]
@@ -394,6 +425,9 @@ mod tests {
         tokio::sync::mpsc,
     };
 
+    const SOLVER_A: Address = address!("0000000000000000000000000000000000000001");
+    const SOLVER_B: Address = address!("0000000000000000000000000000000000000002");
+
     fn test_store() -> (InMemoryProposalStore, mpsc::UnboundedReceiver<AuditEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (InMemoryProposalStore::new(tx), rx)
@@ -410,7 +444,7 @@ mod tests {
     #[test]
     fn insert_emits_received_audit_event() {
         let (store, mut audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         let id = store.insert(make_proposal(test_order_uid(), solver));
 
@@ -430,7 +464,7 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let (store, _audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
         let p = make_proposal(test_order_uid(), solver);
 
         let id = store.insert(p);
@@ -451,7 +485,7 @@ mod tests {
     fn list_by_order_uid() {
         let (store, _audit) = test_store();
         let uid = test_order_uid();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         store.insert(make_proposal(uid.clone(), solver));
         store.insert(make_proposal(uid.clone(), solver));
@@ -463,8 +497,8 @@ mod tests {
     #[test]
     fn list_by_sub_solver() {
         let (store, _audit) = test_store();
-        let solver_a = address!("0000000000000000000000000000000000000001");
-        let solver_b = address!("0000000000000000000000000000000000000002");
+        let solver_a = SOLVER_A;
+        let solver_b = SOLVER_B;
 
         store.insert(make_proposal(test_order_uid(), solver_a));
         store.insert(make_proposal(OrderUid([0xbb; 56]), solver_b));
@@ -477,7 +511,7 @@ mod tests {
     fn submitted_visible_to_owner_but_not_in_order_view() {
         let (store, _audit) = test_store();
         let uid = test_order_uid();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
         let mut proposal = make_proposal(uid.clone(), solver);
         proposal.status = ProposalStatus::Submitted;
         store.insert(proposal);
@@ -491,7 +525,7 @@ mod tests {
     #[test]
     fn cancel_sets_status() {
         let (store, _audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         let id = store.insert(make_proposal(test_order_uid(), solver));
         store.cancel(id, solver).expect("should succeed");
@@ -503,7 +537,7 @@ mod tests {
     #[test]
     fn cancel_emits_cancelled_audit_event() {
         let (store, mut audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         let id = store.insert(make_proposal(test_order_uid(), solver));
         let _received = audit.try_recv().expect("insert event");
@@ -520,8 +554,8 @@ mod tests {
     #[test]
     fn cancel_wrong_owner_fails() {
         let (store, mut audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
-        let other = address!("0000000000000000000000000000000000000002");
+        let solver = SOLVER_A;
+        let other = SOLVER_B;
 
         let id = store.insert(make_proposal(test_order_uid(), solver));
         let _received = audit.try_recv().expect("insert event");
@@ -537,7 +571,7 @@ mod tests {
     #[test]
     fn cancel_terminal_state_fails() {
         let (store, _audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
         let mut proposal = make_proposal(test_order_uid(), solver);
         proposal.status = ProposalStatus::Settled;
 
@@ -554,7 +588,7 @@ mod tests {
     #[test]
     fn cancel_submitted_proposal_succeeds() {
         let (store, _audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
         let mut proposal = make_proposal(test_order_uid(), solver);
         proposal.status = ProposalStatus::Submitted;
 
@@ -566,7 +600,7 @@ mod tests {
     #[test]
     fn cancel_nonexistent_fails() {
         let (store, _audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
         let err = store.cancel(999, solver).unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
     }
@@ -574,7 +608,7 @@ mod tests {
     #[test]
     fn resolve_submitted_emits_status_changed_event() {
         let (store, mut audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
         let mut proposal = make_proposal(test_order_uid(), solver);
         proposal.status = ProposalStatus::Submitted;
 
@@ -607,7 +641,7 @@ mod tests {
     #[test]
     fn transition_emits_status_changed_event() {
         let (store, mut audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         let id = store.insert(make_proposal(test_order_uid(), solver));
         let _received = audit.try_recv().expect("insert event");
@@ -624,7 +658,7 @@ mod tests {
     #[test]
     fn stale_transition_emits_nothing() {
         let (store, mut audit) = test_store();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         let id = store.insert(make_proposal(test_order_uid(), solver));
         let _received = audit.try_recv().expect("insert event");
@@ -643,7 +677,7 @@ mod tests {
     fn cancelled_proposals_excluded_from_list() {
         let (store, _audit) = test_store();
         let uid = test_order_uid();
-        let solver = address!("0000000000000000000000000000000000000001");
+        let solver = SOLVER_A;
 
         let id = store.insert(make_proposal(uid.clone(), solver));
         store.cancel(id, solver).unwrap();

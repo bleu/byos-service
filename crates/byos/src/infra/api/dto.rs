@@ -2,6 +2,7 @@
 //! decimal strings for 256-bit amounts (ADR-0005).
 
 use {
+    super::error::{Error, Kind},
     alloy::primitives::{Address, U256},
     serde::{Deserialize, Serialize},
 };
@@ -79,6 +80,37 @@ pub struct GetProposalResponse {
     /// Only present when `status` is `rejected`. PascalCase enum (ADR-0007).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
+}
+
+// ---------------------------------------------------------------------------
+// Trait impls
+// ---------------------------------------------------------------------------
+
+impl From<&crate::domain::proposal::Proposal> for ProposalMetadata {
+    fn from(p: &crate::domain::proposal::Proposal) -> Self {
+        Self {
+            id: p.id,
+            sub_solver: p.sub_solver,
+            valid_until: p.valid_until.to_string(),
+            status: p.status.to_string(),
+        }
+    }
+}
+
+impl TryFrom<&InteractionDto> for byos_common::contracts::Interaction {
+    type Error = Error;
+
+    fn try_from(dto: &InteractionDto) -> Result<Self, Self::Error> {
+        let value = parse_u256(&dto.value)
+            .map_err(|_| Error::new(Kind::BadRequest, "invalid interaction value"))?;
+        let call_data = parse_hex(&dto.call_data)
+            .map_err(|_| Error::new(Kind::BadRequest, "invalid interaction callData"))?;
+        Ok(Self {
+            target: dto.target,
+            value,
+            callData: call_data.into(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
