@@ -7,7 +7,10 @@ use {
     serde::Serialize,
     std::{
         collections::HashMap,
-        sync::{Arc, atomic::{AtomicU64, Ordering}},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{Instant, SystemTime},
     },
 };
@@ -382,7 +385,12 @@ impl InMemoryProposalStore {
                     }
                     Verdict::SimFailed => ProposalStatus::SimFailed,
                 };
-                (p.status, p.sub_solver, p.order_uid.clone(), rejection_reason)
+                (
+                    p.status,
+                    p.sub_solver,
+                    p.order_uid.clone(),
+                    rejection_reason,
+                )
             };
             if is_terminal(status) {
                 prune_indexes(&mut inner, id, &order_uid, sub_solver);

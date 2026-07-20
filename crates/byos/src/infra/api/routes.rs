@@ -177,7 +177,10 @@ pub async fn list_proposals_by_solver(
     let proposals = state.store().list_by_sub_solver(reader);
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals.iter().map(|p| ProposalMetadata::from(p.as_ref())).collect(),
+        proposals: proposals
+            .iter()
+            .map(|p| ProposalMetadata::from(p.as_ref()))
+            .collect(),
     }))
 }
 

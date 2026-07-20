@@ -296,7 +296,10 @@ mod tests {
         assert_eq!(json["status"], "submitted");
     }
 
-    fn insert_proposal(state: &AppState, sub_solver: Address) -> crate::domain::proposal::ProposalId {
+    fn insert_proposal(
+        state: &AppState,
+        sub_solver: Address,
+    ) -> crate::domain::proposal::ProposalId {
         state.store().insert(test_proposal(
             OrderUid([0xaa; 56]),
             sub_solver,
