@@ -57,7 +57,7 @@ Our `/solve` and `/notify` DTOs target the solver-engine API at offline-mode's `
 - **Adopting offline-mode's Jest harness for our tests.** Its helpers (quote/sign/submit/wait) are proven, but rejected — a second language and toolchain for e2e when the `e2e` crate must exist anyway for tier 1; we port the helper logic to Rust in `e2e/src/setup/`.
 - **Per-test service-restart isolation (offline-mode's model).** Genuine isolation, rejected as default — tens of seconds per test; snapshot-revert covers chain state, which is what our assertions read.
 - **Deploying Escrow/Trampoline at test-setup time instead of baking state.** No state regeneration or RPC key needed. Rejected as the default — per-run deploy cost, addresses vary across runs, and tier 1/tier 2 fixtures drift apart. Kept as the fallback while the contracts are still churning pre-audit.
-- **Docker-compose test stack for tier 1.** Services needs it for Postgres; our audit trail is SQLite/flat-file and the chain is anvil with a preloaded state file, so in-process orchestration suffices.
+- **Docker-compose test stack for tier 1.** Services needs it for Postgres; the chain is anvil with a preloaded state file, so in-process orchestration suffices for chain-facing tests. Partially superseded by COW-1172: the audit trail is Postgres (not SQLite/flat-file as originally assumed), so service-level tests (`just test-db`, `#[ignore]`d — the service will not boot without the database) need the repo's compose Postgres — one long-lived container with a uniquely-named database per test, not a per-test stack. Tier-1 e2e remains docker-free apart from that same Postgres dependency, which the service now requires to boot at all.
 
 ## Consequences
 

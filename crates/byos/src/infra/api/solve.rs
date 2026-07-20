@@ -81,7 +81,6 @@ fn build_solution(
     let trampoline_interactions = encode_trampoline_interactions(
         trampoline,
         order.sell_token,
-        proposal.sell_amount,
         &byos_common::contracts::Proposal {
             orderUidHash: proposal.order_uid_hash,
             sellAmount: proposal.sell_amount,
