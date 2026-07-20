@@ -3,13 +3,11 @@
 use {
     super::audit,
     alloy::primitives::{Address, B256, Bytes, U256},
+    parking_lot::RwLock,
     serde::Serialize,
     std::{
         collections::HashMap,
-        sync::{
-            RwLock,
-            atomic::{AtomicU64, Ordering},
-        },
+        sync::{Arc, atomic::{AtomicU64, Ordering}},
         time::{Instant, SystemTime},
     },
 };
@@ -162,13 +160,15 @@ pub(crate) fn test_proposal(
 // ---------------------------------------------------------------------------
 
 struct Inner {
-    proposals: HashMap<ProposalId, Proposal>,
+    proposals: HashMap<ProposalId, Arc<Proposal>>,
     by_order_uid: HashMap<OrderUid, Vec<ProposalId>>,
     by_sub_solver: HashMap<Address, Vec<ProposalId>>,
 }
 
-/// In-memory proposal store backed by `RwLock<Inner>`. A single lock wraps all
-/// maps to avoid ordering issues between primary and secondary indexes.
+/// In-memory proposal store backed by `parking_lot::RwLock<Inner>`. Uses
+/// `parking_lot` instead of `std::sync::RwLock` for two reasons: (1) no lock
+/// poisoning, so a panic on one request cannot cascade to every subsequent
+/// request; (2) faster for the microsecond-scale critical sections here.
 ///
 /// Every mutation emits an [`audit::AuditEvent`] — auditing happens by
 /// construction, so future mutation sites (driver-reported outcomes, async
@@ -215,39 +215,38 @@ impl InMemoryProposalStore {
         let id = ProposalId(self.next_id.fetch_add(1, Ordering::Relaxed));
         proposal.id = id;
 
+        let arc = Arc::new(proposal);
         {
-            let mut inner = self.inner.write().unwrap();
+            let mut inner = self.inner.write();
             inner
                 .by_order_uid
-                .entry(proposal.order_uid.clone())
+                .entry(arc.order_uid.clone())
                 .or_default()
                 .push(id);
             inner
                 .by_sub_solver
-                .entry(proposal.sub_solver)
+                .entry(arc.sub_solver)
                 .or_default()
                 .push(id);
-            inner.proposals.insert(id, proposal.clone());
+            inner.proposals.insert(id, Arc::clone(&arc));
         }
 
         self.emit(audit::AuditEvent {
             occurred_at: SystemTime::now(),
-            kind: audit::AuditKind::Received {
-                proposal: Box::new(proposal),
-            },
+            kind: audit::AuditKind::Received { proposal: arc },
         });
         id
     }
 
     /// Look up a single proposal by ID.
-    pub fn get(&self, id: ProposalId) -> Option<Proposal> {
-        let inner = self.inner.read().unwrap();
+    pub fn get(&self, id: ProposalId) -> Option<Arc<Proposal>> {
+        let inner = self.inner.read();
         inner.proposals.get(&id).cloned()
     }
 
     /// List active proposals for a given order UID.
-    pub fn list_by_order_uid(&self, order_uid: &OrderUid) -> Vec<Proposal> {
-        let inner = self.inner.read().unwrap();
+    pub fn list_by_order_uid(&self, order_uid: &OrderUid) -> Vec<Arc<Proposal>> {
+        let inner = self.inner.read();
         inner
             .by_order_uid
             .get(order_uid)
@@ -264,8 +263,8 @@ impl InMemoryProposalStore {
     /// List live (`Submitted` or `Active`) proposals for a given sub-solver
     /// address. This is the owner's management view, so pending submissions
     /// are included.
-    pub fn list_by_sub_solver(&self, sub_solver: Address) -> Vec<Proposal> {
-        let inner = self.inner.read().unwrap();
+    pub fn list_by_sub_solver(&self, sub_solver: Address) -> Vec<Arc<Proposal>> {
+        let inner = self.inner.read();
         inner
             .by_sub_solver
             .get(&sub_solver)
@@ -283,9 +282,10 @@ impl InMemoryProposalStore {
 
     /// Clone out every proposal currently in one of the given statuses. Used
     /// by the background validator to work on a snapshot without holding the
-    /// lock — one lock acquisition and one scan per tick.
-    pub fn snapshot_by_statuses(&self, statuses: &[ProposalStatus]) -> Vec<Proposal> {
-        let inner = self.inner.read().unwrap();
+    /// lock — one lock acquisition and one scan per tick. Returns `Arc`
+    /// pointers (cheap clone) so each read is a pointer bump, not a deep copy.
+    pub fn snapshot_by_statuses(&self, statuses: &[ProposalStatus]) -> Vec<Arc<Proposal>> {
+        let inner = self.inner.read();
         inner
             .proposals
             .values()
@@ -297,7 +297,8 @@ impl InMemoryProposalStore {
     /// Transition a proposal from `from` to `to`, only if it is still in
     /// `from`. A mismatch means someone else (e.g. a cancellation) won the
     /// race — the caller's verdict is stale and must be dropped. A successful
-    /// transition emits a status-changed audit event.
+    /// transition emits a status-changed audit event and prunes the proposal
+    /// from secondary indexes if it reached a terminal state.
     pub fn transition(
         &self,
         id: ProposalId,
@@ -305,20 +306,27 @@ impl InMemoryProposalStore {
         to: ProposalStatus,
     ) -> Result<(), StoreError> {
         let (sub_solver, order_uid) = {
-            let mut inner = self.inner.write().unwrap();
-            let proposal = inner
-                .proposals
-                .get_mut(&id)
-                .ok_or(StoreError::NotFound(id))?;
-            if proposal.status != from {
-                return Err(StoreError::StaleTransition {
-                    id,
-                    expected: from,
-                    actual: proposal.status,
-                });
+            let mut inner = self.inner.write();
+            let (sub_solver, order_uid) = {
+                let proposal = inner
+                    .proposals
+                    .get_mut(&id)
+                    .ok_or(StoreError::NotFound(id))?;
+                if proposal.status != from {
+                    return Err(StoreError::StaleTransition {
+                        id,
+                        expected: from,
+                        actual: proposal.status,
+                    });
+                }
+                let p = Arc::make_mut(proposal);
+                p.status = to;
+                (p.sub_solver, p.order_uid.clone())
+            };
+            if is_terminal(to) {
+                prune_indexes(&mut inner, id, &order_uid, sub_solver);
             }
-            proposal.status = to;
-            (proposal.sub_solver, proposal.order_uid.clone())
+            (sub_solver, order_uid)
         };
 
         self.emit(audit::AuditEvent {
@@ -348,36 +356,38 @@ impl InMemoryProposalStore {
         use crate::domain::validator::Verdict;
 
         let (status, sub_solver, order_uid, rejection_reason) = {
-            let mut inner = self.inner.write().unwrap();
-            let proposal = inner
-                .proposals
-                .get_mut(&id)
-                .ok_or(StoreError::NotFound(id))?;
-            if proposal.status != ProposalStatus::Submitted {
-                return Err(StoreError::StaleTransition {
-                    id,
-                    expected: ProposalStatus::Submitted,
-                    actual: proposal.status,
-                });
-            }
-            let rejection_reason = match verdict {
-                Verdict::Reject(reason) => Some(reason),
-                Verdict::Accept | Verdict::SimFailed => None,
-            };
-            proposal.status = match verdict {
-                Verdict::Accept => ProposalStatus::Active,
-                Verdict::Reject(reason) => {
-                    proposal.rejection_reason = Some(reason);
-                    ProposalStatus::Rejected
+            let mut inner = self.inner.write();
+            let (status, sub_solver, order_uid, rejection_reason) = {
+                let proposal = inner
+                    .proposals
+                    .get_mut(&id)
+                    .ok_or(StoreError::NotFound(id))?;
+                if proposal.status != ProposalStatus::Submitted {
+                    return Err(StoreError::StaleTransition {
+                        id,
+                        expected: ProposalStatus::Submitted,
+                        actual: proposal.status,
+                    });
                 }
-                Verdict::SimFailed => ProposalStatus::SimFailed,
+                let rejection_reason = match verdict {
+                    Verdict::Reject(reason) => Some(reason),
+                    Verdict::Accept | Verdict::SimFailed => None,
+                };
+                let p = Arc::make_mut(proposal);
+                p.status = match verdict {
+                    Verdict::Accept => ProposalStatus::Active,
+                    Verdict::Reject(reason) => {
+                        p.rejection_reason = Some(reason);
+                        ProposalStatus::Rejected
+                    }
+                    Verdict::SimFailed => ProposalStatus::SimFailed,
+                };
+                (p.status, p.sub_solver, p.order_uid.clone(), rejection_reason)
             };
-            (
-                proposal.status,
-                proposal.sub_solver,
-                proposal.order_uid.clone(),
-                rejection_reason,
-            )
+            if is_terminal(status) {
+                prune_indexes(&mut inner, id, &order_uid, sub_solver);
+            }
+            (status, sub_solver, order_uid, rejection_reason)
         };
 
         self.emit(audit::AuditEvent {
@@ -399,26 +409,31 @@ impl InMemoryProposalStore {
     /// sub-solver, or already in a terminal state.
     pub fn cancel(&self, id: ProposalId, sub_solver: Address) -> Result<(), StoreError> {
         let order_uid = {
-            let mut inner = self.inner.write().unwrap();
-            let proposal = inner
-                .proposals
-                .get_mut(&id)
-                .ok_or(StoreError::NotFound(id))?;
-            if proposal.sub_solver != sub_solver {
-                return Err(StoreError::NotOwner(id, sub_solver));
-            }
-            if !matches!(
-                proposal.status,
-                ProposalStatus::Submitted | ProposalStatus::Active
-            ) {
-                return Err(StoreError::StaleTransition {
-                    id,
-                    expected: ProposalStatus::Active,
-                    actual: proposal.status,
-                });
-            }
-            proposal.status = ProposalStatus::Cancelled;
-            proposal.order_uid.clone()
+            let mut inner = self.inner.write();
+            let order_uid = {
+                let proposal = inner
+                    .proposals
+                    .get_mut(&id)
+                    .ok_or(StoreError::NotFound(id))?;
+                if proposal.sub_solver != sub_solver {
+                    return Err(StoreError::NotOwner(id, sub_solver));
+                }
+                if !matches!(
+                    proposal.status,
+                    ProposalStatus::Submitted | ProposalStatus::Active
+                ) {
+                    return Err(StoreError::StaleTransition {
+                        id,
+                        expected: ProposalStatus::Active,
+                        actual: proposal.status,
+                    });
+                }
+                let p = Arc::make_mut(proposal);
+                p.status = ProposalStatus::Cancelled;
+                p.order_uid.clone()
+            };
+            prune_indexes(&mut inner, id, &order_uid, sub_solver);
+            order_uid
         };
 
         self.emit(audit::AuditEvent {
@@ -430,6 +445,28 @@ impl InMemoryProposalStore {
             },
         });
         Ok(())
+    }
+}
+
+fn is_terminal(status: ProposalStatus) -> bool {
+    matches!(
+        status,
+        ProposalStatus::Cancelled
+            | ProposalStatus::Expired
+            | ProposalStatus::Settled
+            | ProposalStatus::SimFailed
+            | ProposalStatus::Rejected
+    )
+}
+
+/// Remove a proposal ID from the secondary indexes. Called inside a
+/// write-locked block after the proposal reaches a terminal state.
+fn prune_indexes(inner: &mut Inner, id: ProposalId, order_uid: &OrderUid, sub_solver: Address) {
+    if let Some(ids) = inner.by_order_uid.get_mut(order_uid) {
+        ids.retain(|&pid| pid != id);
+    }
+    if let Some(ids) = inner.by_sub_solver.get_mut(&sub_solver) {
+        ids.retain(|&pid| pid != id);
     }
 }
 

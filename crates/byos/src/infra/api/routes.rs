@@ -165,7 +165,7 @@ pub async fn list_proposals(
             // Owner-scoped reads (ADR-0011): competitors' proposals on the
             // same order are invisible to the caller.
             .filter(|p| p.sub_solver == reader)
-            .map(ProposalMetadata::from)
+            .map(|p| ProposalMetadata::from(p.as_ref()))
             .collect(),
     }))
 }
@@ -186,7 +186,7 @@ pub async fn list_proposals_by_solver(
     let proposals = state.store().list_by_sub_solver(reader);
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals.iter().map(ProposalMetadata::from).collect(),
+        proposals: proposals.iter().map(|p| ProposalMetadata::from(p.as_ref())).collect(),
     }))
 }
 

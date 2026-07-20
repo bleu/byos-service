@@ -1163,6 +1163,7 @@ dependencies = [
  "byos-common",
  "chrono",
  "clap",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
