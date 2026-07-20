@@ -7,15 +7,13 @@ use {
             CreateProposalRequest,
             CreateProposalResponse,
             GetProposalResponse,
-            InteractionDto,
             ListProposalsResponse,
             ProposalMetadata,
             parse_hex,
-            parse_u256,
         },
         error::{Error, Kind},
     },
-    crate::domain::proposal::{OrderUid, ProposalStatus},
+    crate::domain::proposal::{OrderUid, ProposalId, ProposalStatus},
     alloy::primitives::{Bytes, Signature, U256, keccak256},
     axum::{
         Json,
@@ -46,35 +44,20 @@ pub async fn create_proposal(
     State(state): State<AppState>,
     Json(body): Json<CreateProposalRequest>,
 ) -> Result<impl IntoResponse, Error> {
-    // 1. Parse and validate fields.
-    let order_uid_bytes = parse_hex(&body.order_uid)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid orderUid hex"))?;
-    if order_uid_bytes.len() != 56 {
-        return Err(Error::new(Kind::BadRequest, "orderUid must be 56 bytes"));
-    }
-    let mut order_uid_arr = [0u8; 56];
-    order_uid_arr.copy_from_slice(&order_uid_bytes);
-    let order_uid = OrderUid(order_uid_arr);
+    // 1. Parse and validate fields. U256 amounts and signature bytes are already
+    //    deserialized by serde (dto.rs custom deserializers); only the order UID
+    //    needs domain-level validation here.
+    let order_uid = OrderUid::from_hex(&body.order_uid)
+        .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
-    let sell_amount = parse_u256(&body.sell_amount)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid sellAmount"))?;
-    let buy_amount = parse_u256(&body.buy_amount)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid buyAmount"))?;
-    let valid_until = parse_u256(&body.valid_until)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid validUntil"))?;
-    let nonce =
-        parse_u256(&body.nonce).map_err(|_| Error::new(Kind::BadRequest, "invalid nonce"))?;
-
-    let signature_bytes = parse_hex(&body.signature)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid signature hex"))?;
-    let signature = Signature::try_from(signature_bytes.as_slice())
+    let signature = Signature::try_from(body.signature.as_slice())
         .map_err(|_| Error::from(Kind::InvalidSignature))?;
 
     // 2. Convert interactions.
     let interactions: Vec<Interaction> = body
         .interactions
         .iter()
-        .map(dto_to_interaction)
+        .map(Interaction::try_from)
         .collect::<Result<_, _>>()?;
 
     // 3. Compute hashes.
@@ -84,10 +67,10 @@ pub async fn create_proposal(
     // 4. Build the on-chain Proposal struct for signature recovery.
     let proposal = Proposal {
         orderUidHash: order_uid_hash,
-        sellAmount: sell_amount,
-        buyAmount: buy_amount,
-        validUntil: valid_until,
-        nonce,
+        sellAmount: body.sell_amount,
+        buyAmount: body.buy_amount,
+        validUntil: body.valid_until,
+        nonce: body.nonce,
     };
 
     // 5. Recover the sub-solver address.
@@ -101,17 +84,17 @@ pub async fn create_proposal(
     // COW-1162) picks it up and flips it to Active or Rejected; sub-solvers
     // poll GET /proposal/{id} for the verdict.
     let stored = crate::domain::proposal::Proposal {
-        id: 0,
+        id: ProposalId(0),
         sub_solver,
         order_uid,
         order_uid_hash,
-        sell_amount,
-        buy_amount,
+        sell_amount: body.sell_amount,
+        buy_amount: body.buy_amount,
         interactions,
         interactions_hash,
-        valid_until,
-        nonce,
-        signature: Bytes::from(signature_bytes),
+        valid_until: body.valid_until,
+        nonce: body.nonce,
+        signature: Bytes::from(body.signature),
         status: ProposalStatus::Submitted,
         rejection_reason: None,
         created_at: Instant::now(),
@@ -119,21 +102,9 @@ pub async fn create_proposal(
 
     let id = state.store().insert(stored);
 
-    tracing::info!(id, %sub_solver, "proposal accepted for validation");
+    tracing::info!(%id, %sub_solver, "proposal accepted for validation");
 
     Ok((StatusCode::ACCEPTED, Json(CreateProposalResponse { id })))
-}
-
-fn dto_to_interaction(dto: &InteractionDto) -> Result<Interaction, Error> {
-    let value = parse_u256(&dto.value)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid interaction value"))?;
-    let call_data = parse_hex(&dto.call_data)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid interaction callData"))?;
-    Ok(Interaction {
-        target: dto.target,
-        value,
-        callData: call_data.into(),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +113,7 @@ fn dto_to_interaction(dto: &InteractionDto) -> Result<Interaction, Error> {
 
 pub async fn get_proposal(
     State(state): State<AppState>,
-    Path(id): Path<u64>,
+    Path(id): Path<ProposalId>,
     headers: HeaderMap,
 ) -> Result<Json<GetProposalResponse>, Error> {
     let reader = authenticate_reader(&headers, state.domain())?;
@@ -178,15 +149,10 @@ pub async fn list_proposals(
 ) -> Result<Json<ListProposalsResponse>, Error> {
     let reader = authenticate_reader(&headers, state.domain())?;
 
-    let order_uid_bytes = parse_hex(&order_uid_hex)
-        .map_err(|_| Error::new(Kind::BadRequest, "invalid orderUid hex"))?;
-    if order_uid_bytes.len() != 56 {
-        return Err(Error::new(Kind::BadRequest, "orderUid must be 56 bytes"));
-    }
-    let mut arr = [0u8; 56];
-    arr.copy_from_slice(&order_uid_bytes);
+    let order_uid = OrderUid::from_hex(&order_uid_hex)
+        .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
-    let proposals = state.store().list_by_order_uid(&OrderUid(arr));
+    let proposals = state.store().list_by_order_uid(&order_uid);
 
     Ok(Json(ListProposalsResponse {
         proposals: proposals
@@ -194,7 +160,7 @@ pub async fn list_proposals(
             // Owner-scoped reads (ADR-0011): competitors' proposals on the
             // same order are invisible to the caller.
             .filter(|p| p.sub_solver == reader)
-            .map(proposal_to_metadata)
+            .map(|p| ProposalMetadata::from(p.as_ref()))
             .collect(),
     }))
 }
@@ -215,7 +181,10 @@ pub async fn list_proposals_by_solver(
     let proposals = state.store().list_by_sub_solver(reader);
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals.iter().map(proposal_to_metadata).collect(),
+        proposals: proposals
+            .iter()
+            .map(|p| ProposalMetadata::from(p.as_ref()))
+            .collect(),
     }))
 }
 
@@ -225,14 +194,14 @@ pub async fn list_proposals_by_solver(
 
 pub async fn cancel_proposal(
     State(state): State<AppState>,
-    Path(id): Path<u64>,
+    Path(id): Path<ProposalId>,
     headers: HeaderMap,
 ) -> Result<StatusCode, Error> {
     // 1. Extract signature from X-Signature header.
     let signature = signature_from_header(&headers)?;
 
     // 2. Recover signer from CancelProposal EIP-712 message.
-    let signer = eip712::recover_canceller(&signature, state.domain(), U256::from(id))
+    let signer = eip712::recover_canceller(&signature, state.domain(), U256::from(id.0))
         .map_err(|_| Error::from(Kind::SignatureRecoveryFailed))?;
 
     // 3. Cancel the proposal (store checks ownership).
@@ -244,7 +213,7 @@ pub async fn cancel_proposal(
         }
     })?;
 
-    tracing::info!(id, %signer, "proposal cancelled");
+    tracing::info!(%id, %signer, "proposal cancelled");
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -252,15 +221,6 @@ pub async fn cancel_proposal(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn proposal_to_metadata(p: &crate::domain::proposal::Proposal) -> ProposalMetadata {
-    ProposalMetadata {
-        id: p.id,
-        sub_solver: p.sub_solver,
-        valid_until: p.valid_until.to_string(),
-        status: p.status.to_string(),
-    }
-}
 
 /// Authenticates a GET request: extracts the `X-Signature` bearer token and
 /// recovers the reader's address from the `ReadAuth` EIP-712 message

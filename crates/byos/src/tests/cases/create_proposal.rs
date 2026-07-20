@@ -125,9 +125,10 @@ async fn rejects_non_decimal_sell_amount() {
     let mut body = ProposalFixture::default().signed_body(&signer).await;
     body["sellAmount"] = "0x1000".into();
 
-    let (status, err) = app.post_json("/proposals", &body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(err["kind"], "BadRequest");
+    let (status, _err) = app.post_json("/proposals", &body).await;
+    // Serde rejects the non-decimal string at deserialization time; axum
+    // returns 422 Unprocessable Entity for malformed request bodies.
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     app.stop().await;
 }

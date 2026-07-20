@@ -9,7 +9,7 @@ use {
         validator::RejectionReason,
     },
     alloy::primitives::Address,
-    std::time::SystemTime,
+    std::{sync::Arc, time::SystemTime},
 };
 
 /// Emitting half of the write-behind channel. Unbounded: emission must never
@@ -30,9 +30,9 @@ pub struct AuditEvent {
 #[derive(Clone, Debug)]
 pub enum AuditKind {
     /// Proposal accepted into the store; carries the full body as evidence
-    /// (the dispute-query keys come out of it). Boxed: the body dwarfs the
-    /// other variants.
-    Received { proposal: Box<Proposal> },
+    /// (the dispute-query keys come out of it). `Arc`-shared with the store
+    /// so `insert()` pays a pointer bump, not a deep clone.
+    Received { proposal: Arc<Proposal> },
     /// Cancelled by its sub-solver via a signed `CancelProposal`. Carries the
     /// dispute-query keys explicitly — the body already sits in the
     /// `received` row.
@@ -157,7 +157,7 @@ mod tests {
 
     fn event_for(kind_of: &str) -> AuditEvent {
         let proposal = Proposal {
-            id: 7,
+            id: ProposalId(7),
             sub_solver: address!("00000000000000000000000000000000000000aa"),
             order_uid: OrderUid([0xab; 56]),
             order_uid_hash: b256!(
@@ -184,7 +184,7 @@ mod tests {
             occurred_at: SystemTime::now(),
             kind: match kind_of {
                 "received" => AuditKind::Received {
-                    proposal: Box::new(proposal),
+                    proposal: Arc::new(proposal),
                 },
                 "validated" | "rejected" => AuditKind::StatusChanged {
                     proposal_id: proposal.id,
@@ -214,7 +214,7 @@ mod tests {
     fn dispute_keys_agree_across_variants() {
         for kind_of in ["received", "cancelled", "validated"] {
             let event = event_for(kind_of);
-            assert_eq!(event.proposal_id(), 7);
+            assert_eq!(event.proposal_id(), ProposalId(7));
             assert_eq!(
                 event.sub_solver(),
                 address!("00000000000000000000000000000000000000aa")
