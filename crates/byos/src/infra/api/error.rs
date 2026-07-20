@@ -14,6 +14,7 @@ pub enum Kind {
     ProposalExpired,
     ProposalNotFound,
     NotProposalOwner,
+    ProposalNotCancellable,
     BadRequest,
     Internal,
 }
@@ -32,6 +33,7 @@ impl IntoResponse for Error {
             Kind::ProposalExpired | Kind::BadRequest => StatusCode::BAD_REQUEST,
             Kind::InsufficientEscrow | Kind::NotProposalOwner => StatusCode::FORBIDDEN,
             Kind::ProposalNotFound => StatusCode::NOT_FOUND,
+            Kind::ProposalNotCancellable => StatusCode::CONFLICT,
             Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -56,6 +58,7 @@ impl From<Kind> for Error {
             Kind::ProposalExpired => "Proposal validUntil is in the past",
             Kind::ProposalNotFound => "Proposal not found",
             Kind::NotProposalOwner => "Signer does not match proposal sub-solver",
+            Kind::ProposalNotCancellable => "Proposal is already in a terminal state",
             Kind::BadRequest => "Malformed request",
             Kind::Internal => "Internal error",
         };

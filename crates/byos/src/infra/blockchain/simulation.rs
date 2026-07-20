@@ -17,7 +17,7 @@ use {
         primitives::{Address, Bytes, U256},
         sol_types::SolCall,
     },
-    byos_common::contracts::{IERC20, IGPv2Settlement, Interaction, Proposal},
+    byos_common::contracts::{ERC20, GPv2InteractionData, GPv2Settlement, Interaction, Proposal},
 };
 
 /// Parameters needed to build a simulation `settle()` call.
@@ -38,13 +38,12 @@ pub struct SimulationParams {
 /// The `transferFrom` in slot 0 is a simulation workaround — in production,
 /// GPv2 pulls user tokens via vault relayer during trade processing.
 pub fn build_simulation_calldata(params: &SimulationParams) -> Bytes {
-    // Intra-interaction 0: transferFrom(user, settlement, sellAmount) —
-    // simulation-only, pulls user tokens into settlement.
-    let transfer_from = Interaction {
+    // Intra-interaction 0: transfer(settlement, sellAmount) —
+    // simulation-only, moves user tokens into settlement.
+    let transfer_from = GPv2InteractionData {
         target: params.sell_token,
         value: U256::ZERO,
-        callData: IERC20::transferFromCall {
-            from: params.user,
+        callData: ERC20::transferCall {
             to: params.settlement,
             amount: params.proposal.sellAmount,
         }
@@ -56,24 +55,29 @@ pub fn build_simulation_calldata(params: &SimulationParams) -> Bytes {
     let trampoline_interactions = byos_common::trampoline::encode_trampoline_interactions(
         params.trampoline,
         params.sell_token,
-        params.proposal.sellAmount,
         &params.proposal,
         &params.interactions,
         params.buy_token,
         &params.signature,
     );
 
-    let intra: Vec<Interaction> = std::iter::once(transfer_from)
-        .chain(trampoline_interactions)
+    let to_gpv2 = |i: Interaction| GPv2InteractionData {
+        target: i.target,
+        value: i.value,
+        callData: i.callData,
+    };
+
+    let intra: Vec<GPv2InteractionData> = std::iter::once(transfer_from)
+        .chain(trampoline_interactions.into_iter().map(to_gpv2))
         .collect();
 
     // Build settle() call with empty tokens/prices/trades and our
     // intra-interactions.
-    let calldata = IGPv2Settlement::settleCall {
-        _tokens: vec![],
-        _clearingPrices: vec![],
-        _trades: vec![],
-        _interactions: [vec![], intra, vec![]],
+    let calldata = GPv2Settlement::settleCall {
+        tokens: vec![],
+        clearingPrices: vec![],
+        trades: vec![],
+        interactions: [vec![], intra, vec![]],
     }
     .abi_encode();
 
