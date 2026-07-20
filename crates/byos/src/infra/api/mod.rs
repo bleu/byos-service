@@ -61,11 +61,13 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Bind, serve, and wait for graceful shutdown.
+/// Bind, serve, and wait for graceful shutdown (ctrl-c, or `shutdown_rx` so
+/// tests can stop an in-process instance).
 pub async fn serve(
     addr: SocketAddr,
     state: AppState,
     bind_tx: Option<oneshot::Sender<SocketAddr>>,
+    shutdown_rx: Option<oneshot::Receiver<()>>,
 ) -> anyhow::Result<()> {
     let app = router(state);
 
@@ -79,16 +81,26 @@ pub async fn serve(
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_rx: Option<oneshot::Receiver<()>>) {
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
-    ctrl_c.await.ok();
+    match shutdown_rx {
+        Some(rx) => {
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = rx => {}
+            }
+        }
+        None => {
+            ctrl_c.await.ok();
+        }
+    }
     tracing::info!("shutdown signal received");
 }
 
@@ -116,8 +128,12 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        // These router tests assert on HTTP behaviour, not audit evidence.
+        // Leaking the receiver keeps the channel open so emits stay silent.
+        let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(audit_rx);
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        AppState::new(Arc::new(InMemoryProposalStore::new()), domain)
+        AppState::new(Arc::new(InMemoryProposalStore::new(audit_tx)), domain)
     }
 
     /// Builds a valid signed POST /proposals JSON body and returns it along
@@ -209,7 +225,7 @@ mod tests {
         use alloy::sol_types::SolStruct;
 
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        let state = AppState::new(Arc::new(InMemoryProposalStore::new()), domain.clone());
+        let state = test_state();
         let app = router(state);
 
         let signer = PrivateKeySigner::random();

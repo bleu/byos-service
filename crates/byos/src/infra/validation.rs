@@ -100,9 +100,20 @@ mod tests {
         )
     }
 
+    /// Store plus its audit receiver — kept alive so emits don't log errors;
+    /// these tests assert on statuses, not evidence.
+    fn test_store() -> (
+        InMemoryProposalStore,
+        tokio::sync::mpsc::UnboundedReceiver<crate::domain::audit::AuditEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (InMemoryProposalStore::new(tx), rx)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn spawned_loop_validates_on_its_interval() {
-        let store = std::sync::Arc::new(InMemoryProposalStore::new());
+        let (store, _audit) = test_store();
+        let store = std::sync::Arc::new(store);
         let id = store.insert(submitted_proposal());
 
         let _loop = spawn(store.clone(), AcceptAll, std::time::Duration::from_secs(12));
@@ -116,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_flips_submitted_to_active_with_accept_all() {
-        let store = InMemoryProposalStore::new();
+        let (store, _audit) = test_store();
         let id = store.insert(submitted_proposal());
 
         run_tick(&store, &AcceptAll, 0).await;
@@ -137,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_marks_sim_failed_proposals() {
-        let store = InMemoryProposalStore::new();
+        let (store, _audit) = test_store();
         let id = store.insert(submitted_proposal());
 
         run_tick(&store, &FailAll, 0).await;
@@ -149,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_during_validation_wins_over_the_verdict() {
-        let store = InMemoryProposalStore::new();
+        let (store, _audit) = test_store();
         let proposal = submitted_proposal();
         let sub_solver = proposal.sub_solver;
         let id = store.insert(proposal);
@@ -170,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_expires_active_proposals_past_valid_until() {
-        let store = InMemoryProposalStore::new();
+        let (store, _audit) = test_store();
         let mut proposal = submitted_proposal();
         proposal.status = ProposalStatus::Active;
         proposal.valid_until = U256::from(1_000_u64);
@@ -186,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_expires_submitted_proposals_instead_of_validating_them() {
-        let store = InMemoryProposalStore::new();
+        let (store, _audit) = test_store();
         let mut proposal = submitted_proposal();
         proposal.valid_until = U256::from(1_000_u64);
         let id = store.insert(proposal);

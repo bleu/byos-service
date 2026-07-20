@@ -115,9 +115,17 @@ Separate listeners prevent public traffic from starving `/solve` of resources. T
 ### Persistence: in-memory hot path + async write-behind
 
 - **Hot store** — in-memory (`RwLock<HashMap>` or equivalent). Serves `/solve` with no DB query on the auction-critical path. Rebuilt from fresh submissions on restart.
-- **Audit trail** — proposals are asynchronously persisted (SQLite WAL, flat log, or equivalent) for dispute evidence. [ADR-0003](0003-slash-attribution-flow.md) requires BYOS to map settlements back to proposals for Track A debits and Track B passthrough. Track B claims arrive up to 3 months later — the audit log must retain proposals for at least that window.
+- **Audit trail** — proposal lifecycle events are asynchronously persisted to Postgres (via sqlx) as an append-only `audit_events` log, for dispute evidence. [ADR-0003](0003-slash-attribution-flow.md) requires BYOS to map settlements back to proposals for Track A debits and Track B passthrough. Track B claims arrive up to 3 months later — the audit log must retain proposals for at least that window.
 
 Hot proposals live minutes; audit records live months. Separating the two avoids conflating their lifecycle requirements.
+
+The write-behind path (COW-1172) supersedes this ADR's original "SQLite WAL, flat log, or equivalent" suggestion with Postgres: a managed instance gives the evidence off-host durability (a lost audit log means absorbing Track B costs), and it aligns with the M2 plan to move the store to Postgres. Mechanics:
+
+- **Events, not snapshots.** One row per lifecycle event (`received` with the full signed proposal body, `cancelled`, and later driver-reported outcomes per [ADR-0010](0010-settlement-outcome-source.md)). Disputes care about what happened when; the writer never does read-modify-write.
+- **Emission is in the store, by construction.** Every mutation of the in-memory store emits an event into an unbounded channel; a writer task drains it into Postgres. New mutation paths cannot forget to leave evidence.
+- **Fail-fast boot, retry-forever runtime, drain on shutdown.** The service refuses to start without a reachable database and applied migrations; a runtime outage queues events in memory while the writer retries with backoff; graceful shutdown flushes the queue before exit.
+- **The audit trail is the proposal-ID authority.** The in-memory ID counter reseeds from `max(proposal_id)` at boot, so restarts never reissue an ID and evidence rows stay unambiguous.
+- **No deletion path.** The 3-month window is a floor, not a TTL. Any future retention policy must also cover dispute-processing time beyond claim arrival, and is deliberately left to a separate decision.
 
 ## Alternatives considered
 
