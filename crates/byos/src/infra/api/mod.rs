@@ -55,7 +55,7 @@ fn router(state: AppState) -> Router {
         .route("/proposal/{id}", delete(routes::cancel_proposal))
         .route("/proposals/{order_uid}", get(routes::list_proposals))
         .route(
-            "/proposals/by-solver/{address}",
+            "/proposals/by-solver",
             get(routes::list_proposals_by_solver),
         )
         .with_state(state)
@@ -96,8 +96,9 @@ async fn shutdown_signal() {
 mod tests {
     use {
         super::*,
+        crate::domain::proposal::{OrderUid, ProposalStatus, test_proposal},
         alloy::{
-            primitives::{Address, U256, keccak256},
+            primitives::{Address, U256, address, keccak256},
             signers::local::PrivateKeySigner,
         },
         axum::{
@@ -114,18 +115,13 @@ mod tests {
         Address::repeat_byte(0x42)
     }
 
-    fn test_app() -> Router {
+    fn test_state() -> AppState {
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        let state = AppState::new(Arc::new(InMemoryProposalStore::new()), domain);
-        router(state)
+        AppState::new(Arc::new(InMemoryProposalStore::new()), domain)
     }
 
     /// Builds a valid signed POST /proposals JSON body and returns it along
     /// with the signer's address.
-    async fn signed_proposal_body() -> (serde_json::Value, Address) {
-        signed_proposal_body_for(&PrivateKeySigner::random()).await
-    }
-
     async fn signed_proposal_body_for(signer: &PrivateKeySigner) -> (serde_json::Value, Address) {
         let domain = eip712::byos_domain(CHAIN_ID, factory());
 
@@ -176,18 +172,6 @@ mod tests {
             .unwrap()
     }
 
-    async fn get_proposal(app: &Router, id: u64) -> axum::response::Response {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/proposal/{id}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
     struct RejectAll;
 
     impl crate::domain::validator::ProposalValidator for RejectAll {
@@ -203,17 +187,19 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_proposal_exposes_reason_on_the_wire() {
-        let domain = eip712::byos_domain(CHAIN_ID, factory());
-        let state = AppState::new(Arc::new(InMemoryProposalStore::new()), domain);
+        let state = test_state();
         let app = router(state.clone());
-        let (body, _) = signed_proposal_body().await;
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
 
         let response = post_proposal(&app, &body).await;
         let id = json_body(response).await["id"].as_u64().expect("id");
 
         crate::infra::validation::run_tick(state.store(), &RejectAll, 0).await;
 
-        let body = json_body(get_proposal(&app, id).await).await;
+        let header = read_auth_header(&signer, &state).await;
+        let (status, body) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "rejected");
         assert_eq!(body["rejectionReason"], "InsufficientEscrow");
     }
@@ -266,15 +252,139 @@ mod tests {
 
     #[tokio::test]
     async fn post_returns_202_and_proposal_is_submitted() {
-        let app = test_app();
-        let (body, _) = signed_proposal_body().await;
+        let state = test_state();
+        let app = router(state.clone());
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
 
         let response = post_proposal(&app, &body).await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let id = json_body(response).await["id"].as_u64().expect("id");
 
-        let response = get_proposal(&app, id).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(json_body(response).await["status"], "submitted");
+        let header = read_auth_header(&signer, &state).await;
+        let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "submitted");
+    }
+
+    fn insert_proposal(state: &AppState, sub_solver: Address) -> u64 {
+        state.store().insert(test_proposal(
+            OrderUid([0xaa; 56]),
+            sub_solver,
+            ProposalStatus::Active,
+        ))
+    }
+
+    /// Signs the `ReadAuth` bearer message and formats it for `X-Signature`.
+    async fn read_auth_header(signer: &PrivateKeySigner, state: &AppState) -> String {
+        let sig = byos_common::eip712::sign_read_auth(signer, state.domain())
+            .await
+            .expect("signing should succeed");
+        format!("0x{}", alloy::hex::encode(sig.as_bytes()))
+    }
+
+    /// Fires a GET at the router, optionally with an `X-Signature` header.
+    /// Returns the status and parsed JSON body.
+    async fn get(
+        state: AppState,
+        uri: &str,
+        signature: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder().uri(uri);
+        if let Some(sig) = signature {
+            request = request.header("X-Signature", sig);
+        }
+        let response = router(state)
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn get_proposal_owner_reads_own() {
+        let state = test_state();
+        let owner = alloy::signers::local::PrivateKeySigner::random();
+        let id = insert_proposal(&state, owner.address());
+        let header = read_auth_header(&owner, &state).await;
+
+        let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["id"], id);
+        assert_eq!(json["sellAmount"], "1000000");
+        assert_eq!(json["buyAmount"], "990000");
+    }
+
+    #[tokio::test]
+    async fn get_proposal_non_owner_gets_404() {
+        let state = test_state();
+        let owner = address!("0000000000000000000000000000000000000001");
+        let id = insert_proposal(&state, owner);
+
+        let other = alloy::signers::local::PrivateKeySigner::random();
+        let header = read_auth_header(&other, &state).await;
+
+        let (status, _) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_by_order_uid_scoped_to_caller() {
+        let state = test_state();
+        let caller = alloy::signers::local::PrivateKeySigner::random();
+        let competitor = address!("0000000000000000000000000000000000000002");
+
+        // Two proposals on the same order UID, different sub-solvers.
+        insert_proposal(&state, caller.address());
+        insert_proposal(&state, competitor);
+
+        let header = read_auth_header(&caller, &state).await;
+        let uid_hex = format!("0x{}", alloy::hex::encode([0xaa; 56]));
+
+        let (status, json) = get(state, &format!("/proposals/{uid_hex}"), Some(&header)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let proposals = json["proposals"].as_array().unwrap();
+        assert_eq!(proposals.len(), 1, "competitor's proposal must not leak");
+        let returned: Address = proposals[0]["subSolver"].as_str().unwrap().parse().unwrap();
+        assert_eq!(returned, caller.address());
+    }
+
+    #[tokio::test]
+    async fn list_by_solver_uses_signer_identity() {
+        let state = test_state();
+        let caller = alloy::signers::local::PrivateKeySigner::random();
+        let competitor = address!("0000000000000000000000000000000000000002");
+
+        insert_proposal(&state, caller.address());
+        insert_proposal(&state, competitor);
+
+        let header = read_auth_header(&caller, &state).await;
+
+        let (status, json) = get(state, "/proposals/by-solver", Some(&header)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let proposals = json["proposals"].as_array().unwrap();
+        assert_eq!(proposals.len(), 1);
+        let returned: Address = proposals[0]["subSolver"].as_str().unwrap().parse().unwrap();
+        assert_eq!(returned, caller.address());
+    }
+
+    #[tokio::test]
+    async fn get_proposal_without_signature_is_rejected() {
+        let state = test_state();
+        let solver = address!("0000000000000000000000000000000000000001");
+        let id = insert_proposal(&state, solver);
+
+        let (status, _) = get(state, &format!("/proposal/{id}"), None).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

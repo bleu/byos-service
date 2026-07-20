@@ -45,6 +45,8 @@ Same domain as proposals. `CancelProposal` is purely an API-authentication type 
 
 ### GET metadata: per-proposal, no amounts
 
+> **Superseded by [ADR-0011](0011-owner-scoped-reads.md):** reads are now signature-gated and owner-scoped; the public-metadata trade-off below no longer holds.
+
 `GET /proposals/{order_uid}` returns:
 
 ```json
@@ -140,7 +142,7 @@ Contract-side alternatives (BYOS-unilateral execution, amounts-only signing with
 - **Verdict latency is bounded by the validator tick interval** (default 12s), not by the request round-trip. Simulation (COW-1162) must be built inside the background validator from the start — not inline and then moved.
 - **Sub-solvers must include all required interactions (hooks, approvals) in their proposals.** BYOS can reject at gatekeeping but cannot patch proposals post-submission. A sub-solver who omits required hooks will be rejected; one who passes gatekeeping but causes an EBBO violation is still liable (gatekeeping is non-exculpatory per [ADR-0003](0003-slash-attribution-flow.md)).
 - **The signing schema is an external dependency.** The `ProposalData` struct, typehash, and domain are fixed by the contracts repo; a contracts redeployment (v2 factory) invalidates all outstanding signatures, and sub-solver clients (including `subsolver` and `proposal-dto` here) must update their domain configuration. Signature code in this repo must be tested against contract-provided vectors, not a local re-derivation.
-- **Pre-settlement information leakage via GET.** Solver addresses per order are visible before settlement. An observer can map which sub-solvers are competing on which orders. Accepted — addresses are recoverable post-settlement from on-chain data anyway, and the v1 sub-solver set is expected to be small.
+- **Pre-settlement information leakage via GET.** Solver addresses per order are visible before settlement. An observer can map which sub-solvers are competing on which orders. Accepted — addresses are recoverable post-settlement from on-chain data anyway, and the v1 sub-solver set is expected to be small. *Superseded by [ADR-0011](0011-owner-scoped-reads.md): this visibility no longer exists.*
 - **BYOS restart requires sub-solver resubmission.** The in-memory hot store is lost. Mitigated by short proposal lifetimes and sub-solvers' continuous polling loops — proposals are naturally refreshed within one poll interval.
 - **Audit trail becomes an operational dependency for dispute resolution.** If the audit log is lost or corrupted, BYOS cannot prove attribution for Track B claims and must absorb the cost. Requires backup/retention policy.
 - **Rate limiting by escrow balance creates a pay-to-play throughput gradient.** Well-capitalized sub-solvers get higher rate limits. Accepted — consistent with the collateral-gated permission model, and prevents under-collateralized signers from consuming simulation resources.

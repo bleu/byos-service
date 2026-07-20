@@ -17,6 +17,7 @@ This repo owns the service-scoped ADRs for BYOS. ADRs 0001–0003 were designed 
 | [0007](0007-error-handling.md) | Error handling (from cowprotocol/services) | accepted |
 | [0008](0008-observability.md) | Observability (from cowprotocol/services) | accepted |
 | [0009](0009-testing-strategy.md) | Testing strategy (from cowprotocol/services) | accepted |
+| [0011](0011-owner-scoped-reads.md) | Signature-gated, owner-scoped proposal reads | accepted |
 
 ## Known open questions
 
