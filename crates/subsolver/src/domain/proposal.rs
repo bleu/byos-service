@@ -1,17 +1,19 @@
 //! Builds signed proposals from orders: routes the order through a single
 //! Uniswap V2 hop executed by the sub-solver's Trampoline, then signs the
-//! result. Public so the e2e harness can compose proposals with arbitrary
-//! extra interactions (e.g. routes that revert only at settlement time) —
-//! the sub-solver is fully responsible for its route (ADR-0001).
+//! result via `byos_common::eip712` (the schema is owned by byos-contracts).
+//! Public so the e2e harness can compose proposals with arbitrary extra
+//! interactions (e.g. routes that revert only at settlement time) — the
+//! sub-solver is fully responsible for its route (ADR-0001).
 
 use {
-    crate::domain::{routing, signing::UnsignedProposal},
+    crate::domain::routing,
     alloy::{
-        primitives::{Address, Bytes, U256},
+        primitives::{Address, Bytes, U256, keccak256},
         signers::local::PrivateKeySigner,
         sol,
         sol_types::{Eip712Domain, SolCall},
     },
+    byos_common::{contracts, contracts::Interaction, eip712},
 };
 
 sol! {
@@ -53,19 +55,46 @@ pub struct RouteParams {
     pub valid_until: u64,
     pub nonce: U256,
     /// Appended to the route verbatim and covered by the signature. This is
-    /// the e2e harness's injection point for routes that misbehave at
-    /// settlement time (e.g. Track A forced reverts).
-    pub extra_interactions: Vec<proposal_dto::Interaction>,
+    /// the e2e harness's injection point for settlement-time misbehavior
+    /// (e.g. Track A forced reverts).
+    pub extra_interactions: Vec<Interaction>,
+}
+
+/// A routed, signed proposal, ready for `POST /proposals`. What goes on the
+/// wire is exactly what got signed — the API client only re-encodes it.
+#[derive(Clone, Debug)]
+pub struct SignedProposal {
+    pub order_uid: Bytes,
+    pub sell_amount: U256,
+    pub buy_amount: U256,
+    pub interactions: Vec<Interaction>,
+    pub valid_until: u64,
+    pub nonce: U256,
+    pub signature: Bytes,
+}
+
+impl SignedProposal {
+    /// The on-chain 5-field struct the EIP-712 signature covers (the sixth
+    /// signed field, `interactionsHash`, is recomputed from `interactions`).
+    pub fn onchain(&self) -> contracts::Proposal {
+        contracts::Proposal {
+            orderUidHash: keccak256(&self.order_uid),
+            sellAmount: self.sell_amount,
+            buyAmount: self.buy_amount,
+            validUntil: U256::from(self.valid_until),
+            nonce: self.nonce,
+        }
+    }
 }
 
 /// Routes `order` through a single Uniswap V2 hop and signs the result.
 /// Returns `None` when the pool cannot beat the order's limit price.
-pub fn build_proposal(
+pub async fn build_proposal(
     order: &Order,
     params: &RouteParams,
     domain: &Eip712Domain,
     signer: &PrivateKeySigner,
-) -> Option<proposal_dto::Proposal> {
+) -> Option<SignedProposal> {
     let (sell_amount, buy_amount) = match order.kind {
         OrderKind::Sell => {
             let out =
@@ -103,52 +132,48 @@ pub fn build_proposal(
     };
 
     let mut interactions = vec![
-        proposal_dto::Interaction {
+        Interaction {
             target: order.sell_token,
             value: U256::ZERO,
-            call_data: approveCall {
+            callData: approveCall {
                 spender: params.router,
                 amount: sell_amount,
             }
             .abi_encode()
             .into(),
         },
-        proposal_dto::Interaction {
+        Interaction {
             target: params.router,
             value: U256::ZERO,
-            call_data: swap_call_data.into(),
+            callData: swap_call_data.into(),
         },
     ];
     interactions.extend(params.extra_interactions.iter().cloned());
 
-    let unsigned = UnsignedProposal {
-        order_uid: &order.uid,
-        sell_amount,
-        buy_amount,
-        interactions: &interactions,
-        valid_until: params.valid_until,
-        nonce: params.nonce,
-    };
-    let signature = unsigned.sign(domain, signer);
-
-    Some(proposal_dto::Proposal {
+    let mut proposal = SignedProposal {
         order_uid: order.uid.clone(),
         sell_amount,
         buy_amount,
         interactions,
         valid_until: params.valid_until,
         nonce: params.nonce,
-        signature,
-    })
+        signature: Bytes::new(),
+    };
+    let signature =
+        eip712::sign_proposal(signer, domain, &proposal.onchain(), &proposal.interactions)
+            .await
+            .expect("in-memory ECDSA signing is infallible");
+    proposal.signature = signature.as_bytes().into();
+
+    Some(proposal)
 }
 
 #[cfg(test)]
 mod tests {
     use {
         super::*,
-        crate::domain::signing::{UnsignedProposal, proposal_domain},
         alloy::{
-            primitives::{Address, Bytes, U256, address},
+            primitives::{Address, Bytes, Signature, U256, address},
             signers::local::PrivateKeySigner,
             sol,
             sol_types::SolCall,
@@ -177,7 +202,7 @@ mod tests {
         }
     }
 
-    fn params(extra_interactions: Vec<proposal_dto::Interaction>) -> RouteParams {
+    fn params(extra_interactions: Vec<Interaction>) -> RouteParams {
         RouteParams {
             router: ROUTER,
             trampoline: TRAMPOLINE,
@@ -193,11 +218,21 @@ mod tests {
         PrivateKeySigner::from_bytes(&U256::from(0xA11CE).into()).unwrap()
     }
 
-    #[test]
-    fn sell_order_swaps_exact_sell_amount_and_proposes_the_amm_output() {
-        let domain = proposal_domain(31337, Address::ZERO);
-        let proposal =
-            build_proposal(&order(OrderKind::Sell), &params(vec![]), &domain, &signer()).unwrap();
+    /// Recovers the signer of `proposal` in `domain`, asserting the signature
+    /// covers exactly the proposal's own fields and route.
+    fn recovered_signer(proposal: &SignedProposal, domain: &Eip712Domain) -> Address {
+        let signature = Signature::from_raw(&proposal.signature).unwrap();
+        let interactions_hash = eip712::compute_interactions_hash(&proposal.interactions);
+        eip712::recover_proposer(&signature, domain, &proposal.onchain(), interactions_hash)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sell_order_swaps_exact_sell_amount_and_proposes_the_amm_output() {
+        let domain = eip712::byos_domain(31337, Address::ZERO);
+        let proposal = build_proposal(&order(OrderKind::Sell), &params(vec![]), &domain, &signer())
+            .await
+            .unwrap();
 
         // 1000 in at 10000/10000 reserves yields 906 (see routing tests),
         // which beats the 900 limit.
@@ -211,13 +246,13 @@ mod tests {
         // Trampoline so it can settle them back.
         assert_eq!(proposal.interactions.len(), 2);
         assert_eq!(proposal.interactions[0].target, SELL_TOKEN);
-        let approve = approveCall::abi_decode(&proposal.interactions[0].call_data).unwrap();
+        let approve = approveCall::abi_decode(&proposal.interactions[0].callData).unwrap();
         assert_eq!(approve.spender, ROUTER);
         assert_eq!(approve.amount, U256::from(1000));
 
         assert_eq!(proposal.interactions[1].target, ROUTER);
         let swap =
-            swapExactTokensForTokensCall::abi_decode(&proposal.interactions[1].call_data).unwrap();
+            swapExactTokensForTokensCall::abi_decode(&proposal.interactions[1].callData).unwrap();
         assert_eq!(swap.amountIn, U256::from(1000));
         assert_eq!(swap.amountOutMin, U256::from(906));
         assert_eq!(swap.path, vec![SELL_TOKEN, BUY_TOKEN]);
@@ -225,50 +260,48 @@ mod tests {
         assert_eq!(swap.deadline, U256::from(1_750_000_000u64));
 
         // The signature is over exactly these fields in the proposal domain.
-        let unsigned = UnsignedProposal {
-            order_uid: &proposal.order_uid,
-            sell_amount: proposal.sell_amount,
-            buy_amount: proposal.buy_amount,
-            interactions: &proposal.interactions,
-            valid_until: proposal.valid_until,
-            nonce: proposal.nonce,
-        };
-        assert_eq!(proposal.signature, unsigned.sign(&domain, &signer()));
+        assert_eq!(recovered_signer(&proposal, &domain), signer().address());
     }
 
-    #[test]
-    fn buy_order_swaps_for_exact_buy_amount() {
-        let domain = proposal_domain(31337, Address::ZERO);
+    #[tokio::test]
+    async fn buy_order_swaps_for_exact_buy_amount() {
+        let domain = eip712::byos_domain(31337, Address::ZERO);
         let mut order = order(OrderKind::Buy);
         order.buy_amount = U256::from(906);
-        let proposal = build_proposal(&order, &params(vec![]), &domain, &signer()).unwrap();
+        let proposal = build_proposal(&order, &params(vec![]), &domain, &signer())
+            .await
+            .unwrap();
 
         // Buying exactly 906 costs 1000, within the 1000 sell limit.
         assert_eq!(proposal.sell_amount, U256::from(1000));
         assert_eq!(proposal.buy_amount, U256::from(906));
 
         let swap =
-            swapTokensForExactTokensCall::abi_decode(&proposal.interactions[1].call_data).unwrap();
+            swapTokensForExactTokensCall::abi_decode(&proposal.interactions[1].callData).unwrap();
         assert_eq!(swap.amountOut, U256::from(906));
         assert_eq!(swap.amountInMax, U256::from(1000));
     }
 
-    #[test]
-    fn orders_the_pool_cannot_beat_the_limit_price_of_are_skipped() {
-        let domain = proposal_domain(31337, Address::ZERO);
+    #[tokio::test]
+    async fn orders_the_pool_cannot_beat_the_limit_price_of_are_skipped() {
+        let domain = eip712::byos_domain(31337, Address::ZERO);
         let mut order = order(OrderKind::Sell);
         // The pool yields 906 for 1000 in; a 907 limit is unfillable.
         order.buy_amount = U256::from(907);
-        assert!(build_proposal(&order, &params(vec![]), &domain, &signer()).is_none());
+        assert!(
+            build_proposal(&order, &params(vec![]), &domain, &signer())
+                .await
+                .is_none()
+        );
     }
 
-    #[test]
-    fn extra_interactions_are_appended_to_the_route_and_signed() {
-        let domain = proposal_domain(31337, Address::ZERO);
-        let extra = proposal_dto::Interaction {
+    #[tokio::test]
+    async fn extra_interactions_are_appended_to_the_route_and_signed() {
+        let domain = eip712::byos_domain(31337, Address::ZERO);
+        let extra = Interaction {
             target: address!("0x00000000000000000000000000000000deadbeef"),
             value: U256::ZERO,
-            call_data: Bytes::from(vec![0xde, 0xad]),
+            callData: Bytes::from(vec![0xde, 0xad]),
         };
         let proposal = build_proposal(
             &order(OrderKind::Sell),
@@ -276,20 +309,13 @@ mod tests {
             &domain,
             &signer(),
         )
+        .await
         .unwrap();
 
         assert_eq!(proposal.interactions.len(), 3);
         assert_eq!(proposal.interactions[2], extra);
 
         // The injected interaction is part of the signed route, not a rider.
-        let unsigned = UnsignedProposal {
-            order_uid: &proposal.order_uid,
-            sell_amount: proposal.sell_amount,
-            buy_amount: proposal.buy_amount,
-            interactions: &proposal.interactions,
-            valid_until: proposal.valid_until,
-            nonce: proposal.nonce,
-        };
-        assert_eq!(proposal.signature, unsigned.sign(&domain, &signer()));
+        assert_eq!(recovered_signer(&proposal, &domain), signer().address());
     }
 }

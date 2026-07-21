@@ -73,13 +73,16 @@ BYOS re-simulates standing proposals against the current block state on a **conf
 
 This is **not** every-block simulation — the RPC load of simulating all standing proposals every 12s is substantial and unnecessary. The driver's post-encoding re-simulation (`resimulate_until_revert`) catches proposals that go stale between BYOS simulation cycles.
 
-### Settlement crafting: fat Trampoline, single `execute` call
+### Settlement crafting: two interactions per proposal
 
-BYOS wraps each proposal in a single call to `execute` on the sub-solver's Trampoline instance, passing the proposal data, its interactions, and the sub-solver's signature (exact calldata shape: `ITrampoline` in [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts)). Everything that happens inside that call — signature verification, route execution, the exact-amount settle-back that acts as the funding guard, the zero-balance sweep — is contract behavior, specified by [contracts ADR-0003](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md) and [ADR-0005](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0005-trampoline-execution-authority.md). "Fat Trampoline" means the engine delegates all of that to the contract instead of encoding it as separate interactions.
+BYOS wraps each proposal in **two** intra-settlement interactions:
 
-The engine's responsibilities: compute the Trampoline CREATE2 address from the sub-solver's address (recovered from the proposal signature) and ABI-encode the `execute` call. This is pure local computation (keccak256 + ABI encoding) — no RPC on the `/solve` hot path.
+1. **`sellToken.transfer(trampoline, sellAmount)`** — BYOS-owned. Pushes trade capital from the `GPv2Settlement` contract to the sub-solver's Trampoline instance. The Trampoline cannot access Settlement funds directly, so this transfer is mandatory and always encoded by BYOS.
+2. **`trampoline.execute(proposal, interactions, buyToken, signature)`** — runs the sub-solver's signed route inside the Trampoline sandbox. Everything that happens inside that call — signature verification, route execution, the exact-amount settle-back that acts as the funding guard — is contract behavior, specified by [contracts ADR-0003](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md) and [ADR-0005](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0005-trampoline-execution-authority.md).
 
-The Solution returned to the driver contains this single `Interaction::Custom` targeting the Trampoline. The driver sees one interaction per order.
+The engine's responsibilities: compute the Trampoline CREATE2 address from the sub-solver's address (recovered from the proposal signature), ABI-encode the ERC-20 transfer, and ABI-encode the `execute` call. This is pure local computation (keccak256 + ABI encoding) — no RPC on the `/solve` hot path.
+
+The Solution returned to the driver contains these two `Interaction::Custom` entries targeting the sell token and the Trampoline respectively. The driver sees two interactions per order.
 
 ### Fee mechanism: percentage of sellAmount
 
@@ -111,7 +114,7 @@ The entire `/solve` hot path is served from an in-memory cache with local comput
 1. Receive auction, deserialize orders — fast
 2. Scan proposal cache per order UID — O(proposals per order), in-memory
 3. Pre-filter: expiry, liveness, escrow re-check (cached), scoring — microseconds
-4. Wrap in Trampoline calldata — keccak256 + ABI encoding, sub-millisecond per proposal
+4. Encode two interactions (ERC-20 transfer + Trampoline execute) — keccak256 + ABI encoding, sub-millisecond per proposal
 5. Return `Vec<Solution>`
 
 No simulation, no RPC calls, no database queries on the hot path. All expensive work happens at ingestion (simulation, signature verification, escrow check) or during continuous simulation (periodic re-simulation). The design naturally meets any reasonable `/solve` SLO.
@@ -119,7 +122,7 @@ No simulation, no RPC calls, no database queries on the hot path. All expensive 
 ## Open questions (not settled, flagged for discussion)
 
 - **Batching across sub-solvers** (Q1 Option B) — could BYOS combine proposals from different sub-solvers for the same directed token pair into a batched solution? **Deferred to v2**: it requires reworking the one-sub-solver-per-settlement-tx attribution rule ([ADR-0003](0003-slash-attribution-flow.md)) and the merging strategy, so it cannot land in v1. Potential surplus gain from batching vs attribution complexity.
-- **Thin Trampoline** (Q6 Option A) — BYOS encodes every step (transfer in, approvals, sub-solver calls, sweep, transfer out) as separate interactions instead of a single `execute` call. More driver control, more encoding complexity, safety logic moves from contract to BYOS.
+- **Thin Trampoline** (Q6 Option A) — BYOS encodes every step (approvals, sub-solver calls, sweep, transfer out) as separate interactions instead of delegating them to `execute`. The `sellToken.transfer` is already BYOS-owned in both approaches; the difference is whether the remaining steps (signature verification, route execution, settle-back) live in the contract or in BYOS-encoded interactions. More driver control, more encoding complexity, safety logic moves from contract to BYOS.
 - **Ingestion-time profitability gate** (Q7) — the `/solve`-time score > 0 filter already prevents settling trades that are unprofitable on cached estimates; the open question is whether proposals should additionally be rejected at `POST` time, sparing sub-solvers a standing proposal that will never be selected.
 - **Driver integration for outcome observation** (Q8 Options B/C) — if the CoW team allows driver modifications, BYOS could receive settlement outcome callbacks from the driver instead of running its own chain watcher. Reduces infrastructure, but creates coupling. Pending CoW team response.
 
@@ -138,7 +141,7 @@ No simulation, no RPC calls, no database queries on the hot path. All expensive 
 
 ## Consequences
 
-- **BYOS is a thin layer with internal scoring.** The engine's `/solve` serves scored proposals from an in-memory cache with Trampoline encoding. Scoring uses cached values from ingestion-time simulation (surplus, gas estimate). The driver still performs its own scoring after encoding — BYOS's score is a pre-ranking, not the final word.
+- **BYOS is a thin layer with internal scoring.** The engine's `/solve` serves scored proposals from an in-memory cache with two-interaction Trampoline encoding (ERC-20 transfer + execute). Scoring uses cached values from ingestion-time simulation (surplus, gas estimate). The driver still performs its own scoring after encoding — BYOS's score is a pre-ranking, not the final word.
 - **Scoring divergence from the driver.** BYOS's `surplus + fee - gas` uses cached gas estimates and reference prices, which may diverge from the driver's post-encoding gas simulation and real-time price feeds. Because BYOS sends a single proposal per order, there is no fallback if the selected proposal fails the driver's post-encoding re-simulation — BYOS loses that order for that auction round. Accepted: the divergence is marginal in practice (gas estimates are close, surplus dominates for competitive proposals), and sub-solvers naturally resubmit via their polling loop.
 - **No batching means lower theoretical maximum score.** Single-order solutions can't capture CoW surplus or batching efficiencies. BYOS competes on single-order execution quality. Acceptable in v1 — the target use case is "execution against a baseline the sub-solver computed."
 - **Self-contained chain monitoring is additional infrastructure.** BYOS must run a settlement watcher, parse `GPv2Settlement` events, and map Trampoline addresses to sub-solvers. This piggybacks on the block-subscription infra needed for continuous simulation, but is still operational surface area.

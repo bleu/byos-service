@@ -7,20 +7,53 @@ members = ["crates/*"]
 [workspace.dependencies]
 # Internal crates
 byos = { path = "crates/byos" }
+byos-common = { path = "crates/byos-common" }
+byos-watcher = { path = "crates/byos-watcher" }
 e2e = { path = "crates/e2e" }
-proposal-dto = { path = "crates/proposal-dto" }
 subsolver = { path = "crates/subsolver" }
 
+# cowprotocol/services — pinned to the driver API revision we target (ADR-0009)
+solvers-dto = { git = "https://github.com/cowprotocol/services", rev = "3480ee76" }
+
+# CoW Protocol SDK — GPv2Settlement, ERC20, domain types (replaces hand-written ABIs)
+cowprotocol-primitives = "0.1.1-alpha.1"
+
 # External
-alloy = { version = "1", default-features = false }
+alloy = { version = "1", default-features = false, features = [
+    "sol-types",
+    "signers",
+    "signer-local",
+    "providers",
+    "provider-http",
+    "network",
+    "contract",
+    "rpc-types",
+    "consensus",
+    "eips",
+    "serde",
+] }
 anyhow = "1"
 axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 humantime-serde = "1"
-reqwest = "0.12"
+parking_lot = "0.12"
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_with = "3"
+# Capped at 3.14: serde_with 3.15 removed the `serde_with::serde` re-export
+# that `app-data` (via the pinned cowprotocol/services rev above) still uses.
+serde_with = "~3.14"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "migrate",
+    "macros",
+    "json",
+    "chrono",
+] }
+strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 toml = "0.8"

@@ -1,14 +1,14 @@
 //! The continuous polling loop (ADR-0001's sub-solver lifecycle): discover
-//! solvable orders, route, sign, submit, and naturally resubmit once a
-//! proposal expires — BYOS drops proposals on expiry and simulation failure
-//! and never patches or retries them for us.
+//! solvable orders, route, sign, submit, then poll the async validation
+//! verdict (`GET /proposal/{id}`) and naturally resubmit once a proposal
+//! expires or lands in a terminal state — BYOS never patches or retries
+//! proposals for us.
 
 use {
     crate::{
         domain::{
             proposal::{Order, RouteParams, build_proposal},
             routing,
-            signing::proposal_domain,
         },
         infra::{blockchain::ChainClient, byos::ByosClient, orderbook::OrderbookClient},
     },
@@ -18,6 +18,7 @@ use {
         signers::local::PrivateKeySigner,
         sol_types::Eip712Domain,
     },
+    byos_common::{contracts::Interaction, eip712},
     reqwest::Url,
     std::{collections::HashMap, time::Duration},
 };
@@ -42,7 +43,14 @@ pub struct Config {
     pub poll_interval: Duration,
     /// Appended to every route and covered by the signature — the injection
     /// point for settlement-time misbehavior in tests.
-    pub extra_interactions: Vec<proposal_dto::Interaction>,
+    pub extra_interactions: Vec<Interaction>,
+}
+
+/// A submission whose fate we are tracking: held until it expires or the
+/// service reports a terminal status.
+struct Live {
+    id: u64,
+    valid_until: u64,
 }
 
 /// The reference sub-solver: one signer, one BYOS instance, one orderbook.
@@ -53,8 +61,9 @@ pub struct Subsolver {
     chain: ChainClient,
     domain: Eip712Domain,
     trampoline: Address,
-    /// Live submissions by order UID: no resubmission until they expire.
-    live_until: HashMap<Bytes, u64>,
+    /// Live submissions by order UID: no resubmission until they expire or
+    /// the validation verdict kills them.
+    live: HashMap<Bytes, Live>,
     /// Monotonic salt distinguishing otherwise identical proposals.
     next_nonce: u64,
 }
@@ -76,32 +85,38 @@ impl Subsolver {
         let trampoline = chain
             .trampoline(config.trampoline_factory, config.signer.address())
             .await?;
+        let domain = eip712::byos_domain(config.chain_id, config.trampoline_factory);
         Ok(Self {
             orderbook: OrderbookClient::new(config.orderbook_url.clone()),
-            byos: ByosClient::new(config.byos_url.clone()),
+            byos: ByosClient::new(
+                config.byos_url.clone(),
+                domain.clone(),
+                config.signer.clone(),
+            ),
             chain,
-            domain: proposal_domain(config.chain_id, config.trampoline_factory),
+            domain,
             trampoline,
-            live_until: HashMap::new(),
+            live: HashMap::new(),
             next_nonce: 0,
             config,
         })
     }
 
-    /// One pass of the loop: fetch the auction and submit a proposal for
-    /// every eligible order without a live one. Per-order failures (no
-    /// route, rejection) are logged and skipped — the next poll retries;
-    /// only failures that void the whole pass surface as errors.
+    /// One pass of the loop: fetch the auction, check the verdict on live
+    /// proposals, and submit a proposal for every eligible order without a
+    /// live one. Per-order failures (no route, rejection) are logged and
+    /// skipped — the next poll retries; only failures that void the whole
+    /// pass surface as errors.
     pub async fn poll_once(&mut self, now: u64) -> Result<(), Error> {
-        self.live_until.retain(|_, valid_until| *valid_until > now);
+        self.live.retain(|_, live| live.valid_until > now);
 
         for order in self.orderbook.solvable_orders().await? {
-            if self.live_until.contains_key(&order.uid) {
+            if self.holds_live_proposal(&order.uid).await {
                 continue;
             }
             match self.propose(&order, now).await {
-                Ok(Some(valid_until)) => {
-                    self.live_until.insert(order.uid, valid_until);
+                Ok(Some(live)) => {
+                    self.live.insert(order.uid, live);
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -112,10 +127,40 @@ impl Subsolver {
         Ok(())
     }
 
-    /// Routes, signs, and submits one order. `Ok(Some(valid_until))` means a
+    /// Whether a live proposal still stands for this order. Validation is
+    /// asynchronous (submission only verifies the signature), so this polls
+    /// `GET /proposal/{id}`: a terminal verdict (rejected, expired, settled,
+    /// simulation failure, cancelled) frees the order for resubmission with
+    /// a fresh nonce. A failed poll holds the proposal — the next pass
+    /// retries.
+    async fn holds_live_proposal(&mut self, order_uid: &Bytes) -> bool {
+        let Some(live) = self.live.get(order_uid) else {
+            return false;
+        };
+        match self.byos.proposal(live.id).await {
+            Ok(view) if view.status.is_terminal() => {
+                tracing::info!(
+                    %order_uid,
+                    id = live.id,
+                    status = ?view.status,
+                    rejection_reason = ?view.rejection_reason,
+                    "proposal reached a terminal state; resubmitting"
+                );
+                self.live.remove(order_uid);
+                false
+            }
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%order_uid, id = live.id, %error, "verdict poll failed; holding");
+                true
+            }
+        }
+    }
+
+    /// Routes, signs, and submits one order. `Ok(Some(live))` means a
     /// proposal is now live; `Ok(None)` means the order is unroutable at the
     /// current reserves (no pool, can't beat the limit price).
-    async fn propose(&mut self, order: &Order, now: u64) -> Result<Option<u64>, ProposeError> {
+    async fn propose(&mut self, order: &Order, now: u64) -> Result<Option<Live>, ProposeError> {
         let pair = routing::pair_address(
             self.config.uniswap_factory,
             self.config.pair_init_code_hash,
@@ -137,7 +182,8 @@ impl Subsolver {
             nonce: U256::from(self.next_nonce),
             extra_interactions: self.config.extra_interactions.clone(),
         };
-        let Some(proposal) = build_proposal(order, &params, &self.domain, &self.config.signer)
+        let Some(proposal) =
+            build_proposal(order, &params, &self.domain, &self.config.signer).await
         else {
             return Ok(None);
         };
@@ -145,7 +191,7 @@ impl Subsolver {
 
         let id = self.byos.submit(&proposal).await?;
         tracing::info!(order_uid = %order.uid, id, valid_until, "proposal submitted");
-        Ok(Some(valid_until))
+        Ok(Some(Live { id, valid_until }))
     }
 }
 
@@ -172,10 +218,10 @@ pub async fn start(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let extra_interactions = if file.append_revert {
         // An unknown selector on the router: no fallback, so the call — and
         // with it every settlement carrying this route — reverts.
-        vec![proposal_dto::Interaction {
+        vec![Interaction {
             target: file.uniswap_router,
             value: U256::ZERO,
-            call_data: vec![0xba, 0x5e, 0xba, 0x11].into(),
+            callData: vec![0xba, 0x5e, 0xba, 0x11].into(),
         }]
     } else {
         vec![]
@@ -223,19 +269,19 @@ pub async fn start(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
 mod tests {
     use {
         super::*,
-        crate::domain::signing::{UnsignedProposal, proposal_domain},
         alloy::{
-            primitives::{Address, B256, Bytes, Signature, U256, address, b256},
+            primitives::{Address, B256, Bytes, Signature, U256, address, b256, keccak256},
             providers::{Provider, ProviderBuilder},
             transports::mock::Asserter,
         },
+        byos_common::contracts,
         serde_json::json,
         std::time::Duration,
         wiremock::{
             Mock,
             MockServer,
             ResponseTemplate,
-            matchers::{method, path},
+            matchers::{header_exists, method, path},
         },
     };
 
@@ -298,6 +344,53 @@ mod tests {
             .await;
     }
 
+    /// Mocks `GET /proposal/{id}` answering with `status` (and, for
+    /// rejections, a reason), requiring read auth (ADR-0011).
+    async fn mock_verdict(byos: &MockServer, id: u64, status: &str) {
+        let mut body = json!({ "id": id, "status": status });
+        if status == "rejected" {
+            body["rejectionReason"] = json!("InsufficientEscrow");
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("/proposal/{id}")))
+            .and(header_exists("X-Signature"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(byos)
+            .await;
+    }
+
+    /// The wire fields the loop tests assert on, parsed from a captured
+    /// `POST /proposals` body (decimal strings per the server DTO).
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Submission {
+        order_uid: Bytes,
+        sell_amount: String,
+        buy_amount: String,
+        interactions: Vec<WireInteraction>,
+        valid_until: String,
+        nonce: String,
+        signature: Bytes,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WireInteraction {
+        target: Address,
+        value: String,
+        call_data: Bytes,
+    }
+
+    async fn submissions(byos: &MockServer) -> Vec<Submission> {
+        byos.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == wiremock::http::Method::POST)
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect()
+    }
+
     #[tokio::test]
     async fn submits_once_per_proposal_lifetime_and_resubmits_on_expiry() {
         let orderbook = MockServer::start().await;
@@ -305,9 +398,11 @@ mod tests {
         mock_auction(&orderbook).await;
         Mock::given(method("POST"))
             .and(path("/proposals"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 1 })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({ "id": 1 })))
             .mount(&byos)
             .await;
+        // The live proposal survives verdict polls until it expires locally.
+        mock_verdict(&byos, 1, "active").await;
 
         let asserter = Asserter::new();
         asserter.push_success(&Bytes::from(
@@ -330,13 +425,7 @@ mod tests {
         subsolver.poll_once(t0 + 1).await.unwrap(); // proposal still live: held
         subsolver.poll_once(t0 + 61).await.unwrap(); // expired: resubmitted
 
-        let submissions: Vec<proposal_dto::Proposal> = byos
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .map(|request| serde_json::from_slice(&request.body).unwrap())
-            .collect();
+        let submissions = submissions(&byos).await;
         assert_eq!(submissions.len(), 2);
 
         // First submission: routed against the mocked reserves, valid for
@@ -344,29 +433,41 @@ mod tests {
         // anchored domain.
         let first = &submissions[0];
         assert_eq!(first.order_uid, Bytes::from(vec![0x11; 56]));
-        assert_eq!(first.sell_amount, U256::from(1000));
+        assert_eq!(first.sell_amount, "1000");
         // amount_out(1000, 10_000 WETH, 5_000_000 USDC) = 453_305
-        assert_eq!(first.buy_amount, U256::from(453_305));
-        assert_eq!(first.valid_until, t0 + 60);
+        assert_eq!(first.buy_amount, "453305");
+        assert_eq!(first.valid_until, (t0 + 60).to_string());
 
-        let domain = proposal_domain(31337, FACTORY);
-        let unsigned = UnsignedProposal {
-            order_uid: &first.order_uid,
-            sell_amount: first.sell_amount,
-            buy_amount: first.buy_amount,
-            interactions: &first.interactions,
-            valid_until: first.valid_until,
-            nonce: first.nonce,
+        let domain = eip712::byos_domain(31337, FACTORY);
+        let onchain = contracts::Proposal {
+            orderUidHash: keccak256(&first.order_uid),
+            sellAmount: U256::from(1000),
+            buyAmount: U256::from(453_305),
+            validUntil: U256::from(t0 + 60),
+            nonce: U256::from_str_radix(&first.nonce, 10).unwrap(),
         };
+        let interactions: Vec<Interaction> = first
+            .interactions
+            .iter()
+            .map(|interaction| Interaction {
+                target: interaction.target,
+                value: U256::from_str_radix(&interaction.value, 10).unwrap(),
+                callData: interaction.call_data.clone(),
+            })
+            .collect();
         let signature = Signature::from_raw(&first.signature).unwrap();
-        let recovered = signature
-            .recover_address_from_prehash(&unsigned.signing_digest(&domain))
-            .unwrap();
+        let recovered = eip712::recover_proposer(
+            &signature,
+            &domain,
+            &onchain,
+            eip712::compute_interactions_hash(&interactions),
+        )
+        .unwrap();
         assert_eq!(recovered, sub_solver_address);
 
         // The resubmission is a fresh proposal: new lifetime, new nonce.
         let second = &submissions[1];
-        assert_eq!(second.valid_until, t0 + 61 + 60);
+        assert_eq!(second.valid_until, (t0 + 61 + 60).to_string());
         assert_ne!(second.nonce, first.nonce);
     }
 
@@ -378,8 +479,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/proposals"))
             .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-                "kind": "UnderCollateralized",
-                "description": "escrow below gas + c_l",
+                "kind": "InvalidSignature",
+                "description": "Invalid EIP-712 signature",
             })))
             .mount(&byos)
             .await;
@@ -398,10 +499,48 @@ mod tests {
             .await
             .unwrap();
 
-        // A rejected proposal is not recorded as live: the next poll tries
+        // A rejected submission is not recorded as live: the next poll tries
         // again (sub-solvers naturally resubmit, ADR-0001).
         subsolver.poll_once(1_750_000_000).await.unwrap();
         subsolver.poll_once(1_750_000_001).await.unwrap();
         assert_eq!(byos.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_verdict_frees_the_order_for_resubmission() {
+        let orderbook = MockServer::start().await;
+        let byos = MockServer::start().await;
+        mock_auction(&orderbook).await;
+        Mock::given(method("POST"))
+            .and(path("/proposals"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({ "id": 7 })))
+            .mount(&byos)
+            .await;
+        // The background validator rejected the proposal after acceptance.
+        mock_verdict(&byos, 7, "rejected").await;
+
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::from(
+            B256::left_padding_from(TRAMPOLINE.as_slice()).0,
+        ));
+        asserter.push_success(&reserves_return(5_000_000, 10_000));
+        asserter.push_success(&reserves_return(5_000_000, 10_000));
+
+        let provider = ProviderBuilder::new()
+            .connect_mocked_client(asserter)
+            .erased();
+        let mut subsolver = Subsolver::new(config(&orderbook, &byos), provider)
+            .await
+            .unwrap();
+
+        let t0 = 1_750_000_000u64;
+        subsolver.poll_once(t0).await.unwrap();
+        // The second pass sees the rejection and resubmits within the same
+        // pass, with a fresh nonce.
+        subsolver.poll_once(t0 + 1).await.unwrap();
+
+        let submissions = submissions(&byos).await;
+        assert_eq!(submissions.len(), 2);
+        assert_ne!(submissions[1].nonce, submissions[0].nonce);
     }
 }

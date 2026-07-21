@@ -1,7 +1,8 @@
 //! Read-only RPC edge: Uniswap V2 pair reserves and the sub-solver's
-//! Trampoline address (`TrampolineFactory.addressOf`). The sub-solver never
-//! sends transactions — onboarding (escrow deposit, trampoline deployment)
-//! is assumed done.
+//! Trampoline address (`TrampolineFactory.addressOf`, via the vendored ABI
+//! binding in `byos_common::contracts`). The sub-solver never sends
+//! transactions — onboarding (escrow deposit, trampoline deployment) is
+//! assumed done.
 
 use alloy::{
     primitives::{Address, U256},
@@ -13,7 +14,6 @@ use alloy::{
 
 sol! {
     function getReserves() returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
-    function addressOf(address subSolver) returns (address trampoline);
 }
 
 /// Read-only chain queries against any JSON-RPC provider.
@@ -27,6 +27,8 @@ pub enum Error {
     Rpc(#[from] alloy::transports::TransportError),
     #[error("call returned undecodable data: {0}")]
     Decode(#[from] alloy::sol_types::Error),
+    #[error("contract call failed: {0}")]
+    Contract(#[from] alloy::contract::Error),
 }
 
 impl ChainClient {
@@ -43,7 +45,10 @@ impl ChainClient {
         sell_token: Address,
         buy_token: Address,
     ) -> Result<(U256, U256), Error> {
-        let returned = self.call(pair, getReservesCall {}.abi_encode()).await?;
+        let request = TransactionRequest::default()
+            .to(pair)
+            .input(getReservesCall {}.abi_encode().into());
+        let returned = self.provider.call(request).await?;
         let reserves = getReservesCall::abi_decode_returns(&returned)?;
         let (reserve0, reserve1) = (U256::from(reserves.reserve0), U256::from(reserves.reserve1));
         if sell_token < buy_token {
@@ -61,21 +66,9 @@ impl ChainClient {
         factory: Address,
         sub_solver: Address,
     ) -> Result<Address, Error> {
-        let returned = self
-            .call(
-                factory,
-                addressOfCall {
-                    subSolver: sub_solver,
-                }
-                .abi_encode(),
-            )
-            .await?;
-        Ok(addressOfCall::abi_decode_returns(&returned)?)
-    }
-
-    async fn call(&self, to: Address, input: Vec<u8>) -> Result<alloy::primitives::Bytes, Error> {
-        let request = TransactionRequest::default().to(to).input(input.into());
-        Ok(self.provider.call(request).await?)
+        let factory =
+            byos_common::contracts::TrampolineFactory::new(factory, self.provider.clone());
+        Ok(factory.addressOf(sub_solver).call().await?)
     }
 }
 

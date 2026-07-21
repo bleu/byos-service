@@ -28,10 +28,10 @@ pub struct Config {
     #[serde(with = "humantime_serde", default = "default_poll_interval")]
     pub poll_interval: Duration,
     /// Dev knob: append an always-reverting interaction to every route, to
-    /// exercise revert handling downstream. Note that once BYOS ingestion
-    /// simulation exists such proposals are rejected at submission; routes
-    /// that revert only at settlement time (Track A) are composed by the e2e
-    /// harness through `Config::extra_interactions` instead.
+    /// exercise revert handling downstream. BYOS ingestion simulation
+    /// (COW-1162) rejects such proposals during background validation;
+    /// routes that revert only at settlement time (Track A) are composed by
+    /// the e2e harness through `Config::extra_interactions` instead.
     #[serde(default)]
     pub append_revert: bool,
 }
