@@ -146,7 +146,10 @@ mod tests {
     struct FailAll;
 
     impl ProposalValidator for FailAll {
-        async fn validate(&self, _proposal: &Proposal) -> Option<crate::domain::validator::Verdict> {
+        async fn validate(
+            &self,
+            _proposal: &Proposal,
+        ) -> Option<crate::domain::validator::Verdict> {
             Some(crate::domain::validator::Verdict::SimFailed)
         }
     }

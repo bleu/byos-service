@@ -14,10 +14,7 @@ use {
     },
     std::{
         net::SocketAddr,
-        sync::{
-            Arc,
-            atomic::AtomicU64,
-        },
+        sync::{Arc, atomic::AtomicU64},
     },
     tokio::sync::oneshot,
 };
@@ -172,7 +169,11 @@ mod tests {
         std::mem::forget(audit_rx);
         let domain = eip712::byos_domain(CHAIN_ID, factory());
         let gas_price = Arc::new(AtomicU64::new(0));
-        AppState::new(Arc::new(InMemoryProposalStore::new(audit_tx)), domain, gas_price)
+        AppState::new(
+            Arc::new(InMemoryProposalStore::new(audit_tx)),
+            domain,
+            gas_price,
+        )
     }
 
     /// Builds a valid signed POST /proposals JSON body and returns it along

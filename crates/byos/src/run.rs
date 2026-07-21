@@ -16,10 +16,7 @@ use {
     clap::Parser,
     std::{
         net::SocketAddr,
-        sync::{
-            Arc,
-            atomic::AtomicU64,
-        },
+        sync::{Arc, atomic::AtomicU64},
     },
     tokio::sync::oneshot,
     tracing_subscriber::{EnvFilter, fmt, prelude::*},
@@ -69,8 +66,8 @@ pub(crate) struct Args {
     escrow_address: Option<alloy::primitives::Address>,
 
     /// Minimum collateral (`c_l`) in wei. Chain-specific: 0.010 ETH for
-    /// mainnet (~10000000000000000), 10 xDAI for Gnosis (~10000000000000000000).
-    /// Required when `--rpc-url` is set.
+    /// mainnet (~10000000000000000), 10 xDAI for Gnosis
+    /// (~10000000000000000000). Required when `--rpc-url` is set.
     #[arg(long, env)]
     min_collateral: Option<u128>,
 
@@ -214,11 +211,7 @@ async fn run_with(
         crate::infra::validation::spawn(store, validator, period)
     } else {
         tracing::warn!("no --rpc-url provided, escrow checks disabled (AcceptAll)");
-        crate::infra::validation::spawn(
-            store,
-            crate::domain::validator::AcceptAll,
-            period,
-        )
+        crate::infra::validation::spawn(store, crate::domain::validator::AcceptAll, period)
     };
 
     api::serve(args.public_addr, state, bind_tx, shutdown_rx)

@@ -67,10 +67,7 @@ impl<P: Provider + Clone> EscrowValidator<P> {
     }
 
     /// Fetch the effective balance for a sub-solver, using the per-tick cache.
-    async fn get_balance(
-        &self,
-        sub_solver: Address,
-    ) -> Result<U256, alloy::contract::Error> {
+    async fn get_balance(&self, sub_solver: Address) -> Result<U256, alloy::contract::Error> {
         if let Some(&balance) = self.cache.lock().get(&sub_solver) {
             return Ok(balance);
         }
