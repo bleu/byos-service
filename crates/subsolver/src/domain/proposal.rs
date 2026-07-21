@@ -17,7 +17,6 @@ use {
 };
 
 sol! {
-    function approve(address spender, uint256 amount) returns (bool);
     function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[]);
     function swapTokensForExactTokens(uint256 amountOut, uint256 amountInMax, address[] path, address to, uint256 deadline) returns (uint256[]);
 }
@@ -135,7 +134,7 @@ pub async fn build_proposal(
         Interaction {
             target: order.sell_token,
             value: U256::ZERO,
-            callData: approveCall {
+            callData: contracts::ERC20::approveCall {
                 spender: params.router,
                 amount: sell_amount,
             }
@@ -181,7 +180,6 @@ mod tests {
     };
 
     sol! {
-        function approve(address spender, uint256 amount) returns (bool);
         function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[]);
         function swapTokensForExactTokens(uint256 amountOut, uint256 amountInMax, address[] path, address to, uint256 deadline) returns (uint256[]);
     }
@@ -246,7 +244,8 @@ mod tests {
         // Trampoline so it can settle them back.
         assert_eq!(proposal.interactions.len(), 2);
         assert_eq!(proposal.interactions[0].target, SELL_TOKEN);
-        let approve = approveCall::abi_decode(&proposal.interactions[0].callData).unwrap();
+        let approve =
+            contracts::ERC20::approveCall::abi_decode(&proposal.interactions[0].callData).unwrap();
         assert_eq!(approve.spender, ROUTER);
         assert_eq!(approve.amount, U256::from(1000));
 
