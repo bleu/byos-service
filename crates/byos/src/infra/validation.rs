@@ -58,6 +58,8 @@ pub fn spawn(
 /// cancelled mid-validation keeps its cancellation (the stale verdict is
 /// dropped).
 pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalValidator, now: u64) {
+    validator.begin_tick();
+
     let live = store.snapshot_by_statuses(&[ProposalStatus::Submitted, ProposalStatus::Active]);
 
     let mut to_validate = Vec::new();
@@ -73,7 +75,10 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalVa
     }
 
     for proposal in to_validate {
-        let verdict = validator.validate(&proposal).await;
+        let Some(verdict) = validator.validate(&proposal).await else {
+            tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
+            continue;
+        };
         match store.resolve_submitted(proposal.id, verdict) {
             Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
             Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
@@ -141,8 +146,8 @@ mod tests {
     struct FailAll;
 
     impl ProposalValidator for FailAll {
-        async fn validate(&self, _proposal: &Proposal) -> crate::domain::validator::Verdict {
-            crate::domain::validator::Verdict::SimFailed
+        async fn validate(&self, _proposal: &Proposal) -> Option<crate::domain::validator::Verdict> {
+            Some(crate::domain::validator::Verdict::SimFailed)
         }
     }
 

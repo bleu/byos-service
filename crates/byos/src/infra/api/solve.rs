@@ -16,6 +16,7 @@ use {
     },
     std::{
         collections::HashMap,
+        sync::atomic::Ordering,
         time::{SystemTime, UNIX_EPOCH},
     },
 };
@@ -25,6 +26,11 @@ const M1_GAS_ESTIMATE: u64 = 200_000;
 
 /// POST /solve — the driver-facing solver engine endpoint.
 pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) -> Json<Solutions> {
+    // Publish the auction's gas price so the background escrow validator uses
+    // a fresh value instead of the startup fallback.
+    let gp: u64 = auction.effective_gas_price.try_into().unwrap_or(u64::MAX);
+    state.gas_price().store(gp, Ordering::Relaxed);
+
     let mut solutions = Vec::new();
     let now = U256::from(
         SystemTime::now()
@@ -93,7 +99,7 @@ fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solut
     // We need a trampoline address to encode interactions. For M1, we use
     // Address::ZERO as a placeholder — in production this comes from
     // ITrampolineFactory.addressOf(subSolver) resolved at proposal ingestion.
-    // TODO(COW-1162): resolve trampoline address during ingestion simulation.
+    // TODO: resolve trampoline address during ingestion.
     let trampoline = Address::ZERO;
 
     let trampoline_interactions = encode_trampoline_interactions(

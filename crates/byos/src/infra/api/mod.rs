@@ -12,7 +12,13 @@ use {
         Router,
         routing::{delete, get, post},
     },
-    std::{net::SocketAddr, sync::Arc},
+    std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::AtomicU64,
+        },
+    },
     tokio::sync::oneshot,
 };
 
@@ -23,6 +29,10 @@ use {
 struct AppStateInner {
     store: Arc<InMemoryProposalStore>,
     domain: Eip712Domain,
+    /// Last-seen `effective_gas_price` from the auction payload (written by
+    /// `/solve`, read by the background escrow validator). Seeded with
+    /// `--default-gas-price` at startup.
+    gas_price: Arc<AtomicU64>,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -31,8 +41,16 @@ struct AppStateInner {
 pub struct AppState(Arc<AppStateInner>);
 
 impl AppState {
-    pub fn new(store: Arc<InMemoryProposalStore>, domain: Eip712Domain) -> Self {
-        Self(Arc::new(AppStateInner { store, domain }))
+    pub fn new(
+        store: Arc<InMemoryProposalStore>,
+        domain: Eip712Domain,
+        gas_price: Arc<AtomicU64>,
+    ) -> Self {
+        Self(Arc::new(AppStateInner {
+            store,
+            domain,
+            gas_price,
+        }))
     }
 
     pub fn store(&self) -> &InMemoryProposalStore {
@@ -41,6 +59,10 @@ impl AppState {
 
     pub fn domain(&self) -> &Eip712Domain {
         &self.0.domain
+    }
+
+    pub fn gas_price(&self) -> &Arc<AtomicU64> {
+        &self.0.gas_price
     }
 }
 
@@ -133,6 +155,7 @@ mod tests {
             http::{Request, StatusCode},
         },
         byos_common::{contracts, eip712},
+        std::sync::atomic::AtomicU64,
         tower::ServiceExt,
     };
 
@@ -148,7 +171,8 @@ mod tests {
         let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
         std::mem::forget(audit_rx);
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        AppState::new(Arc::new(InMemoryProposalStore::new(audit_tx)), domain)
+        let gas_price = Arc::new(AtomicU64::new(0));
+        AppState::new(Arc::new(InMemoryProposalStore::new(audit_tx)), domain, gas_price)
     }
 
     /// Builds a valid signed POST /proposals JSON body and returns it along
@@ -209,10 +233,10 @@ mod tests {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
-        ) -> crate::domain::validator::Verdict {
-            crate::domain::validator::Verdict::Reject(
+        ) -> Option<crate::domain::validator::Verdict> {
+            Some(crate::domain::validator::Verdict::Reject(
                 crate::domain::validator::RejectionReason::InsufficientEscrow,
-            )
+            ))
         }
     }
 
