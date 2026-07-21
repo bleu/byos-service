@@ -5,6 +5,10 @@
 
 use alloy::primitives::{U256, utils::Unit};
 
+/// Fixed gas estimate for M1 (no simulation-based estimate yet). Used by both
+/// the `/solve` scoring path and the escrow balance threshold.
+pub const GAS_ESTIMATE: u64 = 200_000;
+
 pub struct ScoreInput {
     pub order_sell: U256,
     pub order_buy: U256,

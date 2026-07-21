@@ -33,7 +33,7 @@ pub fn spawn(
             interval.tick().await;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
+                .expect("system clock before Unix epoch")
                 .as_secs();
             run_tick(&store, &validator, now).await;
         }

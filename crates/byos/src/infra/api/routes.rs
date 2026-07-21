@@ -94,7 +94,7 @@ pub async fn create_proposal(
     // storing, and auditing a DOA proposal (ADR-0001).
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .expect("system clock before Unix epoch")
         .as_secs();
     if valid_until < U256::from(now) {
         return Err(Error::from(Kind::ProposalExpired));

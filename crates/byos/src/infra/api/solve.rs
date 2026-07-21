@@ -5,7 +5,7 @@ use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::{ScoreInput, score_proposal},
+        scoring::{GAS_ESTIMATE, ScoreInput, score_proposal},
     },
     alloy::primitives::{Address, U256},
     axum::{Json, extract::State},
@@ -21,9 +21,6 @@ use {
     },
 };
 
-/// Fixed gas estimate for M1 (no simulation-based estimate yet).
-const M1_GAS_ESTIMATE: u64 = 200_000;
-
 /// POST /solve — the driver-facing solver engine endpoint.
 pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) -> Json<Solutions> {
     // Publish the auction's gas price so the background escrow validator uses
@@ -35,7 +32,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
     let now = U256::from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .expect("system clock before Unix epoch")
             .as_secs(),
     );
 
@@ -48,7 +45,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         }
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
-        let gas_cost = U256::from(M1_GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
+        let gas_cost = U256::from(GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
 
         // The surplus token is the buy token for sell orders, sell token for buy
         // orders.
@@ -158,7 +155,7 @@ fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solut
         pre_interactions: vec![],
         interactions,
         post_interactions: vec![],
-        gas: Some(M1_GAS_ESTIMATE),
+        gas: Some(GAS_ESTIMATE),
         flashloans: None,
         wrappers: vec![],
     }

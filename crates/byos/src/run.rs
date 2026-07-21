@@ -56,8 +56,9 @@ pub(crate) struct Args {
     /// RPC endpoint for chain connectivity (escrow balance checks). When
     /// omitted the service starts with an AcceptAll validator (useful for
     /// tests that don't need chain connectivity). Prefer the RPC_URL env var
-    /// in production — the URL may contain API keys.
-    #[arg(long, env)]
+    /// in production — the URL may contain API keys. When set, requires
+    /// `--escrow-address`, `--min-collateral`, and `--default-gas-price`.
+    #[arg(long, env, requires_all = ["escrow_address", "min_collateral", "default_gas_price"])]
     rpc_url: Option<RpcUrl>,
 
     /// Escrow contract address for sub-solver balance checks. Required when
@@ -180,17 +181,12 @@ async fn run_with(
     // set, the escrow validator gates proposals via on-chain balance checks;
     // simulation is added by a follow-up task. Without an RPC endpoint the
     // service falls back to AcceptAll (useful for tests).
+    // clap's `requires_all` on --rpc-url guarantees that --escrow-address,
+    // --min-collateral, and --default-gas-price are present when --rpc-url
+    // is set — the unwraps below cannot fail.
     let validation_loop = if let Some(rpc_url) = args.rpc_url {
-        let escrow_address = args
-            .escrow_address
-            .context("--escrow-address is required when --rpc-url is set")?;
-        let min_collateral = args
-            .min_collateral
-            .context("--min-collateral is required when --rpc-url is set")?;
-        anyhow::ensure!(
-            args.default_gas_price.is_some(),
-            "--default-gas-price is required when --rpc-url is set"
-        );
+        let escrow_address = args.escrow_address.unwrap();
+        let min_collateral = args.min_collateral.unwrap();
 
         let url: reqwest::Url = rpc_url.0.parse().context("invalid --rpc-url")?;
         let provider = alloy::providers::ProviderBuilder::new().connect_http(url);

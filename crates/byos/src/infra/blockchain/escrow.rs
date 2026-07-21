@@ -4,6 +4,7 @@
 use {
     crate::domain::{
         proposal::Proposal,
+        scoring::GAS_ESTIMATE,
         validator::{ProposalValidator, RejectionReason, Verdict},
     },
     alloy::{
@@ -20,9 +21,6 @@ use {
         },
     },
 };
-
-/// Fixed gas estimate matching the `/solve` hot path.
-const GAS_ESTIMATE: u64 = 200_000;
 
 /// Validates proposals by checking the sub-solver's escrow balance on-chain.
 ///
@@ -108,35 +106,44 @@ impl<P: Provider + Clone + Send + Sync> ProposalValidator for EscrowValidator<P>
                     Some(Verdict::Reject(RejectionReason::InsufficientEscrow))
                 }
             }
-            Err(e) if is_transport_error(&e) => {
-                tracing::warn!(
+            Err(e) if is_server_error(&e) => {
+                // The RPC delivered the call and the server rejected it
+                // (contract revert, invalid address, etc.) — this is a real
+                // signal, not a transient failure.
+                tracing::info!(
                     id = %proposal.id,
                     sub_solver = %proposal.sub_solver,
                     error = %e,
-                    "RPC transport error during escrow check, deferring to next tick",
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    id = %proposal.id,
-                    sub_solver = %proposal.sub_solver,
-                    error = %e,
-                    "escrow effectiveBalance call failed",
+                    "escrow effectiveBalance call reverted",
                 );
                 Some(Verdict::Reject(RejectionReason::InsufficientEscrow))
+            }
+            Err(e) => {
+                // Transport failures (timeout, DNS, connection refused) and
+                // unexpected errors (ABI decode, etc.) are deferred — a broken
+                // validator should not punish sub-solvers.
+                tracing::warn!(
+                    id = %proposal.id,
+                    sub_solver = %proposal.sub_solver,
+                    error = %e,
+                    "escrow check failed (transient or unexpected), deferring to next tick",
+                );
+                None
             }
         }
     }
 }
 
-/// Transport-level failures (connection refused, timeout, DNS) are retryable.
-/// Server responses — including contract reverts (JSON-RPC error code 3) — are
-/// not: they indicate the call was delivered and the chain rejected it.
-fn is_transport_error(e: &alloy::contract::Error) -> bool {
+/// Returns `true` when the RPC delivered the call and the server responded
+/// with an error (contract revert, invalid params, etc.). These are real
+/// signals — the sub-solver's escrow state is the problem, not our infra.
+///
+/// Everything else (transport failures, ABI decode errors) is NOT a server
+/// error and should be deferred rather than used to reject proposals.
+fn is_server_error(e: &alloy::contract::Error) -> bool {
     match e {
         alloy::contract::Error::TransportError(rpc_err) => {
-            matches!(rpc_err, RpcError::Transport(_))
+            matches!(rpc_err, RpcError::ErrorResp(_) | RpcError::NullResp)
         }
         _ => false,
     }
@@ -206,26 +213,36 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // is_transport_error classification
+    // is_server_error classification
     // -----------------------------------------------------------------------
 
     #[test]
-    fn transport_level_error_is_classified_as_transport() {
-        // TransportErrorKind::custom() wraps in RpcError::Transport(...)
+    fn transport_level_error_is_not_server_error() {
         let err =
             alloy::contract::Error::TransportError(alloy::transports::TransportErrorKind::custom(
                 std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused"),
             ));
-        assert!(is_transport_error(&err));
+        assert!(!is_server_error(&err));
     }
 
     #[test]
-    fn server_error_response_is_not_transport() {
-        // NullResp is a server-side response (like a revert returning empty
-        // data) — not a transport failure, so it should be treated as a real
-        // rejection.
+    fn null_resp_is_server_error() {
         let err = alloy::contract::Error::TransportError(RpcError::NullResp);
-        assert!(!is_transport_error(&err));
+        assert!(is_server_error(&err));
+    }
+
+    #[test]
+    fn abi_error_is_not_server_error() {
+        // ABI decode errors are bugs in our code, not escrow problems —
+        // they should defer, not reject.
+        let err = alloy::contract::Error::TransportError(RpcError::DeserError {
+            err: serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad abi",
+            )),
+            text: "{}".into(),
+        });
+        assert!(!is_server_error(&err));
     }
 
     // -----------------------------------------------------------------------
