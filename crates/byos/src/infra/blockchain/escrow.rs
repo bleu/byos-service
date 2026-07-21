@@ -48,6 +48,11 @@ impl<P> EscrowValidator<P> {
             .saturating_mul(gas_price)
             .saturating_add(self.min_collateral)
     }
+
+    /// Clear the per-tick balance cache.
+    fn clear_cache(&self) {
+        self.cache.lock().clear();
+    }
 }
 
 impl<P: Provider + Clone> EscrowValidator<P> {
@@ -82,7 +87,7 @@ impl<P: Provider + Clone> EscrowValidator<P> {
 
 impl<P: Provider + Clone + Send + Sync> ProposalValidator for EscrowValidator<P> {
     fn begin_tick(&self) {
-        self.cache.lock().clear();
+        self.clear_cache();
     }
 
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
@@ -141,20 +146,23 @@ fn is_transport_error(e: &alloy::contract::Error) -> bool {
 mod tests {
     use super::*;
 
-    /// Direct unit test of the threshold calculation.
-    #[test]
-    fn threshold_uses_gas_estimate_times_price_plus_collateral() {
-        let gas_price = Arc::new(AtomicU64::new(20_000_000_000)); // 20 gwei
-        let min_collateral = U256::from(10_000_000_000_000_000u64); // 0.01 ETH
-
-        let validator = EscrowValidator {
+    fn stub_validator() -> EscrowValidator<()> {
+        EscrowValidator {
             provider: (),
             escrow_address: Address::ZERO,
-            min_collateral,
-            gas_price,
+            min_collateral: U256::from(10_000_000_000_000_000u64), // 0.01 ETH
+            gas_price: Arc::new(AtomicU64::new(20_000_000_000)),   // 20 gwei
             cache: Mutex::new(HashMap::new()),
-        };
+        }
+    }
 
+    // -----------------------------------------------------------------------
+    // Threshold
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn threshold_uses_gas_estimate_times_price_plus_collateral() {
+        let validator = stub_validator();
         // 200_000 * 20 gwei + 0.01 ETH = 0.004 ETH + 0.01 ETH = 0.014 ETH
         let expected = U256::from(200_000u64) * U256::from(20_000_000_000u64)
             + U256::from(10_000_000_000_000_000u64);
@@ -163,17 +171,88 @@ mod tests {
 
     #[test]
     fn threshold_with_zero_gas_price_equals_min_collateral() {
-        let gas_price = Arc::new(AtomicU64::new(0));
-        let min_collateral = U256::from(10_000_000_000_000_000u64);
+        let mut validator = stub_validator();
+        validator.gas_price = Arc::new(AtomicU64::new(0));
+        assert_eq!(validator.threshold(), validator.min_collateral);
+    }
 
-        let validator = EscrowValidator {
-            provider: (),
-            escrow_address: Address::ZERO,
-            min_collateral,
-            gas_price,
-            cache: Mutex::new(HashMap::new()),
-        };
+    // -----------------------------------------------------------------------
+    // Cache
+    // -----------------------------------------------------------------------
 
-        assert_eq!(validator.threshold(), min_collateral);
+    #[test]
+    fn clear_cache_empties_populated_cache() {
+        let validator = stub_validator();
+        validator
+            .cache
+            .lock()
+            .insert(Address::repeat_byte(1), U256::from(1_000u64));
+        validator
+            .cache
+            .lock()
+            .insert(Address::repeat_byte(2), U256::from(2_000u64));
+        assert_eq!(validator.cache.lock().len(), 2);
+
+        validator.clear_cache();
+        assert!(validator.cache.lock().is_empty());
+    }
+
+    #[test]
+    fn clear_cache_on_empty_cache_is_noop() {
+        let validator = stub_validator();
+        assert!(validator.cache.lock().is_empty());
+        validator.clear_cache();
+        assert!(validator.cache.lock().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // is_transport_error classification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transport_level_error_is_classified_as_transport() {
+        // TransportErrorKind::custom() wraps in RpcError::Transport(...)
+        let err =
+            alloy::contract::Error::TransportError(alloy::transports::TransportErrorKind::custom(
+                std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused"),
+            ));
+        assert!(is_transport_error(&err));
+    }
+
+    #[test]
+    fn server_error_response_is_not_transport() {
+        // NullResp is a server-side response (like a revert returning empty
+        // data) — not a transport failure, so it should be treated as a real
+        // rejection.
+        let err = alloy::contract::Error::TransportError(RpcError::NullResp);
+        assert!(!is_transport_error(&err));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate: transport error → deferred (None)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn validate_returns_none_on_transport_error() {
+        use crate::domain::proposal::{OrderUid, ProposalStatus, test_proposal};
+
+        // Provider pointed at a port that is (almost certainly) not listening.
+        let provider = alloy::providers::ProviderBuilder::new()
+            .connect_http("http://127.0.0.1:1".parse().unwrap());
+        let validator = EscrowValidator::new(
+            provider,
+            Address::repeat_byte(0xee),
+            U256::from(1u64),
+            Arc::new(AtomicU64::new(1)),
+        );
+
+        let proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            Address::repeat_byte(0x01),
+            ProposalStatus::Submitted,
+        );
+
+        let verdict = validator.validate(&proposal).await;
+        assert_eq!(verdict, None, "transport error should defer judgment");
     }
 }

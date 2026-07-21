@@ -602,4 +602,58 @@ mod tests {
         let solutions = result["solutions"].as_array().unwrap();
         assert!(solutions.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Ingestion-time expiry check
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_rejects_already_expired_proposal() {
+        let state = test_state();
+        let app = router(state);
+        let signer = PrivateKeySigner::random();
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+
+        let order_uid = [0xaa_u8; 56];
+        let proposal = contracts::Proposal {
+            orderUidHash: keccak256(order_uid),
+            sellAmount: U256::from(1_000_000_u64),
+            buyAmount: U256::from(990_000_u64),
+            validUntil: U256::from(1_u64), // unix timestamp 1 — long expired
+            nonce: U256::from(1_u64),
+        };
+        let interactions: Vec<contracts::Interaction> = vec![];
+
+        let signature = eip712::sign_proposal(&signer, &domain, &proposal, &interactions)
+            .await
+            .expect("signing must succeed");
+
+        let body = serde_json::json!({
+            "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
+            "sellAmount": "1000000",
+            "buyAmount": "990000",
+            "interactions": [],
+            "validUntil": "1",
+            "nonce": "1",
+            "signature": format!("0x{}", alloy::hex::encode(signature.as_bytes())),
+        });
+
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let json = json_body(response).await;
+        assert_eq!(json["kind"], "ProposalExpired");
+    }
+
+    #[tokio::test]
+    async fn post_accepts_proposal_with_future_valid_until() {
+        let state = test_state();
+        let app = router(state);
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
+
+        // signed_proposal_body_for uses validUntil = 99_999_999_999 (far future)
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
 }
