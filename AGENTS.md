@@ -11,8 +11,9 @@ This repo contains the Rust service for BYOS (Bring Your Own Solver), a CoW Prot
 ```
 CONTEXT.md            Domain language and architecture map — read first
 crates/byos/          The BYOS service (proposal API, solver engine, workers)
+crates/byos-common/   Shared contract bindings and EIP-712 schema
+crates/byos-watcher/  Chain watcher and escrow operator
 crates/subsolver/     Reference sub-solver client
-crates/proposal-dto/  Shared wire types for the proposal API
 crates/e2e/           End-to-end tests (contracts on anvil + byos + subsolver)
 docs/adr/             Architecture decision records
 docs/reference/       CoW protocol background (slashing, auctions, CIPs)

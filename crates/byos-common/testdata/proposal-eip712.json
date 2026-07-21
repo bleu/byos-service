@@ -1,0 +1,72 @@
+{
+  "domain": {
+    "name": "BYOS",
+    "version": "0.1",
+    "chainId": 31337,
+    "verifyingContract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+    "domainSeparator": "0xc913360d38e2cdf39319d69291b0368681dd950b368c8306855fff12994d3fa3"
+  },
+  "proposalTypehash": "0x2045708f2cdb91d16aa77dec29e1d20d5d7bdc6bbbc2a4158457a9d0be739209",
+  "subSolver": {
+    "address": "0xe05fcC23807536bEe418f142D19fa0d21BB0cfF7",
+    "privateKey": "0x00000000000000000000000000000000000000000000000000000000000a11ce"
+  },
+  "vectors": [
+    {
+      "orderUid": "0x00000000000000000000000000000000000000000000000000000000e05fcc23807536bee418f142d19fa0d21bb0cff70000000000000000",
+      "sellAmount": "1000000000000000000",
+      "buyAmount": "5000000",
+      "validUntil": 1750000000,
+      "nonce": "0",
+      "interactions": [],
+      "orderUidHash": "0xffef5c2fe809a863cc264e489c6094c3ab99b725056b9ce1b7e3d51e69299105",
+      "interactionsHash": "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd",
+      "structHash": "0x909d2b886c8b5b34d5b219f86328eddc86203c0d2142f2e675aada74018e509a",
+      "digest": "0xdefa5fb02cd6e8014ac5c0f9eeb772ad62c18737a8bd64c3b5bc17a44cd7e46c",
+      "signature": "0x848829822f453028ddd03b9afa61551517e0c4d53cfbef3ccc3afb1ca3a177747fbf0b6f5eac98d5d26a33070280f041652e7e3cce04f090948bc967221240e71c"
+    },
+    {
+      "orderUid": "0x00000000000000000000000000000000000000000000000000000001e05fcc23807536bee418f142d19fa0d21bb0cff70000000000000007",
+      "sellAmount": "123456789",
+      "buyAmount": "987654321",
+      "validUntil": 1750000060,
+      "nonce": "1",
+      "interactions": [
+        {
+          "target": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+          "value": "0",
+          "callData": "0xabcdef"
+        }
+      ],
+      "orderUidHash": "0x8d6d0ba3f7eda37c54d350c873be4be9681d10d22bafc2287f897bbf4ca378ac",
+      "interactionsHash": "0x7141799e95ff18ea97dcd246c14108b6970b939ff2dc4c7313d9035378c2ebe1",
+      "structHash": "0x0e69a1ee2058db0dc2980ae8fede94d2f60c3e22a8eea9665bbe36b2b3af7e3a",
+      "digest": "0x53cb010f75eacb97a87c5cd2264e65aa9bab6e7dd037c1817dde4d185e9d8b7c",
+      "signature": "0x6fce1e2ab42d8199940985bf734e2352f3d3b127b03a23608016e10d8be9dca77b431a802f1dc15cdfd1c95f14b1aa1e82cdaafefaf38bb04723c127e7c6c5831c"
+    },
+    {
+      "orderUid": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffe05fcc23807536bee418f142d19fa0d21bb0cff7ffffffffffffffff",
+      "sellAmount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "buyAmount": "1",
+      "validUntil": 4294967295,
+      "nonce": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "interactions": [
+        {
+          "target": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+          "value": "1000000000000000000",
+          "callData": "0x"
+        },
+        {
+          "target": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          "value": "0",
+          "callData": "0xa9059cbb0000000000000000000000009008d19f58aabd9ed0d60971565aa8510560ab410000000000000000000000000000000000000000000000000000000005f5e100"
+        }
+      ],
+      "orderUidHash": "0x4027c45e15828a231c9b9b937f4f5b3b6738d810d0f4f3240edb0e06996be6d5",
+      "interactionsHash": "0x17995225789c691016ce27549dd6a75b42ef8ce7a3250f8c98398195959a2ddf",
+      "structHash": "0x6666d67a4fb4e9eb7b2ac106e761f3a73afe985c2ad83e4eaba8648d13483486",
+      "digest": "0x310968221a70c9ffa7498cf443be1064f8468eeb2ba5406fdb2e7aae85db63f8",
+      "signature": "0x8a828bb90858ce6408140c220765d5c8a4dd3df54f33a9902d13a4d15e82c5440ae71f8ab94120c75bffb57e9a484931f02b878c778f8239612bd8286034e8f31c"
+    }
+  ]
+}
