@@ -5,7 +5,7 @@ use {
     crate::domain::{
         proposal::Proposal,
         scoring::ESCROW_GAS_ESTIMATION,
-        validator::{ValidateProposal, RejectionReason, Verdict},
+        validator::{RejectionReason, ValidateProposal, Verdict},
     },
     alloy::{
         primitives::{Address, U256},

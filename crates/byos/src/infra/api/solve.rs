@@ -67,9 +67,8 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .filter(|p| p.valid_until > now)
             .filter(|p| p.gas_used.is_some())
             .filter_map(|p| {
-                let gas_cost =
-                    U256::from(effective_gas(p.gas_used.unwrap()))
-                        .saturating_mul(auction.effective_gas_price);
+                let gas_cost = U256::from(effective_gas(p.gas_used.unwrap()))
+                    .saturating_mul(auction.effective_gas_price);
                 let score = score_proposal(&ScoreInput {
                     order_sell: order.sell_amount,
                     order_buy: order.buy_amount,
@@ -99,7 +98,11 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
     Json(Solutions { solutions })
 }
 
-fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> Option<solution::Solution> {
+fn build_solution(
+    id: u64,
+    order: &auction::Order,
+    proposal: &Proposal,
+) -> Option<solution::Solution> {
     let Some(trampoline) = proposal.trampoline else {
         tracing::error!(
             id = %proposal.id,

@@ -213,11 +213,8 @@ async fn run_with(
             U256::from(min_collateral),
             gas_price,
         );
-        let simulation = SimulationValidator::new(
-            provider,
-            settlement_address,
-            args.trampoline_factory,
-        );
+        let simulation =
+            SimulationValidator::new(provider, settlement_address, args.trampoline_factory);
         let validator = ProposalValidator::new(escrow, simulation);
         crate::infra::validation::spawn(store, validator, period)
     } else {

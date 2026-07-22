@@ -123,8 +123,9 @@ pub struct Proposal {
     /// Gas consumed by the simulation `eth_estimateGas` call. Set by the
     /// validator on successful simulation; `None` until first validation pass.
     pub gas_used: Option<u64>,
-    /// Trampoline address resolved via `TrampolineFactory.addressOf(sub_solver)`.
-    /// Set by the validator on first validation; `None` until resolved.
+    /// Trampoline address resolved via
+    /// `TrampolineFactory.addressOf(sub_solver)`. Set by the validator on
+    /// first validation; `None` until resolved.
     pub trampoline: Option<Address>,
     pub created_at: Instant,
 }
@@ -404,7 +405,10 @@ impl InMemoryProposalStore {
                 };
                 let p = Arc::make_mut(proposal);
                 p.status = match verdict {
-                    Verdict::Accept { gas_used, trampoline } => {
+                    Verdict::Accept {
+                        gas_used,
+                        trampoline,
+                    } => {
                         if let Some(g) = gas_used {
                             p.gas_used = Some(g);
                         }

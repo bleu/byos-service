@@ -3,11 +3,7 @@
 //! The loop (infra) owns iteration, snapshotting, and state transitions; a
 //! [`ValidateProposal`] owns only the verdict on a single proposal.
 
-use {
-    super::proposal::Proposal,
-    alloy::primitives::Address,
-    serde::Serialize,
-};
+use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
 
 /// Why the background validator rejected a proposal. PascalCase on the wire
 /// (ADR-0007), exposed to sub-solvers via `GET /proposal/{id}`.

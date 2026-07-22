@@ -80,10 +80,11 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidatePr
     // Dispatch all validations concurrently — each is an RPC round-trip, so
     // parallelism avoids serializing O(N) network calls per tick.
     let results = futures::future::join_all(
-        to_validate.iter().map(|proposal| async move {
-            (proposal, validator.validate(proposal).await)
-        })
-    ).await;
+        to_validate
+            .iter()
+            .map(|proposal| async move { (proposal, validator.validate(proposal).await) }),
+    )
+    .await;
 
     for (proposal, verdict) in results {
         let Some(verdict) = verdict else {
@@ -188,10 +189,13 @@ mod tests {
         // before the verdict lands: applying the verdict must fail and the
         // cancellation must stick.
         store.cancel(id, sub_solver).expect("cancel succeeds");
-        let stale = store.resolve_verdict(id, crate::domain::validator::Verdict::Accept {
-            gas_used: None,
-            trampoline: None,
-        });
+        let stale = store.resolve_verdict(
+            id,
+            crate::domain::validator::Verdict::Accept {
+                gas_used: None,
+                trampoline: None,
+            },
+        );
 
         assert!(stale.is_err(), "stale verdict must be dropped");
         assert_eq!(

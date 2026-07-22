@@ -9,7 +9,8 @@ use alloy::primitives::{U256, utils::Unit};
 /// scoring — `/solve` uses the actual simulated gas from each proposal.
 pub const ESCROW_GAS_ESTIMATION: u64 = 200_000;
 
-/// Buffer added to simulated gas for scoring: `gas = simulated_gas + GAS_BUFFER`.
+/// Buffer added to simulated gas for scoring: `gas = simulated_gas +
+/// GAS_BUFFER`.
 pub const GAS_BUFFER: u64 = 100_000;
 
 /// Effective gas for a simulated proposal: simulated gas + safety buffer.

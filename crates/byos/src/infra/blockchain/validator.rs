@@ -3,7 +3,8 @@
 //! [`SimulationValidator`] dispatches `eth_estimateGas` against GPv2Settlement
 //! and resolves trampoline addresses via `TrampolineFactory.addressOf`.
 //!
-//! [`ProposalValidator`] composes [`EscrowValidator`](super::escrow::EscrowValidator)
+//! [`ProposalValidator`] composes
+//! [`EscrowValidator`](super::escrow::EscrowValidator)
 //! and [`SimulationValidator`] in sequence: escrow first (cheap cached read),
 //! then simulation (expensive RPC call).
 
@@ -60,8 +61,7 @@ impl<P: Provider + Clone> SimulationValidator<P> {
             return Ok(addr);
         }
 
-        let factory =
-            TrampolineFactory::new(self.trampoline_factory, &self.provider);
+        let factory = TrampolineFactory::new(self.trampoline_factory, &self.provider);
         let addr = factory.addressOf(sub_solver).call().await?;
 
         self.trampoline_cache.lock().insert(sub_solver, addr);
@@ -72,8 +72,8 @@ impl<P: Provider + Clone> SimulationValidator<P> {
 impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator<P> {
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
         // 1. Resolve trampoline address. If already stored on the proposal
-        //    (re-validation), skip the RPC call; otherwise resolve from the
-        //    factory (or its cache).
+        //    (re-validation), skip the RPC call; otherwise resolve from the factory (or
+        //    its cache).
         let trampoline = match proposal.trampoline {
             Some(addr) => addr,
             None => match self.resolve_trampoline(proposal.sub_solver).await {
@@ -248,17 +248,16 @@ mod tests {
     fn trampoline_cache_returns_stored_address() {
         let provider = alloy::providers::ProviderBuilder::new()
             .connect_http("http://127.0.0.1:1".parse().unwrap());
-        let validator = SimulationValidator::new(
-            provider,
-            Address::ZERO,
-            Address::ZERO,
-        );
+        let validator = SimulationValidator::new(provider, Address::ZERO, Address::ZERO);
 
         let sub_solver = address!("0000000000000000000000000000000000000001");
         let trampoline = address!("0000000000000000000000000000000000000099");
 
         // Pre-populate cache.
-        validator.trampoline_cache.lock().insert(sub_solver, trampoline);
+        validator
+            .trampoline_cache
+            .lock()
+            .insert(sub_solver, trampoline);
 
         // Verify cache hit (sync check, no RPC needed).
         let cached = validator.trampoline_cache.lock().get(&sub_solver).copied();
@@ -272,9 +271,10 @@ mod tests {
 
     #[test]
     fn is_revert_classifies_transport_error_as_not_revert() {
-        let transport = alloy::transports::TransportErrorKind::custom(
-            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
-        );
+        let transport = alloy::transports::TransportErrorKind::custom(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        ));
         assert!(!is_revert(&transport));
     }
 
