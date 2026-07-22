@@ -10,7 +10,7 @@
 use {
     super::{escrow::EscrowValidator, simulation},
     crate::domain::{
-        proposal::{Proposal, ProposalStatus},
+        proposal::Proposal,
         validator::{ValidateProposal, Verdict},
     },
     alloy::{
@@ -71,26 +71,32 @@ impl<P: Provider + Clone> SimulationValidator<P> {
 
 impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator<P> {
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
-        // 1. Resolve trampoline address.
-        let trampoline = if proposal.status == ProposalStatus::Submitted {
-            // First validation: resolve from factory (or cache).
-            match self.resolve_trampoline(proposal.sub_solver).await {
+        // 1. Resolve trampoline address. If already stored on the proposal
+        //    (re-validation), skip the RPC call; otherwise resolve from the
+        //    factory (or its cache).
+        let trampoline = match proposal.trampoline {
+            Some(addr) => addr,
+            None => match self.resolve_trampoline(proposal.sub_solver).await {
                 Ok(addr) => addr,
+                Err(e) if is_trampoline_revert(&e) => {
+                    tracing::info!(
+                        id = %proposal.id,
+                        sub_solver = %proposal.sub_solver,
+                        error = %e,
+                        "trampoline resolution reverted, marking SimFailed",
+                    );
+                    return Some(Verdict::SimFailed);
+                }
                 Err(e) => {
                     tracing::warn!(
                         id = %proposal.id,
                         sub_solver = %proposal.sub_solver,
                         error = %e,
-                        "trampoline resolution failed, deferring to next tick",
+                        "trampoline resolution failed (transient), deferring to next tick",
                     );
                     return None;
                 }
-            }
-        } else {
-            // Re-validation: use the already-stored trampoline.
-            proposal.trampoline.expect(
-                "Active proposal must have a trampoline address set from first validation",
-            )
+            },
         };
 
         // 2. Build simulation calldata.
@@ -153,6 +159,19 @@ fn is_revert(e: &alloy::transports::RpcError<alloy::transports::TransportErrorKi
     matches!(e, RpcError::ErrorResp(_) | RpcError::NullResp)
 }
 
+/// Returns `true` when a trampoline resolution error is a real failure
+/// (contract revert) rather than a transient transport error. Same
+/// classification as `escrow::is_server_error` but operating on
+/// `alloy::contract::Error` (which wraps the transport layer).
+fn is_trampoline_revert(e: &alloy::contract::Error) -> bool {
+    match e {
+        alloy::contract::Error::TransportError(rpc_err) => {
+            matches!(rpc_err, RpcError::ErrorResp(_) | RpcError::NullResp)
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ProposalValidator (composite)
 // ---------------------------------------------------------------------------
@@ -180,7 +199,7 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for ProposalValidator<P
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
         // 1. Escrow check (cheap, cached).
         let escrow_verdict = self.escrow.validate(proposal).await;
-        match &escrow_verdict {
+        match escrow_verdict {
             Some(Verdict::Accept { .. }) => { /* continue to simulation */ }
             _ => return escrow_verdict, // Reject, SimFailed, or None (deferred)
         }
@@ -257,5 +276,24 @@ mod tests {
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
         );
         assert!(!is_revert(&transport));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_trampoline_revert
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trampoline_null_resp_is_revert() {
+        let err = alloy::contract::Error::TransportError(RpcError::NullResp);
+        assert!(is_trampoline_revert(&err));
+    }
+
+    #[test]
+    fn trampoline_transport_error_is_not_revert() {
+        let err =
+            alloy::contract::Error::TransportError(alloy::transports::TransportErrorKind::custom(
+                std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+            ));
+        assert!(!is_trampoline_revert(&err));
     }
 }

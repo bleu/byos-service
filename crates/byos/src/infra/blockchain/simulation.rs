@@ -34,15 +34,16 @@ pub struct SimulationParams {
     pub signature: Bytes,
 }
 
-/// Builds the `settle()` calldata for simulating a proposal via `eth_call`.
+/// Builds the `settle()` calldata for simulating a proposal via
+/// `eth_estimateGas`.
 ///
 /// Uses empty tokens/prices/trades arrays and three intra-interactions.
 ///
 /// # Warning
 ///
-/// This calldata is intended **only** for `eth_call` simulation. It must
-/// never be submitted as a real transaction — the first interaction fakes
-/// token movement that the vault relayer handles in production.
+/// This calldata is intended **only** for `eth_estimateGas` simulation. It
+/// must never be submitted as a real transaction — the first interaction
+/// fakes token movement that the vault relayer handles in production.
 pub fn build_simulation_calldata(params: &SimulationParams) -> Bytes {
     // Intra-interaction 0: transferFrom(user, settlement, sellAmount).
     // Simulation-only — in production the vault relayer moves tokens into

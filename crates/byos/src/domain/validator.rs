@@ -18,7 +18,7 @@ pub enum RejectionReason {
 }
 
 /// Outcome of validating a single proposal.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Passed gatekeeping — proposal becomes `Active`. Carries optional
     /// simulation results to store on the proposal.

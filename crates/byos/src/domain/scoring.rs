@@ -12,6 +12,11 @@ pub const ESCROW_GAS_ESTIMATION: u64 = 200_000;
 /// Buffer added to simulated gas for scoring: `gas = simulated_gas + GAS_BUFFER`.
 pub const GAS_BUFFER: u64 = 100_000;
 
+/// Effective gas for a simulated proposal: simulated gas + safety buffer.
+pub fn effective_gas(simulated: u64) -> u64 {
+    simulated + GAS_BUFFER
+}
+
 pub struct ScoreInput {
     pub order_sell: U256,
     pub order_buy: U256,

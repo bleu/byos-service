@@ -1,9 +1,10 @@
 //! Background validation loop (ADR-0001, async ingestion).
 //!
 //! `POST /proposals` only checks the signature and stores the proposal as
-//! `Submitted`. Each tick of this loop judges every `Submitted` proposal via
-//! the configured [`ValidateProposal`] and transitions it to
-//! `Active`/`Rejected`/`SimFailed`.
+//! `Submitted`. Each tick of this loop validates every `Submitted` and
+//! `Active` proposal via the configured [`ValidateProposal`] implementor,
+//! transitioning them to `Active`/`Rejected`/`SimFailed` or updating their
+//! simulation data on re-validation.
 
 use {
     crate::domain::{
@@ -45,8 +46,9 @@ pub fn spawn(
 /// 1. **Expiry** — any live (`Submitted`/`Active`) proposal whose `valid_until`
 ///    is behind `now` flips to `Expired`. Runs first so an already-expired
 ///    submission is never validated and activated.
-/// 2. **Validation** — every remaining `Submitted` proposal is judged by the
-///    validator and transitioned to `Active`/`Rejected`/`SimFailed`.
+/// 2. **Validation** — every remaining `Submitted` and `Active` proposal is
+///    judged by the validator concurrently (all RPC calls in flight at once)
+///    and transitioned to `Active`/`Rejected`/`SimFailed`.
 ///
 /// `now` is a unix timestamp from the wall clock; `valid_until` is signed
 /// against block timestamps. The drift is seconds at most and only affects
@@ -75,8 +77,16 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidatePr
         }
     }
 
-    for proposal in to_validate {
-        let Some(verdict) = validator.validate(&proposal).await else {
+    // Dispatch all validations concurrently — each is an RPC round-trip, so
+    // parallelism avoids serializing O(N) network calls per tick.
+    let results = futures::future::join_all(
+        to_validate.iter().map(|proposal| async move {
+            (proposal, validator.validate(proposal).await)
+        })
+    ).await;
+
+    for (proposal, verdict) in results {
+        let Some(verdict) = verdict else {
             tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
             continue;
         };

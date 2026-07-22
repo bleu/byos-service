@@ -5,7 +5,7 @@ use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::{GAS_BUFFER, ScoreInput, score_proposal},
+        scoring::{ScoreInput, effective_gas, score_proposal},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -67,9 +67,9 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .filter(|p| p.valid_until > now)
             .filter(|p| p.gas_used.is_some())
             .filter_map(|p| {
-                let gas = p.gas_used.unwrap() + GAS_BUFFER;
                 let gas_cost =
-                    U256::from(gas).saturating_mul(auction.effective_gas_price);
+                    U256::from(effective_gas(p.gas_used.unwrap()))
+                        .saturating_mul(auction.effective_gas_price);
                 let score = score_proposal(&ScoreInput {
                     order_sell: order.sell_amount,
                     order_buy: order.buy_amount,
@@ -164,7 +164,7 @@ fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> Optio
         pre_interactions: vec![],
         interactions,
         post_interactions: vec![],
-        gas: Some(proposal.gas_used.unwrap() + GAS_BUFFER),
+        gas: Some(effective_gas(proposal.gas_used.unwrap())),
         flashloans: None,
         wrappers: vec![],
     })

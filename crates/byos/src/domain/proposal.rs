@@ -393,28 +393,28 @@ impl InMemoryProposalStore {
                 ) {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: ProposalStatus::Active,
+                        expected: ProposalStatus::Submitted,
                         actual: proposal.status,
                     });
                 }
                 let from_status = proposal.status;
-                let rejection_reason = match &verdict {
-                    Verdict::Reject(reason) => Some(*reason),
+                let rejection_reason = match verdict {
+                    Verdict::Reject(reason) => Some(reason),
                     Verdict::Accept { .. } | Verdict::SimFailed => None,
                 };
                 let p = Arc::make_mut(proposal);
-                p.status = match &verdict {
+                p.status = match verdict {
                     Verdict::Accept { gas_used, trampoline } => {
                         if let Some(g) = gas_used {
-                            p.gas_used = Some(*g);
+                            p.gas_used = Some(g);
                         }
                         if let Some(t) = trampoline {
-                            p.trampoline = Some(*t);
+                            p.trampoline = Some(t);
                         }
                         ProposalStatus::Active
                     }
                     Verdict::Reject(reason) => {
-                        p.rejection_reason = Some(*reason);
+                        p.rejection_reason = Some(reason);
                         ProposalStatus::Rejected
                     }
                     Verdict::SimFailed => ProposalStatus::SimFailed,
@@ -433,17 +433,22 @@ impl InMemoryProposalStore {
             (from_status, status, sub_solver, order_uid, rejection_reason)
         };
 
-        self.emit(audit::AuditEvent {
-            occurred_at: SystemTime::now(),
-            kind: audit::AuditKind::StatusChanged {
-                proposal_id: id,
-                sub_solver,
-                order_uid,
-                from: from_status,
-                to: status,
-                rejection_reason,
-            },
-        });
+        // Only emit an audit event when the status actually changes.
+        // Re-validation of Active proposals (Active→Active) updates gas_used
+        // but does not change status — emitting on every tick would be noisy.
+        if from_status != status {
+            self.emit(audit::AuditEvent {
+                occurred_at: SystemTime::now(),
+                kind: audit::AuditKind::StatusChanged {
+                    proposal_id: id,
+                    sub_solver,
+                    order_uid,
+                    from: from_status,
+                    to: status,
+                    rejection_reason,
+                },
+            });
+        }
         Ok(status)
     }
 
@@ -467,7 +472,7 @@ impl InMemoryProposalStore {
                 ) {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: ProposalStatus::Active,
+                        expected: ProposalStatus::Submitted,
                         actual: proposal.status,
                     });
                 }
