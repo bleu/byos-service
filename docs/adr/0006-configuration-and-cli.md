@@ -19,7 +19,7 @@ The service needs operational configuration (ports, RPC URLs, log filters) and b
 - **Startup sequence in `run.rs`** ([ADR-0005](0005-crate-anatomy-and-layering.md)): parse args → init tracing ([ADR-0008](0008-observability.md)) → log version + full resolved args → load and validate TOML → build and serve.
 - **Secrets stay out of TOML**: the escrow operator key and RPC API keys arrive via env-var-backed clap args, never committed files.
 
-BYOS-specific config concerns the TOML must cover from day one: chain id, `GPv2Settlement` / TrampolineFactory / Escrow addresses, `c_l` fallback value ([ADR-0003](0003-slash-attribution-flow.md)), fee rate (default 0, [ADR-0002](0002-solver-engine.md)), rate-limit tiers ([ADR-0001](0001-proposal-api.md)), simulation interval, public and internal listener addresses, audit-trail path/retention.
+BYOS-specific config concerns the TOML must cover from day one: chain id, `GPv2Settlement` / TrampolineFactory / Escrow addresses (GPv2Settlement is the `--settlement-address` CLI arg), `c_l` fallback value ([ADR-0003](0003-slash-attribution-flow.md)), fee rate (default 0, [ADR-0002](0002-solver-engine.md)), rate-limit tiers ([ADR-0001](0001-proposal-api.md)), simulation interval, public and internal listener addresses, audit-trail path/retention.
 
 ## Alternatives considered
 

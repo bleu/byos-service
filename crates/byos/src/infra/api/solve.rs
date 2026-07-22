@@ -5,9 +5,9 @@ use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::{GAS_ESTIMATE, ScoreInput, score_proposal},
+        scoring::{GAS_BUFFER, ScoreInput, score_proposal},
     },
-    alloy::primitives::{Address, U256},
+    alloy::primitives::U256,
     axum::{Json, extract::State},
     byos_common::trampoline::encode_trampoline_interactions,
     solvers_dto::{
@@ -45,7 +45,6 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         }
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
-        let gas_cost = U256::from(GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
 
         // The surplus token is the buy token for sell orders, sell token for buy
         // orders.
@@ -61,10 +60,16 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .unwrap_or(U256::ZERO);
 
         // Score and select the best proposal for this order.
+        // Only proposals with simulation gas are eligible — proposals that
+        // haven't been simulated yet (gas_used: None) are skipped.
         let best = proposals
             .iter()
             .filter(|p| p.valid_until > now)
+            .filter(|p| p.gas_used.is_some())
             .filter_map(|p| {
+                let gas = p.gas_used.unwrap() + GAS_BUFFER;
+                let gas_cost =
+                    U256::from(gas).saturating_mul(auction.effective_gas_price);
                 let score = score_proposal(&ScoreInput {
                     order_sell: order.sell_amount,
                     order_buy: order.buy_amount,
@@ -84,7 +89,9 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         // Build the solution using solvers-dto types.
         let id = solutions.len() as u64 + 1;
-        solutions.push(build_solution(id, order, proposal));
+        if let Some(sol) = build_solution(id, order, proposal) {
+            solutions.push(sol);
+        }
     }
 
     tracing::debug!(count = solutions.len(), "solve: returning solutions");
@@ -92,12 +99,14 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
     Json(Solutions { solutions })
 }
 
-fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solution::Solution {
-    // We need a trampoline address to encode interactions. For M1, we use
-    // Address::ZERO as a placeholder — in production this comes from
-    // ITrampolineFactory.addressOf(subSolver) resolved at proposal ingestion.
-    // TODO: resolve trampoline address during ingestion.
-    let trampoline = Address::ZERO;
+fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> Option<solution::Solution> {
+    let Some(trampoline) = proposal.trampoline else {
+        tracing::error!(
+            id = %proposal.id,
+            "proposal reached build_solution without trampoline — skipping",
+        );
+        return None;
+    };
 
     let trampoline_interactions = encode_trampoline_interactions(
         trampoline,
@@ -148,15 +157,15 @@ fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solut
         fee: None,
     });
 
-    solution::Solution {
+    Some(solution::Solution {
         id,
         prices,
         trades: vec![trade],
         pre_interactions: vec![],
         interactions,
         post_interactions: vec![],
-        gas: Some(GAS_ESTIMATE),
+        gas: Some(proposal.gas_used.unwrap() + GAS_BUFFER),
         flashloans: None,
         wrappers: vec![],
-    }
+    })
 }

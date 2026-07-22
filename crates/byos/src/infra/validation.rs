@@ -2,13 +2,13 @@
 //!
 //! `POST /proposals` only checks the signature and stores the proposal as
 //! `Submitted`. Each tick of this loop judges every `Submitted` proposal via
-//! the configured [`ProposalValidator`] and transitions it to
+//! the configured [`ValidateProposal`] and transitions it to
 //! `Active`/`Rejected`/`SimFailed`.
 
 use {
     crate::domain::{
         proposal::{InMemoryProposalStore, ProposalStatus},
-        validator::ProposalValidator,
+        validator::ValidateProposal,
     },
     std::{
         sync::Arc,
@@ -24,7 +24,7 @@ use {
 /// there.
 pub fn spawn(
     store: Arc<InMemoryProposalStore>,
-    validator: impl ProposalValidator + 'static,
+    validator: impl ValidateProposal + 'static,
     period: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -57,7 +57,7 @@ pub fn spawn(
 /// one scan); each write is a compare-and-swap transition, so a proposal
 /// cancelled mid-validation keeps its cancellation (the stale verdict is
 /// dropped).
-pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalValidator, now: u64) {
+pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidateProposal, now: u64) {
     validator.begin_tick();
 
     let live = store.snapshot_by_statuses(&[ProposalStatus::Submitted, ProposalStatus::Active]);
@@ -69,7 +69,8 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalVa
                 Ok(()) => tracing::info!(id = %proposal.id, "proposal expired"),
                 Err(e) => tracing::debug!(id = %proposal.id, %e, "stale expiry dropped"),
             }
-        } else if proposal.status == ProposalStatus::Submitted {
+        } else {
+            // Both Submitted and Active proposals are validated.
             to_validate.push(proposal);
         }
     }
@@ -79,7 +80,7 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ProposalVa
             tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
             continue;
         };
-        match store.resolve_submitted(proposal.id, verdict) {
+        match store.resolve_verdict(proposal.id, verdict) {
             Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
             Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
         }
@@ -145,7 +146,7 @@ mod tests {
 
     struct FailAll;
 
-    impl ProposalValidator for FailAll {
+    impl ValidateProposal for FailAll {
         async fn validate(
             &self,
             _proposal: &Proposal,
@@ -177,7 +178,10 @@ mod tests {
         // before the verdict lands: applying the verdict must fail and the
         // cancellation must stick.
         store.cancel(id, sub_solver).expect("cancel succeeds");
-        let stale = store.resolve_submitted(id, crate::domain::validator::Verdict::Accept);
+        let stale = store.resolve_verdict(id, crate::domain::validator::Verdict::Accept {
+            gas_used: None,
+            trampoline: None,
+        });
 
         assert!(stale.is_err(), "stale verdict must be dropped");
         assert_eq!(

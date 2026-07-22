@@ -28,7 +28,7 @@ BYOS computes its own score for each proposal: `score = surplus + fee - gas`.
 
 - **Surplus** — the buy-side improvement beyond the order's limit price **net of the BYOS fee** (what the user actually receives), converted to native token using cached reference prices.
 - **Fee** — the BYOS fee for the settlement (see §Fee mechanism below), converted to native token using the same reference prices.
-- **Gas** — estimated gas cost, cached from ingestion-time simulation.
+- **Gas** — estimated gas cost from `eth_estimateGas` simulation plus a 100k buffer, cached on the proposal.
 
 Because surplus is net of fee, `surplus + fee` is the gross price improvement — the fee is not counted twice, and ranking follows total value created rather than the fee portion.
 

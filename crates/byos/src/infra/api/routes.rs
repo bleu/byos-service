@@ -110,6 +110,8 @@ pub async fn create_proposal(
         order_uid_hash,
         sell_amount,
         buy_amount,
+        sell_token: body.sell_token,
+        buy_token: body.buy_token,
         interactions,
         interactions_hash,
         valid_until,
@@ -117,6 +119,8 @@ pub async fn create_proposal(
         signature: Bytes::from(signature_bytes),
         status: ProposalStatus::Submitted,
         rejection_reason: None,
+        gas_used: None,
+        trampoline: None,
         created_at: Instant::now(),
     };
 

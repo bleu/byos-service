@@ -9,7 +9,7 @@ Status: accepted
 ## Context
 
 The public HTTP API by which sub-solvers submit signed proposals. Endpoints (RFP):
-- `POST /proposals` — `{order_uid, sell_amount, buy_amount, interactions, valid_until, nonce, signature}`
+- `POST /proposals` — `{order_uid, sell_amount, buy_amount, sell_token, buy_token, interactions, valid_until, nonce, signature}`
 - `GET /proposals/{order_uid}` — metadata only, never full contents (no leakage channel)
 - `DELETE /proposals/{id}` — cancellation by the original signer
 
@@ -84,7 +84,7 @@ Proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signatu
 
 `POST /proposals` does three things inline: parse the request, recover the signer (`ecrecover`), and check that the proposal is not already expired (`valid_until < now`). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature failures and already-expired proposals reject synchronously with a 4xx — there is no point accepting, storing, and auditing a proposal that is dead on arrival.
 
-All on-chain work — the escrow balance check and the simulation `eth_call` — runs in a background validator loop, off the request path. Each tick (configurable interval, default 12s, one mainnet block; block-driven ticking is a decision for the simulation work, COW-1162) sweeps expired proposals, then judges every `Submitted` proposal and flips it to `Active`, `Rejected`, or `SimFailed`. Sub-solvers poll `GET /proposal/{id}` for the verdict; a rejection carries its typed reason.
+All on-chain work — the escrow balance check and the simulation `eth_estimateGas` ([ADR-0012](0012-simulation.md)) — runs in a background validator loop, off the request path. Each tick (configurable interval, default 12s) sweeps expired proposals, then validates every `Submitted` and `Active` proposal. `Submitted` proposals are flipped to `Active`, `Rejected`, or `SimFailed`; `Active` proposals are re-validated and flipped to `SimFailed` if the simulation now reverts. Sub-solvers poll `GET /proposal/{id}` for the verdict; a rejection carries its typed reason.
 
 ### Rate limiting: two-layer, escrow-tiered
 

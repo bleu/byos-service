@@ -204,6 +204,8 @@ pub struct ProposalFixture {
     pub order_uid: [u8; 56],
     pub sell_amount: U256,
     pub buy_amount: U256,
+    pub sell_token: Address,
+    pub buy_token: Address,
     pub valid_until: U256,
     pub nonce: U256,
     pub interactions: Vec<Interaction>,
@@ -215,6 +217,8 @@ impl Default for ProposalFixture {
             order_uid: [0xab; 56],
             sell_amount: U256::from(1_000_000u64),
             buy_amount: U256::from(990_000u64),
+            sell_token: alloy::primitives::address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+            buy_token: alloy::primitives::address!("6B175474E89094C44Da98b954EedeAC495271d0F"),
             // Far future: the background expiry sweep must never reap a
             // fixture mid-test.
             valid_until: U256::from(u32::MAX),
@@ -254,6 +258,8 @@ impl ProposalFixture {
             "orderUid": alloy::hex::encode_prefixed(self.order_uid),
             "sellAmount": self.sell_amount.to_string(),
             "buyAmount": self.buy_amount.to_string(),
+            "sellToken": self.sell_token,
+            "buyToken": self.buy_token,
             "interactions": self.interactions.iter().map(|i| json!({
                 "target": i.target.to_string(),
                 "value": i.value.to_string(),
