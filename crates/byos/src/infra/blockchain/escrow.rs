@@ -4,8 +4,8 @@
 use {
     crate::domain::{
         proposal::Proposal,
-        scoring::GAS_ESTIMATE,
-        validator::{ProposalValidator, RejectionReason, Verdict},
+        scoring::ESCROW_GAS_ESTIMATION,
+        validator::{RejectionReason, ValidateProposal, Verdict},
     },
     alloy::{
         primitives::{Address, U256},
@@ -25,7 +25,7 @@ use {
 ///
 /// Balances are cached per-tick (one RPC call per sub-solver per validation
 /// tick, reused for all their proposals in that tick). The cache is cleared
-/// by [`begin_tick`](ProposalValidator::begin_tick).
+/// by [`begin_tick`](ValidateProposal::begin_tick).
 pub struct EscrowValidator<P> {
     provider: P,
     escrow_address: Address,
@@ -41,7 +41,7 @@ impl<P> EscrowValidator<P> {
     /// Minimum escrow balance: `gas_estimate * gas_price + min_collateral`.
     fn threshold(&self) -> U256 {
         let gas_price = U256::from(self.gas_price.load(Ordering::Relaxed));
-        U256::from(GAS_ESTIMATE)
+        U256::from(ESCROW_GAS_ESTIMATION)
             .saturating_mul(gas_price)
             .saturating_add(self.min_collateral)
     }
@@ -82,7 +82,7 @@ impl<P: Provider> EscrowValidator<P> {
     }
 }
 
-impl<P: Provider + Send + Sync> ProposalValidator for EscrowValidator<P> {
+impl<P: Provider + Clone + Send + Sync> ValidateProposal for EscrowValidator<P> {
     fn begin_tick(&self) {
         self.clear_cache();
     }
@@ -93,7 +93,10 @@ impl<P: Provider + Send + Sync> ProposalValidator for EscrowValidator<P> {
         match self.get_balance(proposal.sub_solver).await {
             Ok(balance) => {
                 if balance >= threshold {
-                    Some(Verdict::Accept)
+                    Some(Verdict::Accept {
+                        gas_used: None,
+                        trampoline: None,
+                    })
                 } else {
                     tracing::info!(
                         id = %proposal.id,

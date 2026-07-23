@@ -23,6 +23,7 @@ axum.workspace = true
 byos-common.workspace = true
 chrono.workspace = true
 clap.workspace = true
+futures.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
 serde.workspace = true

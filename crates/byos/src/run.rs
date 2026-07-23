@@ -8,7 +8,10 @@ use {
         infra::{
             api::{self, AppState},
             audit,
-            blockchain::escrow::EscrowValidator,
+            blockchain::{
+                escrow::EscrowValidator,
+                validator::{ProposalValidator, SimulationValidator},
+            },
         },
     },
     alloy::{primitives::U256, providers::Provider},
@@ -58,13 +61,18 @@ pub(crate) struct Args {
     /// tests that don't need chain connectivity). Prefer the RPC_URL env var
     /// in production — the URL may contain API keys. When set, requires
     /// `--escrow-address`, `--min-collateral`, and `--default-gas-price`.
-    #[arg(long, env, requires_all = ["escrow_address", "min_collateral", "default_gas_price"])]
+    #[arg(long, env, requires_all = ["escrow_address", "min_collateral", "default_gas_price", "settlement_address"])]
     rpc_url: Option<RpcUrl>,
 
     /// Escrow contract address for sub-solver balance checks. Required when
     /// `--rpc-url` is set.
     #[arg(long, env)]
     escrow_address: Option<alloy::primitives::Address>,
+
+    /// GPv2Settlement contract address. Used as both `from` and `to` for
+    /// simulation `eth_estimateGas` calls. Required when `--rpc-url` is set.
+    #[arg(long, env)]
+    settlement_address: Option<alloy::primitives::Address>,
 
     /// Minimum collateral (`c_l`) in wei. Chain-specific: 0.010 ETH for
     /// mainnet (~10000000000000000), 10 xDAI for Gnosis
@@ -178,15 +186,16 @@ async fn run_with(
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
 
     // Background validator (ADR-0001, async ingestion). When --rpc-url is
-    // set, the escrow validator gates proposals via on-chain balance checks;
-    // simulation is added by a follow-up task. Without an RPC endpoint the
+    // set, the composite ProposalValidator gates proposals via on-chain escrow
+    // balance checks and settlement simulation. Without an RPC endpoint the
     // service falls back to AcceptAll (useful for tests).
     // clap's `requires_all` on --rpc-url guarantees that --escrow-address,
-    // --min-collateral, and --default-gas-price are present when --rpc-url
-    // is set — the unwraps below cannot fail.
+    // --min-collateral, --default-gas-price, and --settlement-address are
+    // present when --rpc-url is set — the unwraps below cannot fail.
     let validation_loop = if let Some(rpc_url) = args.rpc_url {
         let escrow_address = args.escrow_address.unwrap();
         let min_collateral = args.min_collateral.unwrap();
+        let settlement_address = args.settlement_address.unwrap();
 
         let url: reqwest::Url = rpc_url.0.parse().context("invalid --rpc-url")?;
         let provider = alloy::providers::ProviderBuilder::new().connect_http(url);
@@ -198,15 +207,18 @@ async fn run_with(
             .await
             .context("RPC unreachable at startup (--rpc-url)")?;
 
-        let validator = EscrowValidator::new(
-            provider,
+        let escrow = EscrowValidator::new(
+            provider.clone(),
             escrow_address,
             U256::from(min_collateral),
             gas_price,
         );
+        let simulation =
+            SimulationValidator::new(provider, settlement_address, args.trampoline_factory);
+        let validator = ProposalValidator::new(escrow, simulation);
         crate::infra::validation::spawn(store, validator, period)
     } else {
-        tracing::warn!("no --rpc-url provided, escrow checks disabled (AcceptAll)");
+        tracing::warn!("no --rpc-url provided, validation disabled (AcceptAll)");
         crate::infra::validation::spawn(store, crate::domain::validator::AcceptAll, period)
     };
 

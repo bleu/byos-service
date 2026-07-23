@@ -5,9 +5,18 @@
 
 use alloy::primitives::{U256, utils::Unit};
 
-/// Fixed gas estimate for M1 (no simulation-based estimate yet). Used by both
-/// the `/solve` scoring path and the escrow balance threshold.
-pub const GAS_ESTIMATE: u64 = 200_000;
+/// Conservative gas floor for escrow threshold calculations. Not used for
+/// scoring — `/solve` uses the actual simulated gas from each proposal.
+pub const ESCROW_GAS_ESTIMATION: u64 = 200_000;
+
+/// Buffer added to simulated gas for scoring: `gas = simulated_gas +
+/// GAS_BUFFER`.
+pub const GAS_BUFFER: u64 = 100_000;
+
+/// Effective gas for a simulated proposal: simulated gas + safety buffer.
+pub fn effective_gas(simulated: u64) -> u64 {
+    simulated + GAS_BUFFER
+}
 
 pub struct ScoreInput {
     pub order_sell: U256,

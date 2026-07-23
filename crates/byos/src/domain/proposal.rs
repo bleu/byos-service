@@ -68,6 +68,11 @@ impl OrderUid {
         arr.copy_from_slice(&bytes);
         Ok(Self(arr))
     }
+
+    /// Extract the 20-byte owner address from bytes 32..52 of the order UID.
+    pub fn owner(&self) -> Address {
+        Address::from_slice(&self.0[32..52])
+    }
 }
 
 impl std::str::FromStr for OrderUid {
@@ -104,15 +109,24 @@ pub struct Proposal {
     pub order_uid_hash: B256,
     pub sell_amount: U256,
     pub buy_amount: U256,
+    pub sell_token: Address,
+    pub buy_token: Address,
     pub interactions: Vec<byos_common::contracts::Interaction>,
     pub interactions_hash: B256,
     pub valid_until: U256,
     pub nonce: U256,
     pub signature: Bytes,
     pub status: ProposalStatus,
-    /// Why the background validator rejected this proposal. Only ever set by
-    /// the `Submitted → Rejected` transition.
+    /// Why the background validator rejected this proposal. Set on
+    /// `Submitted → Rejected` or `Active → Rejected` (escrow re-check).
     pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
+    /// Gas consumed by the simulation `eth_estimateGas` call. Set by the
+    /// validator on successful simulation; `None` until first validation pass.
+    pub gas_used: Option<u64>,
+    /// Trampoline address resolved via
+    /// `TrampolineFactory.addressOf(sub_solver)`. Set by the validator on
+    /// first validation; `None` until resolved.
+    pub trampoline: Option<Address>,
     pub created_at: Instant,
 }
 
@@ -127,7 +141,7 @@ pub enum StoreError {
     #[error("proposal {id} is {actual}, expected {expected}")]
     StaleTransition {
         id: ProposalId,
-        expected: ProposalStatus,
+        expected: String,
         actual: ProposalStatus,
     },
 }
@@ -147,6 +161,8 @@ pub(crate) fn test_proposal(
         order_uid_hash,
         sell_amount: U256::from(1_000_000_u64),
         buy_amount: U256::from(990_000_u64),
+        sell_token: Address::ZERO,
+        buy_token: Address::ZERO,
         interactions: vec![],
         interactions_hash: B256::ZERO,
         valid_until: U256::from(u64::MAX),
@@ -154,6 +170,8 @@ pub(crate) fn test_proposal(
         signature: Bytes::new(),
         status,
         rejection_reason: None,
+        gas_used: None,
+        trampoline: None,
         created_at: Instant::now(),
     }
 }
@@ -318,7 +336,7 @@ impl InMemoryProposalStore {
                 if proposal.status != from {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: from,
+                        expected: from.to_string(),
                         actual: proposal.status,
                     });
                 }
@@ -346,39 +364,59 @@ impl InMemoryProposalStore {
         Ok(())
     }
 
-    /// Apply a validator verdict to a `Submitted` proposal. Only the
-    /// `Rejected` outcome writes a rejection reason. Fails with
-    /// `StaleTransition` if the proposal already left `Submitted` (e.g. a
-    /// cancellation raced the validator). A landed verdict emits a
-    /// status-changed audit event carrying the rejection reason, if any.
-    pub fn resolve_submitted(
+    /// Apply a validator verdict to a `Submitted` or `Active` proposal.
+    ///
+    /// - `Accept`: transitions `Submitted` → `Active`, or keeps `Active` →
+    ///   `Active` (re-validation). Writes `gas_used` and `trampoline` when
+    ///   present in the verdict.
+    /// - `Reject`: transitions to `Rejected` with a rejection reason.
+    /// - `SimFailed`: transitions to `SimFailed`.
+    ///
+    /// Fails with `StaleTransition` if the proposal is not in `Submitted` or
+    /// `Active` (e.g. a cancellation raced the validator).
+    pub fn resolve_verdict(
         &self,
         id: ProposalId,
         verdict: crate::domain::validator::Verdict,
     ) -> Result<ProposalStatus, StoreError> {
         use crate::domain::validator::Verdict;
 
-        let (status, sub_solver, order_uid, rejection_reason) = {
+        let (from_status, status, sub_solver, order_uid, rejection_reason) = {
             let mut inner = self.inner.write();
-            let (status, sub_solver, order_uid, rejection_reason) = {
+            let (from_status, status, sub_solver, order_uid, rejection_reason) = {
                 let proposal = inner
                     .proposals
                     .get_mut(&id)
                     .ok_or(StoreError::NotFound(id))?;
-                if proposal.status != ProposalStatus::Submitted {
+                if !matches!(
+                    proposal.status,
+                    ProposalStatus::Submitted | ProposalStatus::Active
+                ) {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: ProposalStatus::Submitted,
+                        expected: "submitted or active".into(),
                         actual: proposal.status,
                     });
                 }
+                let from_status = proposal.status;
                 let rejection_reason = match verdict {
                     Verdict::Reject(reason) => Some(reason),
-                    Verdict::Accept | Verdict::SimFailed => None,
+                    Verdict::Accept { .. } | Verdict::SimFailed => None,
                 };
                 let p = Arc::make_mut(proposal);
                 p.status = match verdict {
-                    Verdict::Accept => ProposalStatus::Active,
+                    Verdict::Accept {
+                        gas_used,
+                        trampoline,
+                    } => {
+                        if let Some(g) = gas_used {
+                            p.gas_used = Some(g);
+                        }
+                        if let Some(t) = trampoline {
+                            p.trampoline = Some(t);
+                        }
+                        ProposalStatus::Active
+                    }
                     Verdict::Reject(reason) => {
                         p.rejection_reason = Some(reason);
                         ProposalStatus::Rejected
@@ -386,6 +424,7 @@ impl InMemoryProposalStore {
                     Verdict::SimFailed => ProposalStatus::SimFailed,
                 };
                 (
+                    from_status,
                     p.status,
                     p.sub_solver,
                     p.order_uid.clone(),
@@ -395,20 +434,25 @@ impl InMemoryProposalStore {
             if is_terminal(status) {
                 prune_indexes(&mut inner, id, &order_uid, sub_solver);
             }
-            (status, sub_solver, order_uid, rejection_reason)
+            (from_status, status, sub_solver, order_uid, rejection_reason)
         };
 
-        self.emit(audit::AuditEvent {
-            occurred_at: SystemTime::now(),
-            kind: audit::AuditKind::StatusChanged {
-                proposal_id: id,
-                sub_solver,
-                order_uid,
-                from: ProposalStatus::Submitted,
-                to: status,
-                rejection_reason,
-            },
-        });
+        // Only emit an audit event when the status actually changes.
+        // Re-validation of Active proposals (Active→Active) updates gas_used
+        // but does not change status — emitting on every tick would be noisy.
+        if from_status != status {
+            self.emit(audit::AuditEvent {
+                occurred_at: SystemTime::now(),
+                kind: audit::AuditKind::StatusChanged {
+                    proposal_id: id,
+                    sub_solver,
+                    order_uid,
+                    from: from_status,
+                    to: status,
+                    rejection_reason,
+                },
+            });
+        }
         Ok(status)
     }
 
@@ -432,7 +476,7 @@ impl InMemoryProposalStore {
                 ) {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: ProposalStatus::Active,
+                        expected: "submitted or active".into(),
                         actual: proposal.status,
                     });
                 }
@@ -495,6 +539,19 @@ mod tests {
 
     const SOLVER_A: Address = address!("0000000000000000000000000000000000000001");
     const SOLVER_B: Address = address!("0000000000000000000000000000000000000002");
+
+    #[test]
+    fn order_uid_owner_extracts_bytes_32_to_52() {
+        let mut uid = [0u8; 56];
+        // bytes 0..32: order hash
+        uid[..32].fill(0xaa);
+        // bytes 32..52: owner address
+        uid[32..52].copy_from_slice(SOLVER_A.as_slice());
+        // bytes 52..56: validTo
+        uid[52..56].fill(0xff);
+
+        assert_eq!(OrderUid(uid).owner(), SOLVER_A);
+    }
 
     fn test_store() -> (InMemoryProposalStore, mpsc::UnboundedReceiver<AuditEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -674,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_submitted_emits_status_changed_event() {
+    fn resolve_verdict_emits_status_changed_event() {
         let (store, mut audit) = test_store();
         let solver = SOLVER_A;
         let mut proposal = make_proposal(test_order_uid(), solver);
@@ -685,7 +742,7 @@ mod tests {
 
         let reason = crate::domain::validator::RejectionReason::InsufficientEscrow;
         store
-            .resolve_submitted(id, crate::domain::validator::Verdict::Reject(reason))
+            .resolve_verdict(id, crate::domain::validator::Verdict::Reject(reason))
             .expect("verdict lands");
 
         let event = audit.try_recv().expect("verdict should emit an event");

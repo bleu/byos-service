@@ -199,6 +199,8 @@ mod tests {
             "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
             "sellAmount": "1000000",
             "buyAmount": "990000",
+            "sellToken": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "buyToken": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
             "interactions": [],
             "validUntil": "99999999999",
             "nonce": "1",
@@ -230,7 +232,7 @@ mod tests {
 
     struct RejectAll;
 
-    impl crate::domain::validator::ProposalValidator for RejectAll {
+    impl crate::domain::validator::ValidateProposal for RejectAll {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
@@ -507,6 +509,8 @@ mod tests {
         let mut proposal = test_proposal(OrderUid(ORDER_UID), sub_solver, ProposalStatus::Active);
         proposal.sell_amount = U256::from(sell_amount);
         proposal.buy_amount = U256::from(buy_amount);
+        proposal.gas_used = Some(200_000);
+        proposal.trampoline = Some(Address::ZERO);
         state.store().insert(proposal);
     }
 
@@ -632,6 +636,8 @@ mod tests {
             "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
             "sellAmount": "1000000",
             "buyAmount": "990000",
+            "sellToken": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "buyToken": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
             "interactions": [],
             "validUntil": "1",
             "nonce": "1",

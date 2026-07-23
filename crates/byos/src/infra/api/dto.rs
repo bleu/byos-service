@@ -20,6 +20,10 @@ pub struct CreateProposalRequest {
     pub sell_amount: String,
     /// Buy amount as a decimal string.
     pub buy_amount: String,
+    /// Sell token address.
+    pub sell_token: Address,
+    /// Buy token address.
+    pub buy_token: Address,
     /// Sub-solver's interactions.
     pub interactions: Vec<InteractionDto>,
     /// Unix timestamp after which the proposal expires.
