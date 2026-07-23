@@ -29,9 +29,8 @@ const SOLADY_BALANCE_SLOT_SEED: [u8; 4] = [0x87, 0xa2, 0x11, 0xa2];
 /// Every byte is unique and non-zero, so a successful `balanceOf` readback
 /// that equals this value confirms the slot is correct.
 const SENTINEL: U256 = U256::from_be_bytes([
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f, 0x20,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 ]);
 
 /// Default number of Solidity mapping slot indices to probe (0..depth).
@@ -78,9 +77,7 @@ pub(crate) fn build_override(
 ) -> (Address, AccountOverride) {
     let key = strategy.storage_key(holder);
     let state_override = AccountOverride {
-        state_diff: Some(
-            std::iter::once((key, B256::new(amount.to_be_bytes::<32>()))).collect(),
-        ),
+        state_diff: Some(std::iter::once((key, B256::new(amount.to_be_bytes::<32>()))).collect()),
         ..Default::default()
     };
     (token, state_override)
@@ -129,22 +126,14 @@ impl<P: Provider + Clone + Send + Sync> BalanceSlotDetector<P> {
     }
 
     /// Probe candidate strategies and verify with a sentinel readback.
-    async fn probe(
-        &self,
-        token: Address,
-        holder: Address,
-    ) -> Option<BalanceSlotStrategy> {
+    async fn probe(&self, token: Address, holder: Address) -> Option<BalanceSlotStrategy> {
         // Try Solidity mapping slots 0..depth.
         for i in 0..self.probing_depth {
             let strategy = BalanceSlotStrategy::SolidityMapping {
                 map_slot: U256::from(i),
             };
             if self.verify(token, &holder, &strategy).await {
-                tracing::debug!(
-                    ?token,
-                    slot = i,
-                    "detected Solidity mapping balance slot",
-                );
+                tracing::debug!(?token, slot = i, "detected Solidity mapping balance slot",);
                 return Some(strategy);
             }
         }
@@ -167,8 +156,7 @@ impl<P: Provider + Clone + Send + Sync> BalanceSlotDetector<P> {
         holder: &Address,
         strategy: &BalanceSlotStrategy,
     ) -> bool {
-        let (override_addr, account_override) =
-            build_override(strategy, token, holder, &SENTINEL);
+        let (override_addr, account_override) = build_override(strategy, token, holder, &SENTINEL);
 
         let call = ERC20::balanceOfCall { owner: *holder };
         let calldata = call.abi_encode();
@@ -184,12 +172,10 @@ impl<P: Provider + Clone + Send + Sync> BalanceSlotDetector<P> {
             .await;
 
         match result {
-            Ok(output) => {
-                match ERC20::balanceOfCall::abi_decode_returns(&output) {
-                    Ok(balance) => balance == SENTINEL,
-                    Err(_) => false,
-                }
-            }
+            Ok(output) => match ERC20::balanceOfCall::abi_decode_returns(&output) {
+                Ok(balance) => balance == SENTINEL,
+                Err(_) => false,
+            },
             Err(_) => false,
         }
     }
@@ -197,8 +183,7 @@ impl<P: Provider + Clone + Send + Sync> BalanceSlotDetector<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use alloy::primitives::address;
+    use {super::*, alloy::primitives::address};
 
     #[test]
     fn solidity_mapping_slot_computation() {
@@ -277,10 +262,7 @@ mod tests {
             map_slot: U256::from(3),
         };
 
-        detector
-            .cache
-            .lock()
-            .insert(token, Some(strategy.clone()));
+        detector.cache.lock().insert(token, Some(strategy.clone()));
 
         let cached = detector.cache.lock().get(&token).cloned();
         assert_eq!(cached, Some(Some(strategy)));

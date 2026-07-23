@@ -111,8 +111,8 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
             },
         };
 
-        // 2. Detect balance slot for the sell token and build a state override
-        //    that gives the trampoline the sell tokens it needs.
+        // 2. Detect balance slot for the sell token and build a state override that
+        //    gives the trampoline the sell tokens it needs.
         let Some(strategy) = self
             .balance_detector
             .detect(proposal.sell_token, trampoline)
@@ -150,9 +150,8 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
         }
         .abi_encode();
 
-        // 4. Dispatch eth_estimateGas with balance state override.
-        //    from: settlement (passes Trampoline's OnlySettlement check)
-        //    to: trampoline
+        // 4. Dispatch eth_estimateGas with balance state override. from: settlement
+        //    (passes Trampoline's OnlySettlement check) to: trampoline
         let tx = TransactionRequest::default()
             .from(self.settlement_address)
             .to(trampoline)
