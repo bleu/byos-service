@@ -19,7 +19,7 @@ use {
         validator::{RejectionReason, ValidateProposal, Verdict},
     },
     alloy::{
-        primitives::Address,
+        primitives::{Address, B256, U256},
         providers::Provider,
         rpc::types::TransactionRequest,
         sol_types::SolCall,
@@ -38,10 +38,20 @@ use {
 /// `eth_estimateGas` with a balance state override. Also resolves trampoline
 /// addresses via `TrampolineFactory.addressOf(sub_solver)` and caches them
 /// per sub-solver.
+/// Storage slot of `AccessControl._roles` in the Escrow contract. Determined
+/// via `forge inspect Escrow storage-layout`.
+const ESCROW_ROLES_SLOT: U256 = U256::from_limbs([5, 0, 0, 0]);
+
+/// `keccak256("SUBMITTER_ROLE")` — the role that gates settlement submission
+/// in the Trampoline contract.
+const SUBMITTER_ROLE: B256 =
+    alloy::primitives::b256!("e1a65d1a914580ff6931bc952f0fb26573e9282358a4458bceb9ccc6d923d041");
+
 pub struct SimulationValidator<P> {
     provider: P,
     settlement_address: Address,
     trampoline_factory: Address,
+    escrow_address: Address,
     /// Cached trampoline addresses: sub_solver → trampoline. Persistent across
     /// ticks (trampoline addresses are deterministic and never change).
     trampoline_cache: Mutex<HashMap<Address, Address>>,
@@ -51,13 +61,19 @@ pub struct SimulationValidator<P> {
 }
 
 impl<P: Provider + Clone> SimulationValidator<P> {
-    pub fn new(provider: P, settlement_address: Address, trampoline_factory: Address) -> Self {
+    pub fn new(
+        provider: P,
+        settlement_address: Address,
+        trampoline_factory: Address,
+        escrow_address: Address,
+    ) -> Self {
         let balance_detector =
             BalanceSlotDetector::new(provider.clone(), balance_override::DEFAULT_PROBING_DEPTH);
         Self {
             provider,
             settlement_address,
             trampoline_factory,
+            escrow_address,
             trampoline_cache: Mutex::new(HashMap::new()),
             balance_detector,
         }
@@ -150,8 +166,20 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
         }
         .abi_encode();
 
-        // 4. Dispatch eth_estimateGas with balance state override. from: settlement
-        //    (passes Trampoline's OnlySettlement check) to: trampoline
+        // 4. Build escrow state override: grant SUBMITTER_ROLE to settlement_address.
+        //    In eth_estimateGas, tx.origin == from == settlement_address. The
+        //    Trampoline checks `hasRole(SUBMITTER_ROLE, tx.origin)` on the Escrow, so
+        //    we override that storage slot to return true.
+        let (escrow_addr, escrow_override) = balance_override::build_access_control_override(
+            self.escrow_address,
+            ESCROW_ROLES_SLOT,
+            SUBMITTER_ROLE,
+            self.settlement_address,
+        );
+
+        // 5. Dispatch eth_estimateGas with state overrides. from: settlement (passes
+        //    Trampoline's OnlySettlement check and tx.origin for submitter role) to:
+        //    trampoline
         let tx = TransactionRequest::default()
             .from(self.settlement_address)
             .to(trampoline)
@@ -161,6 +189,7 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
             .provider
             .estimate_gas(tx)
             .account_override(override_addr, account_override)
+            .account_override(escrow_addr, escrow_override)
             .await
         {
             Ok(gas) => Some(Verdict::Accept {
@@ -270,6 +299,7 @@ mod tests {
             provider,
             address!("9008D19f58AAbD9eD0D60971565AA8510560ab41"),
             address!("0000000000000000000000000000000000000042"),
+            address!("0000000000000000000000000000000000000099"),
         );
 
         let mut proposal = test_proposal(
@@ -288,7 +318,8 @@ mod tests {
     fn trampoline_cache_returns_stored_address() {
         let provider = alloy::providers::ProviderBuilder::new()
             .connect_http("http://127.0.0.1:1".parse().unwrap());
-        let validator = SimulationValidator::new(provider, Address::ZERO, Address::ZERO);
+        let validator =
+            SimulationValidator::new(provider, Address::ZERO, Address::ZERO, Address::ZERO);
 
         let sub_solver = address!("0000000000000000000000000000000000000001");
         let trampoline = address!("0000000000000000000000000000000000000099");

@@ -83,6 +83,45 @@ pub(crate) fn build_override(
     (token, state_override)
 }
 
+/// Build an [`AccountOverride`] that grants `account` a role in an
+/// OpenZeppelin `AccessControl` contract.
+///
+/// OpenZeppelin's `AccessControl._roles` is a
+/// `mapping(bytes32 role => RoleData)` where `RoleData.hasRole` is a
+/// `mapping(address => bool)` at offset 0. The storage key for
+/// `_roles[role].hasRole[account]` is:
+///
+/// ```text
+/// base  = keccak256(role ++ pad32(roles_slot))
+/// key   = keccak256(pad32(account) ++ base)
+/// ```
+///
+/// `roles_slot` is the storage slot of the `_roles` mapping in the contract.
+pub(crate) fn build_access_control_override(
+    contract: Address,
+    roles_slot: U256,
+    role: B256,
+    account: Address,
+) -> (Address, AccountOverride) {
+    // base = keccak256(role ++ pad32(roles_slot))
+    let mut buf = [0u8; 64];
+    buf[0..32].copy_from_slice(role.as_slice());
+    buf[32..64].copy_from_slice(&roles_slot.to_be_bytes::<32>());
+    let base = keccak256(buf);
+
+    // key = keccak256(pad32(account) ++ base)
+    let mut buf2 = [0u8; 64];
+    buf2[12..32].copy_from_slice(account.as_slice());
+    buf2[32..64].copy_from_slice(base.as_slice());
+    let key = keccak256(buf2);
+
+    let state_override = AccountOverride {
+        state_diff: Some(std::iter::once((key, B256::with_last_byte(1))).collect()),
+        ..Default::default()
+    };
+    (contract, state_override)
+}
+
 /// Heuristic balance slot detector with per-token caching.
 pub struct BalanceSlotDetector<P> {
     provider: P,
@@ -276,5 +315,43 @@ mod tests {
             assert_ne!(b, 0, "sentinel bytes should be non-zero");
             assert!(seen.insert(b), "sentinel bytes should be distinct");
         }
+    }
+
+    #[test]
+    fn access_control_override_produces_correct_slot() {
+        // Verify the slot computation for hasRole(SUBMITTER_ROLE, account)
+        // on an AccessControl contract with _roles at slot 5.
+        let escrow = address!("0000000000000000000000000000000000000042");
+        let account = address!("9008D19f58AAbD9eD0D60971565AA8510560ab41");
+        let roles_slot = U256::from(5);
+        let role = alloy::primitives::b256!(
+            "e1a65d1a914580ff6931bc952f0fb26573e9282358a4458bceb9ccc6d923d041"
+        );
+
+        let (addr, account_override) =
+            build_access_control_override(escrow, roles_slot, role, account);
+
+        assert_eq!(addr, escrow);
+        let state_diff = account_override.state_diff.expect("should have state_diff");
+        assert_eq!(state_diff.len(), 1);
+
+        // Manually compute expected slot:
+        // base = keccak256(role ++ pad32(5))
+        let mut buf = [0u8; 64];
+        buf[0..32].copy_from_slice(role.as_slice());
+        buf[32..64].copy_from_slice(&roles_slot.to_be_bytes::<32>());
+        let base = keccak256(buf);
+
+        // key = keccak256(pad32(account) ++ base)
+        let mut buf2 = [0u8; 64];
+        buf2[12..32].copy_from_slice(account.as_slice());
+        buf2[32..64].copy_from_slice(base.as_slice());
+        let expected_key = keccak256(buf2);
+
+        assert_eq!(
+            state_diff.get(&expected_key),
+            Some(&B256::with_last_byte(1)),
+            "should set the role to true (1)"
+        );
     }
 }
