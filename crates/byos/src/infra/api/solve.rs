@@ -87,8 +87,9 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         };
 
         // Build the solution using solvers-dto types.
+        // gas_used is guaranteed Some by the `.filter(|p| p.gas_used.is_some())` above.
         let id = solutions.len() as u64 + 1;
-        if let Some(sol) = build_solution(id, order, proposal) {
+        if let Some(sol) = build_solution(id, order, proposal, proposal.gas_used.unwrap()) {
             solutions.push(sol);
         }
     }
@@ -102,6 +103,7 @@ fn build_solution(
     id: u64,
     order: &auction::Order,
     proposal: &Proposal,
+    gas_used: u64,
 ) -> Option<solution::Solution> {
     let Some(trampoline) = proposal.trampoline else {
         tracing::error!(
@@ -167,7 +169,7 @@ fn build_solution(
         pre_interactions: vec![],
         interactions,
         post_interactions: vec![],
-        gas: Some(effective_gas(proposal.gas_used.unwrap())),
+        gas: Some(effective_gas(gas_used)),
         flashloans: None,
         wrappers: vec![],
     })

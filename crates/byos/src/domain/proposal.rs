@@ -117,8 +117,8 @@ pub struct Proposal {
     pub nonce: U256,
     pub signature: Bytes,
     pub status: ProposalStatus,
-    /// Why the background validator rejected this proposal. Only ever set by
-    /// the `Submitted → Rejected` transition.
+    /// Why the background validator rejected this proposal. Set on
+    /// `Submitted → Rejected` or `Active → Rejected` (escrow re-check).
     pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
     /// Gas consumed by the simulation `eth_estimateGas` call. Set by the
     /// validator on successful simulation; `None` until first validation pass.
@@ -141,7 +141,7 @@ pub enum StoreError {
     #[error("proposal {id} is {actual}, expected {expected}")]
     StaleTransition {
         id: ProposalId,
-        expected: ProposalStatus,
+        expected: String,
         actual: ProposalStatus,
     },
 }
@@ -336,7 +336,7 @@ impl InMemoryProposalStore {
                 if proposal.status != from {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: from,
+                        expected: from.to_string(),
                         actual: proposal.status,
                     });
                 }
@@ -394,7 +394,7 @@ impl InMemoryProposalStore {
                 ) {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: ProposalStatus::Submitted,
+                        expected: "submitted or active".into(),
                         actual: proposal.status,
                     });
                 }
@@ -476,7 +476,7 @@ impl InMemoryProposalStore {
                 ) {
                     return Err(StoreError::StaleTransition {
                         id,
-                        expected: ProposalStatus::Submitted,
+                        expected: "submitted or active".into(),
                         actual: proposal.status,
                     });
                 }

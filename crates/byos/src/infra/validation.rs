@@ -77,23 +77,26 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidatePr
         }
     }
 
-    // Dispatch all validations concurrently — each is an RPC round-trip, so
-    // parallelism avoids serializing O(N) network calls per tick.
-    let results = futures::future::join_all(
-        to_validate
-            .iter()
-            .map(|proposal| async move { (proposal, validator.validate(proposal).await) }),
-    )
-    .await;
+    // Dispatch validations in batches of 8 to avoid bursting paid-RPC rate
+    // limits while still parallelizing network calls within each batch.
+    const MAX_CONCURRENT: usize = 8;
+    for chunk in to_validate.chunks(MAX_CONCURRENT) {
+        let results = futures::future::join_all(
+            chunk
+                .iter()
+                .map(|proposal| async move { (proposal, validator.validate(proposal).await) }),
+        )
+        .await;
 
-    for (proposal, verdict) in results {
-        let Some(verdict) = verdict else {
-            tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
-            continue;
-        };
-        match store.resolve_verdict(proposal.id, verdict) {
-            Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
-            Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
+        for (proposal, verdict) in results {
+            let Some(verdict) = verdict else {
+                tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
+                continue;
+            };
+            match store.resolve_verdict(proposal.id, verdict) {
+                Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
+                Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
+            }
         }
     }
 }

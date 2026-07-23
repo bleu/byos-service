@@ -152,22 +152,25 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
     }
 }
 
-/// Returns `true` when the RPC delivered the call and the EVM reverted.
-/// Same classification as `escrow::is_server_error` — `ErrorResp` and
-/// `NullResp` are real signals, everything else is deferred.
+/// Returns `true` when the RPC response indicates an EVM execution revert.
+/// Only error code `3` (the Ethereum JSON-RPC "execution reverted" code) is
+/// treated as a definitive revert. Other `ErrorResp` codes (rate limiting,
+/// gas caps, server errors) are transient and should be deferred.
 fn is_revert(e: &alloy::transports::RpcError<alloy::transports::TransportErrorKind>) -> bool {
-    matches!(e, RpcError::ErrorResp(_) | RpcError::NullResp)
+    match e {
+        RpcError::ErrorResp(payload) => payload.code == 3,
+        RpcError::NullResp => true,
+        _ => false,
+    }
 }
 
 /// Returns `true` when a trampoline resolution error is a real failure
 /// (contract revert) rather than a transient transport error. Same
-/// classification as `escrow::is_server_error` but operating on
-/// `alloy::contract::Error` (which wraps the transport layer).
+/// classification as [`is_revert`] but operating on `alloy::contract::Error`
+/// (which wraps the transport layer).
 fn is_trampoline_revert(e: &alloy::contract::Error) -> bool {
     match e {
-        alloy::contract::Error::TransportError(rpc_err) => {
-            matches!(rpc_err, RpcError::ErrorResp(_) | RpcError::NullResp)
-        }
+        alloy::contract::Error::TransportError(rpc_err) => is_revert(rpc_err),
         _ => false,
     }
 }
@@ -267,6 +270,26 @@ mod tests {
     #[test]
     fn is_revert_classifies_null_resp_as_revert() {
         assert!(is_revert(&RpcError::NullResp));
+    }
+
+    #[test]
+    fn is_revert_classifies_code_3_as_revert() {
+        let payload = alloy::rpc::json_rpc::ErrorPayload {
+            code: 3,
+            message: "execution reverted".into(),
+            data: None,
+        };
+        assert!(is_revert(&RpcError::ErrorResp(payload)));
+    }
+
+    #[test]
+    fn is_revert_defers_rate_limit_error() {
+        let payload = alloy::rpc::json_rpc::ErrorPayload {
+            code: 429,
+            message: "rate limit exceeded".into(),
+            data: None,
+        };
+        assert!(!is_revert(&RpcError::ErrorResp(payload)));
     }
 
     #[test]
