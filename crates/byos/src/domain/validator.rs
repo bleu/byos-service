@@ -11,6 +11,7 @@ use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
 #[non_exhaustive]
 pub enum RejectionReason {
     InsufficientEscrow,
+    UnsupportedToken,
 }
 
 /// Outcome of validating a single proposal.
