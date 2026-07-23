@@ -10,7 +10,6 @@ use {
     alloy::{
         primitives::{Address, U256},
         providers::Provider,
-        transports::RpcError,
     },
     parking_lot::Mutex,
     std::{
@@ -53,7 +52,7 @@ impl<P> EscrowValidator<P> {
     }
 }
 
-impl<P: Provider + Clone> EscrowValidator<P> {
+impl<P: Provider> EscrowValidator<P> {
     pub fn new(
         provider: P,
         escrow_address: Address,
@@ -109,46 +108,20 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for EscrowValidator<P> 
                     Some(Verdict::Reject(RejectionReason::InsufficientEscrow))
                 }
             }
-            Err(e) if is_server_error(&e) => {
-                // The RPC delivered the call and the server rejected it
-                // (contract revert, invalid address, etc.) — this is a real
-                // signal, not a transient failure.
-                tracing::info!(
-                    id = %proposal.id,
-                    sub_solver = %proposal.sub_solver,
-                    error = %e,
-                    "escrow effectiveBalance call reverted",
-                );
-                Some(Verdict::Reject(RejectionReason::InsufficientEscrow))
-            }
             Err(e) => {
-                // Transport failures (timeout, DNS, connection refused) and
-                // unexpected errors (ABI decode, etc.) are deferred — a broken
-                // validator should not punish sub-solvers.
+                // Defer on all errors — providers return ErrorResp for rate
+                // limits and node problems too, not just reverts, and
+                // effectiveBalance is a view getter that basically never
+                // reverts. The loop retries every tick anyway.
                 tracing::warn!(
                     id = %proposal.id,
                     sub_solver = %proposal.sub_solver,
                     error = %e,
-                    "escrow check failed (transient or unexpected), deferring to next tick",
+                    "escrow check failed, deferring to next tick",
                 );
                 None
             }
         }
-    }
-}
-
-/// Returns `true` when the RPC delivered the call and the server responded
-/// with an error (contract revert, invalid params, etc.). These are real
-/// signals — the sub-solver's escrow state is the problem, not our infra.
-///
-/// Everything else (transport failures, ABI decode errors) is NOT a server
-/// error and should be deferred rather than used to reject proposals.
-fn is_server_error(e: &alloy::contract::Error) -> bool {
-    match e {
-        alloy::contract::Error::TransportError(rpc_err) => {
-            matches!(rpc_err, RpcError::ErrorResp(_) | RpcError::NullResp)
-        }
-        _ => false,
     }
 }
 
@@ -213,39 +186,6 @@ mod tests {
         assert!(validator.cache.lock().is_empty());
         validator.clear_cache();
         assert!(validator.cache.lock().is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // is_server_error classification
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn transport_level_error_is_not_server_error() {
-        let err =
-            alloy::contract::Error::TransportError(alloy::transports::TransportErrorKind::custom(
-                std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused"),
-            ));
-        assert!(!is_server_error(&err));
-    }
-
-    #[test]
-    fn null_resp_is_server_error() {
-        let err = alloy::contract::Error::TransportError(RpcError::NullResp);
-        assert!(is_server_error(&err));
-    }
-
-    #[test]
-    fn abi_error_is_not_server_error() {
-        // ABI decode errors are bugs in our code, not escrow problems —
-        // they should defer, not reject.
-        let err = alloy::contract::Error::TransportError(RpcError::DeserError {
-            err: serde_json::Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "bad abi",
-            )),
-            text: "{}".into(),
-        });
-        assert!(!is_server_error(&err));
     }
 
     // -----------------------------------------------------------------------
