@@ -63,7 +63,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         // Score and select the best proposal for this order.
         let best = proposals
             .iter()
-            .filter(|p| p.valid_until > now)
+            .filter(|p| p.valid_until >= now)
             .filter_map(|p| {
                 let score = score_proposal(&ScoreInput {
                     order_sell: order.sell_amount,

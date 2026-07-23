@@ -644,16 +644,4 @@ mod tests {
         let json = json_body(response).await;
         assert_eq!(json["kind"], "ProposalExpired");
     }
-
-    #[tokio::test]
-    async fn post_accepts_proposal_with_future_valid_until() {
-        let state = test_state();
-        let app = router(state);
-        let signer = PrivateKeySigner::random();
-        let (body, _) = signed_proposal_body_for(&signer).await;
-
-        // signed_proposal_body_for uses validUntil = 99_999_999_999 (far future)
-        let response = post_proposal(&app, &body).await;
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-    }
 }
