@@ -331,6 +331,7 @@ dependencies = [
  "alloy-signer",
  "alloy-sol-types",
  "alloy-transport",
+ "alloy-transport-http",
  "async-stream",
  "async-trait",
  "auto_impl",
@@ -341,11 +342,13 @@ dependencies = [
  "lru",
  "parking_lot",
  "pin-project",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "wasmtimer",
 ]
 
@@ -380,14 +383,17 @@ dependencies = [
  "alloy-json-rpc",
  "alloy-primitives",
  "alloy-transport",
+ "alloy-transport-http",
  "futures",
  "pin-project",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tower",
  "tracing",
+ "url",
  "wasmtimer",
 ]
 
@@ -579,8 +585,13 @@ version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8597d36d546e1dab822345ad563243ec3920e199322cb554ce56c8ef1a1e2e7"
 dependencies = [
+ "alloy-json-rpc",
  "alloy-transport",
  "itertools 0.14.0",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tower",
+ "tracing",
  "url",
 ]
 
@@ -1164,7 +1175,7 @@ dependencies = [
  "chrono",
  "clap",
  "parking_lot",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_with",
@@ -1736,7 +1747,7 @@ dependencies = [
  "alloy",
  "byos",
  "byos-common",
- "reqwest",
+ "reqwest 0.12.28",
  "serde_json",
  "subsolver",
  "tokio",
@@ -3666,6 +3677,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "reqwest"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4496,7 +4538,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "byos-common",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5042,6 +5084,7 @@ dependencies = [
  "idna 1.1.0",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

@@ -12,7 +12,10 @@ use {
         Router,
         routing::{delete, get, post},
     },
-    std::{net::SocketAddr, sync::Arc},
+    std::{
+        net::SocketAddr,
+        sync::{Arc, atomic::AtomicU64},
+    },
     tokio::sync::oneshot,
 };
 
@@ -23,6 +26,10 @@ use {
 struct AppStateInner {
     store: Arc<InMemoryProposalStore>,
     domain: Eip712Domain,
+    /// Last-seen `effective_gas_price` from the auction payload (written by
+    /// `/solve`, read by the background escrow validator). Seeded with
+    /// `--default-gas-price` at startup.
+    gas_price: Arc<AtomicU64>,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -31,8 +38,16 @@ struct AppStateInner {
 pub struct AppState(Arc<AppStateInner>);
 
 impl AppState {
-    pub fn new(store: Arc<InMemoryProposalStore>, domain: Eip712Domain) -> Self {
-        Self(Arc::new(AppStateInner { store, domain }))
+    pub fn new(
+        store: Arc<InMemoryProposalStore>,
+        domain: Eip712Domain,
+        gas_price: Arc<AtomicU64>,
+    ) -> Self {
+        Self(Arc::new(AppStateInner {
+            store,
+            domain,
+            gas_price,
+        }))
     }
 
     pub fn store(&self) -> &InMemoryProposalStore {
@@ -41,6 +56,10 @@ impl AppState {
 
     pub fn domain(&self) -> &Eip712Domain {
         &self.0.domain
+    }
+
+    pub fn gas_price(&self) -> &Arc<AtomicU64> {
+        &self.0.gas_price
     }
 }
 
@@ -133,6 +152,7 @@ mod tests {
             http::{Request, StatusCode},
         },
         byos_common::{contracts, eip712},
+        std::sync::atomic::AtomicU64,
         tower::ServiceExt,
     };
 
@@ -148,7 +168,12 @@ mod tests {
         let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
         std::mem::forget(audit_rx);
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        AppState::new(Arc::new(InMemoryProposalStore::new(audit_tx)), domain)
+        let gas_price = Arc::new(AtomicU64::new(0));
+        AppState::new(
+            Arc::new(InMemoryProposalStore::new(audit_tx)),
+            domain,
+            gas_price,
+        )
     }
 
     /// Builds a valid signed POST /proposals JSON body and returns it along
@@ -209,10 +234,10 @@ mod tests {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
-        ) -> crate::domain::validator::Verdict {
-            crate::domain::validator::Verdict::Reject(
+        ) -> Option<crate::domain::validator::Verdict> {
+            Some(crate::domain::validator::Verdict::Reject(
                 crate::domain::validator::RejectionReason::InsufficientEscrow,
-            )
+            ))
         }
     }
 
@@ -576,5 +601,47 @@ mod tests {
 
         let solutions = result["solutions"].as_array().unwrap();
         assert!(solutions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ingestion-time expiry check
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_rejects_already_expired_proposal() {
+        let state = test_state();
+        let app = router(state);
+        let signer = PrivateKeySigner::random();
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+
+        let order_uid = [0xaa_u8; 56];
+        let proposal = contracts::Proposal {
+            orderUidHash: keccak256(order_uid),
+            sellAmount: U256::from(1_000_000_u64),
+            buyAmount: U256::from(990_000_u64),
+            validUntil: U256::from(1_u64), // unix timestamp 1 — long expired
+            nonce: U256::from(1_u64),
+        };
+        let interactions: Vec<contracts::Interaction> = vec![];
+
+        let signature = eip712::sign_proposal(&signer, &domain, &proposal, &interactions)
+            .await
+            .expect("signing must succeed");
+
+        let body = serde_json::json!({
+            "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
+            "sellAmount": "1000000",
+            "buyAmount": "990000",
+            "interactions": [],
+            "validUntil": "1",
+            "nonce": "1",
+            "signature": format!("0x{}", alloy::hex::encode(signature.as_bytes())),
+        });
+
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let json = json_body(response).await;
+        assert_eq!(json["kind"], "ProposalExpired");
     }
 }

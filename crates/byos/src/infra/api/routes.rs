@@ -26,7 +26,7 @@ use {
         contracts::{Interaction, Proposal},
         eip712,
     },
-    std::time::Instant,
+    std::time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 // ---------------------------------------------------------------------------
@@ -90,9 +90,19 @@ pub async fn create_proposal(
 
     tracing::info!(%sub_solver, "proposal signature verified");
 
-    // 6. Store as Submitted. The background validator (escrow + simulation,
-    // COW-1162) picks it up and flips it to Active or Rejected; sub-solvers
-    // poll GET /proposal/{id} for the verdict.
+    // 6. Reject proposals that are already expired — no point accepting,
+    // storing, and auditing a DOA proposal (ADR-0001).
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs();
+    if valid_until < U256::from(now) {
+        return Err(Error::from(Kind::ProposalExpired));
+    }
+
+    // 7. Store as Submitted. The background validator picks it up and flips
+    // it to Active or Rejected; sub-solvers poll GET /proposal/{id} for the
+    // verdict.
     let stored = crate::domain::proposal::Proposal {
         id: ProposalId(0),
         sub_solver,
