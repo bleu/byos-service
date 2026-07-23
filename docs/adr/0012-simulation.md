@@ -10,15 +10,19 @@ Depends on: [ADR-0001](0001-proposal-api.md) (proposal lifecycle), [ADR-0002](00
 
 ## Decision
 
-### Simulation dispatch: `eth_estimateGas` with GPv2Settlement calling itself
+### Simulation dispatch: `eth_estimateGas` on `trampoline.execute()` with balance override
 
-Each proposal is simulated by sending an `eth_estimateGas` call where GPv2Settlement is both the `from` and `to` address. The calldata is a minimal `settle()` call with empty tokens, prices, and trades, and three intra-interactions:
+Each proposal is simulated by calling `trampoline.execute(proposal, interactions, buyToken, signature)` via `eth_estimateGas`. The call is sent `from: settlement` (so the Trampoline's `OnlySettlement` guard passes) and `to: trampoline`.
 
-1. **`sellToken.transferFrom(user, settlement, sellAmount)`** -- simulation-only. Pulls the user's sell tokens into settlement, mimicking what the vault relayer does in a real settlement. The user (order owner, extracted from `OrderUid` bytes 32..52) has already approved the settlement contract, so this succeeds if the user holds enough tokens. No state overrides are needed.
-2. **`sellToken.transfer(trampoline, sellAmount)`** -- real BYOS interaction. Pushes tokens from settlement to the sub-solver's Trampoline.
-3. **`trampoline.execute(proposal, interactions, buyToken, signature)`** -- real BYOS interaction. Runs the sub-solver's route inside the Trampoline sandbox.
+A **balance state override** gives the trampoline the sell tokens it needs: `balanceOf[trampoline] = sellAmount` on the sell token contract. This avoids the need to simulate a full `settle()` (which would require order data only available at `/solve` time) and sidesteps the allowance problem (users approve the VaultRelayer, not the settlement contract).
 
-Using `eth_estimateGas` (rather than `eth_call` + a separate gas estimation step) gives both the success/revert verdict and the gas consumed in a single RPC call. A successful estimate means the proposal would settle; a revert means it would fail.
+The balance slot is detected via heuristic probing at first encounter of each sell token:
+
+- **Solidity mapping:** Probe slot indices 0..10 — compute `keccak256(pad32(holder) ++ pad32(slot_index))`, write a sentinel value via `eth_call` state override, read back `balanceOf(holder)`.
+- **Solady mapping:** Compute `keccak256(holder[0..20] ++ 0x00000000_87a211a2)`, same sentinel verification.
+- Results are cached per token (storage layouts are immutable). If detection fails, the proposal is rejected with `UnsupportedToken`.
+
+Using `eth_estimateGas` (rather than `eth_call` + a separate gas estimation step) gives both the success/revert verdict and the gas consumed in a single RPC call. A successful estimate means the sub-solver's route executes and produces `buyAmount` of buy tokens; a revert means it would fail.
 
 ### Required proposal fields: `sellToken` and `buyToken`
 
@@ -46,9 +50,10 @@ This catches proposals that become invalid due to on-chain state changes (pool l
 
 ### Error handling: defer on transport errors, fail on reverts
 
-- **Simulation reverts** (the EVM executed the call and it failed): verdict is `SimFailed`, the proposal is permanently dropped.
-- **Transport errors** (RPC timeout, DNS failure, connection refused): verdict is deferred (`None`), the proposal stays in its current state and is retried next tick. A broken RPC should not punish sub-solvers.
+- **Simulation reverts** (the EVM executed the call and it failed, error code 3): verdict is `SimFailed`, the proposal is permanently dropped.
+- **Transport errors** (RPC timeout, DNS failure, connection refused) and non-revert RPC errors (rate limiting, gas caps): verdict is deferred (`None`), the proposal stays in its current state and is retried next tick. A broken RPC should not punish sub-solvers.
 - **Trampoline resolution errors**: same deferral policy -- transport errors defer, server errors (contract revert) are treated as real failures.
+- **Unsupported token** (balance slot detection failed): verdict is `Reject(UnsupportedToken)`. The token's storage layout is not a standard Solidity or Solady mapping. Cached permanently per token.
 
 ### Validator architecture: `ValidateProposal` trait + composite `ProposalValidator`
 
