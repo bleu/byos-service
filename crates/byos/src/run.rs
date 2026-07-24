@@ -5,11 +5,19 @@
 use {
     crate::{
         domain::proposal::InMemoryProposalStore,
-        infra::api::{self, AppState},
+        infra::{
+            api::{self, AppState},
+            audit,
+            blockchain::escrow::EscrowValidator,
+        },
     },
+    alloy::{primitives::U256, providers::Provider},
     anyhow::Context,
     clap::Parser,
-    std::net::SocketAddr,
+    std::{
+        net::SocketAddr,
+        sync::{Arc, atomic::AtomicU64},
+    },
     tokio::sync::oneshot,
     tracing_subscriber::{EnvFilter, fmt, prelude::*},
 };
@@ -37,12 +45,86 @@ pub(crate) struct Args {
     /// TrampolineFactory contract address (EIP-712 `verifyingContract`).
     #[arg(long, env)]
     trampoline_factory: alloy::primitives::Address,
+
+    /// Postgres URL for the audit trail (ADR-0001 write-behind). Required:
+    /// the service refuses to boot without its evidence store. Prefer the
+    /// DATABASE_URL env var in production — CLI arguments (and the password
+    /// in this one) are visible to other users via `ps`.
+    #[arg(long, env)]
+    database_url: DatabaseUrl,
+
+    /// RPC endpoint for chain connectivity (escrow balance checks). When
+    /// omitted the service starts with an AcceptAll validator (useful for
+    /// tests that don't need chain connectivity). Prefer the RPC_URL env var
+    /// in production — the URL may contain API keys. When set, requires
+    /// `--escrow-address`, `--min-collateral`, and `--default-gas-price`.
+    #[arg(long, env, requires_all = ["escrow_address", "min_collateral", "default_gas_price"])]
+    rpc_url: Option<RpcUrl>,
+
+    /// Escrow contract address for sub-solver balance checks. Required when
+    /// `--rpc-url` is set.
+    #[arg(long, env)]
+    escrow_address: Option<alloy::primitives::Address>,
+
+    /// Minimum collateral (`c_l`) in wei. Chain-specific: 0.010 ETH for
+    /// mainnet (~10000000000000000), 10 xDAI for Gnosis
+    /// (~10000000000000000000). Required when `--rpc-url` is set.
+    #[arg(long, env)]
+    min_collateral: Option<u128>,
+
+    /// Fallback gas price in wei, used for the escrow threshold when no
+    /// auction has been seen yet. Overwritten by `/solve` once the first
+    /// auction arrives. Required when `--rpc-url` is set.
+    #[arg(long, env)]
+    default_gas_price: Option<u64>,
+
+    /// Seconds between background validation ticks (expiry sweep + verdicts).
+    #[arg(long, env, default_value_t = 12)]
+    validation_interval_secs: u64,
+}
+
+/// Connection-string wrapper whose `Debug` hides the value, so the startup
+/// `?args` log can't leak the password (ADR-0006: secrets redact themselves).
+#[derive(Clone)]
+struct DatabaseUrl(String);
+
+/// RPC URL wrapper whose `Debug` hides the value — the URL may contain
+/// API keys (ADR-0006: secrets redact themselves).
+#[derive(Clone)]
+struct RpcUrl(String);
+
+impl std::str::FromStr for DatabaseUrl {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_owned()))
+    }
+}
+
+impl std::fmt::Debug for DatabaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::str::FromStr for RpcUrl {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_owned()))
+    }
+}
+
+impl std::fmt::Debug for RpcUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// Entry point for the binary — parses args from the process environment.
 pub async fn start(args: impl IntoIterator<Item = String>) {
     let args = Args::parse_from(args);
-    if let Err(e) = run_with(args, None).await {
+    if let Err(e) = run_with(args, None, None).await {
         eprintln!("fatal: {e:#}");
         std::process::exit(1);
     }
@@ -54,35 +136,110 @@ pub async fn run(
     bind_tx: oneshot::Sender<SocketAddr>,
 ) -> anyhow::Result<()> {
     let args = Args::parse_from(args);
-    run_with(args, Some(bind_tx)).await
+    run_with(args, Some(bind_tx), None).await
 }
 
-async fn run_with(args: Args, bind_tx: Option<oneshot::Sender<SocketAddr>>) -> anyhow::Result<()> {
+/// Like [`run`], but also stoppable via `shutdown_rx` — tests use this to
+/// exercise graceful shutdown (audit drain) without process signals.
+pub async fn run_until(
+    args: impl IntoIterator<Item = String>,
+    bind_tx: oneshot::Sender<SocketAddr>,
+    shutdown_rx: oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
+    let args = Args::parse_from(args);
+    run_with(args, Some(bind_tx), Some(shutdown_rx)).await
+}
+
+async fn run_with(
+    args: Args,
+    bind_tx: Option<oneshot::Sender<SocketAddr>>,
+    shutdown_rx: Option<oneshot::Receiver<()>>,
+) -> anyhow::Result<()> {
     init_tracing(&args.log, args.json_logs);
 
     tracing::info!(?args, "starting byos");
 
-    let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
-    let store = InMemoryProposalStore::new();
-    let state = AppState::new(store, domain);
+    // Fail-fast: no audit database, no service (ADR-0001 — the audit trail
+    // is required by the slashing policy, so "up but not auditing" must be
+    // an impossible state).
+    let pool = audit::connect_and_migrate(&args.database_url.0).await?;
+    let last_id = audit::max_proposal_id(&pool).await?;
 
-    api::serve(args.public_addr, state, bind_tx)
+    let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
+    let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
+    let writer = audit::spawn(pool, audit_rx);
+    let store = Arc::new(InMemoryProposalStore::new(audit_tx));
+    store.seed_next_id(last_id);
+
+    let default_gas_price = args.default_gas_price.unwrap_or(0);
+    let gas_price = Arc::new(AtomicU64::new(default_gas_price));
+    let state = AppState::new(store.clone(), domain, gas_price.clone());
+
+    let period = std::time::Duration::from_secs(args.validation_interval_secs);
+
+    // Background validator (ADR-0001, async ingestion). When --rpc-url is
+    // set, the escrow validator gates proposals via on-chain balance checks;
+    // simulation is added by a follow-up task. Without an RPC endpoint the
+    // service falls back to AcceptAll (useful for tests).
+    // clap's `requires_all` on --rpc-url guarantees that --escrow-address,
+    // --min-collateral, and --default-gas-price are present when --rpc-url
+    // is set — the unwraps below cannot fail.
+    let validation_loop = if let Some(rpc_url) = args.rpc_url {
+        let escrow_address = args.escrow_address.unwrap();
+        let min_collateral = args.min_collateral.unwrap();
+
+        let url: reqwest::Url = rpc_url.0.parse().context("invalid --rpc-url")?;
+        let provider = alloy::providers::ProviderBuilder::new().connect_http(url);
+
+        // Fail-fast: verify the RPC endpoint is reachable before accepting
+        // any proposals that would need escrow checks.
+        provider
+            .get_block_number()
+            .await
+            .context("RPC unreachable at startup (--rpc-url)")?;
+
+        let validator = EscrowValidator::new(
+            provider,
+            escrow_address,
+            U256::from(min_collateral),
+            gas_price,
+        );
+        crate::infra::validation::spawn(store, validator, period)
+    } else {
+        tracing::warn!("no --rpc-url provided, escrow checks disabled (AcceptAll)");
+        crate::infra::validation::spawn(store, crate::domain::validator::AcceptAll, period)
+    };
+
+    api::serve(args.public_addr, state, bind_tx, shutdown_rx)
         .await
-        .context("public API server exited with error")
+        .context("public API server exited with error")?;
+
+    // The validation loop holds the store — and with it an audit sender — so
+    // stop it first, or the writer's channel never closes and the drain below
+    // hangs. A verdict lost mid-tick to the abort is moot: the in-memory
+    // store vanishes at shutdown anyway. Then awaiting the writer flushes
+    // everything still queued.
+    validation_loop.abort();
+    writer.await.context("audit writer task panicked")
 }
 
+// try_init: a second in-process instance (tests restart the service) must
+// not panic on the already-set global subscriber.
 fn init_tracing(filter: &str, json: bool) {
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
 
+    // `try_init` rather than `init`: service-level tests call `run()` once per
+    // test, and under plain `cargo test` (shared process, unlike nextest) the
+    // second init would panic. Only the first subscriber wins; that's fine.
     if json {
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt::layer().json())
-            .init();
+            .try_init();
     } else {
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt::layer())
-            .init();
+            .try_init();
     }
 }

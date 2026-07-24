@@ -2,7 +2,7 @@
 //!
 //! Sub-solvers sign a [`ProposalData`] message (6 fields, including
 //! `interactionsHash`) using the EIP-712 domain anchored to the
-//! [`TrampolineFactory`](crate::contracts::ITrampolineFactory) contract. The
+//! [`TrampolineFactory`](crate::contracts::TrampolineFactory) contract. The
 //! BYOS service verifies these signatures to authenticate proposals; the
 //! signing helper is used by the reference sub-solver and tests.
 //!
@@ -106,6 +106,22 @@ sol! {
     }
 }
 
+/// Signs a proposal cancellation on behalf of a sub-solver. Returns the raw
+/// signature bytes.
+///
+/// Used by the reference sub-solver and tests.
+pub async fn sign_cancellation<S: Signer>(
+    signer: &S,
+    domain: &Eip712Domain,
+    proposal_id: U256,
+) -> alloy::signers::Result<Signature> {
+    let cancel = CancelProposal {
+        proposalId: proposal_id,
+    };
+    let hash = cancel.eip712_signing_hash(domain);
+    signer.sign_hash(&hash).await
+}
+
 /// Recovers the sub-solver address from a cancellation signature.
 pub fn recover_canceller(
     signature: &Signature,
@@ -116,6 +132,50 @@ pub fn recover_canceller(
         proposalId: proposal_id,
     };
     let signing_hash = cancel.eip712_signing_hash(domain);
+    signature.recover_address_from_prehash(&signing_hash)
+}
+
+sol! {
+    /// EIP-712 type for read authentication. Signed once by the sub-solver and
+    /// sent as a bearer token in the `X-Signature` header on GET endpoints.
+    /// API-only type, not on-chain. No timestamp or nonce: a leaked signature
+    /// only grants read access to the signer's own proposals (ADR-0011).
+    struct ReadAuth {
+        uint256 version;
+    }
+}
+
+/// Current `ReadAuth.version`. Bumping it invalidates all outstanding read
+/// tokens without changing the type name.
+pub const READ_AUTH_VERSION: u64 = 1;
+
+/// Signs the read-auth bearer message. Returns the raw signature bytes.
+///
+/// Used by the reference sub-solver and tests.
+pub async fn sign_read_auth<S: Signer>(
+    signer: &S,
+    domain: &Eip712Domain,
+) -> alloy::signers::Result<Signature> {
+    let auth = ReadAuth {
+        version: U256::from(READ_AUTH_VERSION),
+    };
+    let hash = auth.eip712_signing_hash(domain);
+    signer.sign_hash(&hash).await
+}
+
+/// Recovers the sub-solver address from a read-auth signature.
+///
+/// A signature over any other version recovers a different (unknown) address
+/// and simply fails the caller's ownership checks — no explicit version check
+/// is needed.
+pub fn recover_reader(
+    signature: &Signature,
+    domain: &Eip712Domain,
+) -> Result<Address, alloy::primitives::SignatureError> {
+    let auth = ReadAuth {
+        version: U256::from(READ_AUTH_VERSION),
+    };
+    let signing_hash = auth.eip712_signing_hash(domain);
     signature.recover_address_from_prehash(&signing_hash)
 }
 
@@ -236,17 +296,28 @@ mod tests {
         let domain = byos_domain(1, factory);
 
         let proposal_id = U256::from(42u64);
-        let cancel = CancelProposal {
-            proposalId: proposal_id,
-        };
-        let hash = cancel.eip712_signing_hash(&domain);
-        let sig = signer
-            .sign_hash(&hash)
+        let sig = sign_cancellation(&signer, &domain, proposal_id)
             .await
             .expect("signing should succeed");
 
         let recovered =
             recover_canceller(&sig, &domain, proposal_id).expect("recovery should succeed");
+        assert_eq!(recovered, sub_solver);
+    }
+
+    #[tokio::test]
+    async fn read_auth_sign_and_recover() {
+        let signer = PrivateKeySigner::random();
+        let sub_solver: Address = signer.address();
+
+        let factory = address!("00000000000000000000000000000000DeaDBeef");
+        let domain = byos_domain(1, factory);
+
+        let sig = sign_read_auth(&signer, &domain)
+            .await
+            .expect("signing should succeed");
+
+        let recovered = recover_reader(&sig, &domain).expect("recovery should succeed");
         assert_eq!(recovered, sub_solver);
     }
 

@@ -12,6 +12,19 @@ concurrency:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    services:
+      # Audit-trail tests (`just test-db`) create a database per test here.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,3 +35,4 @@ jobs:
           tool: cargo-nextest
       - run: just build
       - run: just test-unit
+      - run: just test-db

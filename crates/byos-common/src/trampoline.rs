@@ -12,7 +12,7 @@
 //! `buyToken` back to the settlement contract) — BYOS does not encode that.
 
 use {
-    crate::contracts::{IERC20, ITrampoline, Interaction, Proposal},
+    crate::contracts::{ERC20, Interaction, Proposal, Trampoline},
     alloy::{
         primitives::{Address, Bytes, U256},
         sol_types::SolCall,
@@ -27,16 +27,15 @@ use {
 pub fn encode_trampoline_interactions(
     trampoline: Address,
     sell_token: Address,
-    sell_amount: U256,
     proposal: &Proposal,
     interactions: &[Interaction],
     buy_token: Address,
     signature: &Bytes,
 ) -> [Interaction; 2] {
     // 1. ERC20 transfer: settlement → Trampoline
-    let transfer_calldata = IERC20::transferCall {
+    let transfer_calldata = ERC20::transferCall {
         to: trampoline,
-        amount: sell_amount,
+        amount: proposal.sellAmount,
     }
     .abi_encode();
 
@@ -47,7 +46,7 @@ pub fn encode_trampoline_interactions(
     };
 
     // 2. Trampoline.execute(proposal, interactions, buyToken, signature)
-    let execute_calldata = ITrampoline::executeCall {
+    let execute_calldata = Trampoline::executeCall {
         _proposal: proposal.clone(),
         _interactions: interactions.to_vec(),
         _buyToken: buy_token,
@@ -100,7 +99,6 @@ mod tests {
         let [transfer, _execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &interactions,
             address!("0000000000000000000000000000000000009abc"),
@@ -127,7 +125,6 @@ mod tests {
         let [_transfer, execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &interactions,
             buy_token,
@@ -158,7 +155,6 @@ mod tests {
         let [_transfer, execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &interactions,
             buy_token,
@@ -166,7 +162,7 @@ mod tests {
         );
 
         // Decode the execute calldata back and verify fields match.
-        let decoded = ITrampoline::executeCall::abi_decode(&execute.callData)
+        let decoded = Trampoline::executeCall::abi_decode(&execute.callData)
             .expect("ABI decode should succeed");
 
         assert_eq!(decoded._proposal.orderUidHash, proposal.orderUidHash);
@@ -176,6 +172,8 @@ mod tests {
         assert_eq!(decoded._proposal.nonce, proposal.nonce);
         assert_eq!(decoded._interactions.len(), interactions.len());
         assert_eq!(decoded._interactions[0].target, interactions[0].target);
+        assert_eq!(decoded._interactions[0].value, interactions[0].value);
+        assert_eq!(decoded._interactions[0].callData, interactions[0].callData);
         assert_eq!(decoded._buyToken, buy_token);
         assert_eq!(decoded._signature, signature);
     }
@@ -191,14 +189,13 @@ mod tests {
         let [_transfer, execute] = encode_trampoline_interactions(
             trampoline,
             sell_token,
-            proposal.sellAmount,
             &proposal,
             &[],
             buy_token,
             &signature,
         );
 
-        let decoded = ITrampoline::executeCall::abi_decode(&execute.callData)
+        let decoded = Trampoline::executeCall::abi_decode(&execute.callData)
             .expect("ABI decode should succeed");
 
         assert!(decoded._interactions.is_empty());
