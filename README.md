@@ -4,15 +4,16 @@ The off-chain service for **Bring Your Own Solver (BYOS)**: a bonded [CoW Protoc
 
 Built under a [CoW DAO grant](https://forum.cow.fi/t/grant-application-cow-byos-bring-your-own-solver/3476) answering the [BYOS RFP](https://forum.cow.fi/t/rfp-bring-your-own-solver-byos/3469). The on-chain half (Escrow, Trampoline, TrampolineFactory) lives in [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts).
 
-Status: **skeleton** — structure, ADRs, and conventions are in place; implementation has not started.
+Status: **in progress** — the proposal API, scoring/solve engine, ingestion validation, audit trail, and reference sub-solver are implemented; the chain watcher, escrow operator, and e2e harness are not yet.
 
 ## Crates
 
 | Crate | Description | Status |
 |---|---|---|
-| [`byos`](crates/byos) | The BYOS service: public proposal API + CoW solver engine, one process, two listeners | skeleton |
-| [`subsolver`](crates/subsolver) | Reference sub-solver: example proposal-API client, also the e2e-test counterpart | skeleton |
-| [`proposal-dto`](crates/proposal-dto) | Shared wire types for the proposal API | skeleton |
+| [`byos`](crates/byos) | The BYOS service: public proposal API + CoW solver engine, one process, two listeners | in progress |
+| [`byos-common`](crates/byos-common) | Shared contract bindings, EIP-712 schema, and Trampoline calldata encoding | in progress |
+| [`byos-watcher`](crates/byos-watcher) | Chain watcher and escrow operator | skeleton |
+| [`subsolver`](crates/subsolver) | Reference sub-solver: example proposal-API client, also the e2e-test counterpart | implemented |
 | [`e2e`](crates/e2e) | End-to-end tests, two tiers: in-process against plain anvil, and full CoW stack via [offline-mode](https://github.com/cowdao-grants/offline-mode) | skeleton |
 
 ## Architecture
@@ -46,4 +47,4 @@ Full-stack e2e uses [`cowdao-grants/offline-mode`](https://github.com/cowdao-gra
 
 ## License
 
-[LGPL-3.0-or-later](LICENSE). The `proposal-dto` crate is MIT OR Apache-2.0 so sub-solver implementations can vendor it freely.
+[LGPL-3.0-or-later](LICENSE).
