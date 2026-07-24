@@ -1,8 +1,8 @@
 //! Composite proposal validator and simulation validator.
 //!
-//! [`SimulationValidator`] dispatches `eth_estimateGas` with a settlement
-//! code-override harness and resolves trampoline addresses via
-//! `TrampolineFactory.addressOf`.
+//! [`SimulationValidator`] dispatches `eth_estimateGas` with a trampoline
+//! code override on the user's address and resolves trampoline addresses
+//! (and their bytecode) via `TrampolineFactory.addressOf` + `eth_getCode`.
 //!
 //! [`ProposalValidator`] composes
 //! [`EscrowValidator`](super::escrow::EscrowValidator)
@@ -25,17 +25,26 @@ use {
 // SimulationValidator
 // ---------------------------------------------------------------------------
 
-/// Validates proposals by simulating them via `eth_estimateGas` with a
-/// settlement code-override harness. Also resolves trampoline addresses via
-/// `TrampolineFactory.addressOf(sub_solver)` and caches them per sub-solver.
+/// Resolved trampoline: address + deployed bytecode.
+#[derive(Clone)]
+struct TrampolineInfo {
+    address: Address,
+    code: alloy::primitives::Bytes,
+}
+
+/// Validates proposals by simulating them via `eth_estimateGas` with the
+/// trampoline's bytecode injected at the user's address. Also resolves
+/// trampoline addresses and bytecode via `TrampolineFactory.addressOf` +
+/// `eth_getCode`, caching both per sub-solver.
 pub struct SimulationValidator<P> {
     provider: P,
     settlement_address: Address,
     escrow_address: Address,
     trampoline_factory: Address,
-    /// Cached trampoline addresses: sub_solver → trampoline. Persistent across
-    /// ticks (trampoline addresses are deterministic and never change).
-    trampoline_cache: Mutex<HashMap<Address, Address>>,
+    /// Cached trampoline info: sub_solver → (address, bytecode). Persistent
+    /// across ticks (trampoline addresses and code are deterministic and never
+    /// change).
+    trampoline_cache: Mutex<HashMap<Address, TrampolineInfo>>,
 }
 
 impl<P: Provider + Clone> SimulationValidator<P> {
@@ -54,33 +63,46 @@ impl<P: Provider + Clone> SimulationValidator<P> {
         }
     }
 
-    /// Resolve the trampoline address for a sub-solver. Returns from cache if
-    /// available; otherwise calls `TrampolineFactory.addressOf` via RPC.
+    /// Resolve the trampoline address and bytecode for a sub-solver. Returns
+    /// from cache if available; otherwise calls `TrampolineFactory.addressOf`
+    /// and `eth_getCode` via RPC.
     async fn resolve_trampoline(
         &self,
         sub_solver: Address,
-    ) -> Result<Address, alloy::contract::Error> {
-        if let Some(&addr) = self.trampoline_cache.lock().get(&sub_solver) {
-            return Ok(addr);
+    ) -> Result<TrampolineInfo, alloy::contract::Error> {
+        if let Some(info) = self.trampoline_cache.lock().get(&sub_solver).cloned() {
+            return Ok(info);
         }
 
         let factory = TrampolineFactory::new(self.trampoline_factory, &self.provider);
-        let addr = factory.addressOf(sub_solver).call().await?;
+        let address = factory.addressOf(sub_solver).call().await?;
 
-        self.trampoline_cache.lock().insert(sub_solver, addr);
-        Ok(addr)
+        let code = self
+            .provider
+            .get_code_at(address)
+            .await
+            .map_err(alloy::contract::Error::TransportError)?;
+
+        let info = TrampolineInfo { address, code };
+        self.trampoline_cache
+            .lock()
+            .insert(sub_solver, info.clone());
+        Ok(info)
     }
 }
 
 impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator<P> {
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
-        // 1. Resolve trampoline address. If already stored on the proposal
-        //    (re-validation), skip the RPC call; otherwise resolve from the factory (or
-        //    its cache).
-        let trampoline = match proposal.trampoline {
-            Some(addr) => addr,
+        // 1. Resolve trampoline address and bytecode.
+        let cached = self
+            .trampoline_cache
+            .lock()
+            .get(&proposal.sub_solver)
+            .cloned();
+        let trampoline = match cached {
+            Some(info) => info,
             None => match self.resolve_trampoline(proposal.sub_solver).await {
-                Ok(addr) => addr,
+                Ok(info) => info,
                 Err(e) if is_trampoline_revert(&e) => {
                     tracing::info!(
                         id = %proposal.id,
@@ -114,26 +136,25 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
         let sim = simulation::build_simulation(&simulation::SimulationParams {
             settlement: self.settlement_address,
             escrow: self.escrow_address,
-            sell_token: proposal.sell_token,
             buy_token: proposal.buy_token,
-            trampoline,
             user: proposal.order_uid.owner(),
             proposal: on_chain_proposal,
             interactions: proposal.interactions.clone(),
             signature: proposal.signature.clone(),
+            trampoline_code: trampoline.code,
         });
 
         // 3. Dispatch eth_estimateGas with state overrides.
         match self
             .provider
             .estimate_gas(sim.tx)
-            .account_override(sim.settlement_override.0, sim.settlement_override.1)
+            .account_override(sim.user_override.0, sim.user_override.1)
             .account_override(sim.escrow_override.0, sim.escrow_override.1)
             .await
         {
             Ok(gas) => Some(Verdict::Accept {
                 gas_used: Some(gas),
-                trampoline: Some(trampoline),
+                trampoline: Some(trampoline.address),
             }),
             Err(e) if is_revert(&e) => {
                 tracing::info!(
@@ -254,24 +275,31 @@ mod tests {
     }
 
     #[test]
-    fn trampoline_cache_returns_stored_address() {
+    fn trampoline_cache_returns_stored_info() {
         let provider = alloy::providers::ProviderBuilder::new()
             .connect_http("http://127.0.0.1:1".parse().unwrap());
         let validator =
             SimulationValidator::new(provider, Address::ZERO, Address::ZERO, Address::ZERO);
 
         let sub_solver = address!("0000000000000000000000000000000000000001");
-        let trampoline = address!("0000000000000000000000000000000000000099");
+        let trampoline_addr = address!("0000000000000000000000000000000000000099");
+        let code = alloy::primitives::Bytes::from(vec![0x60, 0x80]);
 
         // Pre-populate cache.
-        validator
-            .trampoline_cache
-            .lock()
-            .insert(sub_solver, trampoline);
+        validator.trampoline_cache.lock().insert(
+            sub_solver,
+            TrampolineInfo {
+                address: trampoline_addr,
+                code: code.clone(),
+            },
+        );
 
         // Verify cache hit (sync check, no RPC needed).
-        let cached = validator.trampoline_cache.lock().get(&sub_solver).copied();
-        assert_eq!(cached, Some(trampoline));
+        let cached = validator.trampoline_cache.lock().get(&sub_solver).cloned();
+        assert!(cached.is_some());
+        let info = cached.unwrap();
+        assert_eq!(info.address, trampoline_addr);
+        assert_eq!(info.code, code);
     }
 
     #[test]

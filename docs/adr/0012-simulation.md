@@ -10,19 +10,27 @@ Depends on: [ADR-0001](0001-proposal-api.md) (proposal lifecycle), [ADR-0002](00
 
 ## Decision
 
-### Simulation dispatch: settlement code-override harness via `eth_estimateGas`
+### Simulation dispatch: trampoline code override on the user's address
 
-Each proposal is simulated by sending an `eth_estimateGas` call from the **user** (order owner) to the **settlement address**, whose code is overridden with a minimal simulation harness. The harness performs two calls:
+Each proposal is simulated by overriding the **user's** (order owner's) address with the trampoline's deployed bytecode, then calling `Trampoline.execute()` from the settlement contract:
 
-1. **`sellToken.transferFrom(msg.sender, trampoline, sellAmount)`** -- pulls the user's sell tokens directly into the trampoline. The user has already approved the settlement contract, and because the harness lives at the settlement address, `msg.sender` for the ERC-20 is the settlement address — the existing approval is exercised.
-2. **`trampoline.execute(proposal, interactions, buyToken, signature)`** -- runs the sub-solver's route inside the Trampoline sandbox. Because the harness is at the settlement address, `msg.sender == SETTLEMENT`, passing the trampoline's access check.
+```
+eth_estimateGas:
+  from: settlement
+  to:   user (code overridden with trampoline bytecode)
+  data: Trampoline.execute(proposal, interactions, buyToken, signature)
+```
+
+This works because:
+
+1. **`msg.sender == SETTLEMENT`**: the settlement is `from`, so the trampoline's `msg.sender` check passes without modifying the trampoline code.
+2. **The user already holds the sell tokens**: the trampoline code at the user's address can spend them directly — no transfer step, no approval override, no balance-slot detection.
+3. **Trampoline immutables are correct**: we copy the real trampoline's deployed bytecode (via `eth_getCode`), which has `SUB_SOLVER`, `SETTLEMENT`, `DOMAIN_SEPARATOR`, and `ESCROW` already embedded for that sub-solver.
 
 Two state overrides are applied:
 
-- **Settlement address**: `code` override injects the harness runtime bytecode. The harness is a trivial Solidity contract (~40 lines) compiled once; its bytecode is embedded as a constant.
-- **Escrow address**: `state_diff` override grants `SUBMITTER_ROLE` to the user (`tx.origin`). The trampoline checks `escrow.hasRole(SUBMITTER_ROLE, tx.origin)` to prevent unauthorized replay. The storage slot is computed from OpenZeppelin v5's ERC-7201 namespaced layout (deterministic, stable).
-
-No ERC-20 balance-slot detection or token-specific overrides are needed — the user's real token balance and real settlement approval are used directly.
+- **User address**: `code` override with the trampoline's deployed bytecode.
+- **Escrow address**: `state_diff` override granting `SUBMITTER_ROLE` to the settlement address (`tx.origin`). The trampoline checks `escrow.hasRole(SUBMITTER_ROLE, tx.origin)` to prevent unauthorized replay. The storage slot is computed from OpenZeppelin v5's ERC-7201 namespaced layout (deterministic, stable).
 
 Using `eth_estimateGas` (rather than `eth_call` + a separate gas estimation step) gives both the success/revert verdict and the gas consumed in a single RPC call. A successful estimate means the proposal would settle; a revert means it would fail.
 
@@ -30,11 +38,16 @@ Using `eth_estimateGas` (rather than `eth_call` + a separate gas estimation step
 
 `POST /proposals` requires two additional fields: `sellToken` and `buyToken` (the order's token addresses). These are needed to build the simulation calldata. The sub-solver provides them; in the future they may be fetched from the Orderbook API instead.
 
-### Trampoline resolution: `TrampolineFactory.addressOf` at validation time
+### Trampoline resolution: `TrampolineFactory.addressOf` + `eth_getCode` at validation time
 
-The simulation needs a trampoline address. It is resolved by calling `TrampolineFactory.addressOf(sub_solver)` on-chain during the first validation pass (`Submitted` -> `Active`). Results are cached per sub-solver in a `HashMap<Address, Address>` -- trampoline addresses are deterministic (CREATE2) and never change, so the cache is persistent across ticks.
+The simulation needs a trampoline address and its deployed bytecode. Both are resolved during the first validation pass (`Submitted` -> `Active`):
 
-The resolved trampoline is stored on the `Proposal` struct and used by both re-validation (no re-resolution needed) and `/solve` (for encoding settlement interactions).
+1. `TrampolineFactory.addressOf(sub_solver)` returns the trampoline address.
+2. `eth_getCode(trampoline)` returns the deployed bytecode (including immutables).
+
+Results are cached per sub-solver in a `HashMap<Address, TrampolineInfo>` — trampoline addresses are deterministic (CREATE2) and their bytecode never changes, so the cache is persistent across ticks.
+
+The resolved trampoline address is stored on the `Proposal` struct and used by both re-validation (no re-resolution needed) and `/solve` (for encoding settlement interactions).
 
 ### Gas in scoring: simulated gas + 100k buffer
 
@@ -67,12 +80,13 @@ Short-circuits on the first non-`Accept` verdict. The `Verdict::Accept` variant 
 
 ### Configuration: `--settlement-address`
 
-A new CLI arg `--settlement-address` (env: `SETTLEMENT_ADDRESS`) is required when `--rpc-url` is set. It specifies the GPv2Settlement contract address, used as the target for simulation calls and whose code is overridden with the simulation harness.
+A new CLI arg `--settlement-address` (env: `SETTLEMENT_ADDRESS`) is required when `--rpc-url` is set. It specifies the GPv2Settlement contract address, used as the `from` address for simulation calls.
 
 ## Consequences
 
 - **`POST /proposals` has two new required fields.** Existing sub-solver clients must send `sellToken` and `buyToken`. The reference `subsolver` crate must be updated.
 - **Proposals without simulation are invisible to `/solve`.** In `AcceptAll` mode (no RPC), `/solve` returns empty solutions. This is correct -- without chain connectivity, proposals cannot be meaningfully scored or settled.
-- **RPC load scales with active proposals.** Every active proposal is re-simulated on every tick. The trampoline cache mitigates one call per sub-solver, but `eth_estimateGas` runs every tick for every live proposal. Acceptable for the expected M1 proposal volume.
-- **Token-agnostic.** The simulation works with any ERC-20 token — no balance-slot detection or per-token probing is needed. The harness bytecode is a fixed constant tied to the BYOS contract ABI, not to the token ecosystem.
+- **RPC load scales with active proposals.** Every active proposal is re-simulated on every tick. The trampoline cache mitigates one call per sub-solver (both address and bytecode), but `eth_estimateGas` runs every tick for every live proposal. Acceptable for the expected M1 proposal volume.
+- **Token-agnostic.** The simulation works with any ERC-20 token — no balance-slot detection or per-token probing is needed. The user's real token balance is used directly.
+- **Interaction recipient caveat.** If a sub-solver's interaction calldata hardcodes the real trampoline address as the swap output recipient, those tokens go to the real trampoline instead of the user-acting-as-trampoline, causing the settle-back to revert. Sub-solvers should design interactions so that output tokens land at the executing contract's address (i.e., the address running the trampoline code).
 - **Anvil integration tests** are deferred to COW-1165. Unit tests use mock providers (unreachable RPC) to verify error classification and deferral behavior.
