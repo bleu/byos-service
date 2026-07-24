@@ -15,11 +15,7 @@ use {
         proposal::Proposal,
         validator::{ValidateProposal, Verdict},
     },
-    alloy::{
-        primitives::Address,
-        providers::Provider,
-        transports::RpcError,
-    },
+    alloy::{primitives::Address, providers::Provider, transports::RpcError},
     byos_common::contracts::TrampolineFactory,
     parking_lot::Mutex,
     std::collections::HashMap,

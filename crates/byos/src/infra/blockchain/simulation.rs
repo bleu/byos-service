@@ -18,8 +18,8 @@
 
 use {
     alloy::{
-        primitives::{Address, Bytes, B256},
-        rpc::types::{state::AccountOverride, TransactionRequest},
+        primitives::{Address, B256, Bytes},
+        rpc::types::{TransactionRequest, state::AccountOverride},
         sol_types::SolCall,
     },
     byos_common::contracts::{Interaction, Proposal},
@@ -82,7 +82,8 @@ const HARNESS_RUNTIME_BYTECODE: &str = "0x608060405234801561000f575f5ffd5b506004
 // ── Escrow AccessControl storage constants ───────────────────────────────────
 
 /// OpenZeppelin v5 AccessControl ERC-7201 namespace base slot:
-/// `keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.AccessControl")) - 1)) & ~0xff`
+/// `keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.AccessControl"
+/// )) - 1)) & ~0xff`
 const ACCESS_CONTROL_BASE_SLOT: B256 =
     alloy::primitives::b256!("02dd7bc7dec4dceedda775e58dd541e08a116c6c53815c0bd028192f7b626800");
 
@@ -248,8 +249,7 @@ mod tests {
         let sim = build_simulation(&params);
         let calldata = sim.tx.input.input().expect("calldata should be set");
 
-        let decoded =
-            simulateCall::abi_decode(calldata).expect("should decode as simulate()");
+        let decoded = simulateCall::abi_decode(calldata).expect("should decode as simulate()");
 
         assert_eq!(decoded.sellToken, params.sell_token);
         assert_eq!(decoded.sellAmount, params.proposal.sellAmount);
@@ -292,7 +292,10 @@ mod tests {
         assert_eq!(addr, params.escrow);
         assert!(ovr.code.is_none());
 
-        let state_diff = ovr.state_diff.as_ref().expect("escrow should have state_diff");
+        let state_diff = ovr
+            .state_diff
+            .as_ref()
+            .expect("escrow should have state_diff");
         assert_eq!(state_diff.len(), 1, "exactly one slot should be overridden");
 
         let slot = compute_has_role_slot(SUBMITTER_ROLE, params.user);
@@ -306,9 +309,14 @@ mod tests {
     #[test]
     fn has_role_slot_matches_solidity_computation() {
         // Verified against `forge script` output:
-        // _roles[SUBMITTER_ROLE] slot = 0x5c3302b5c06292c55b333749a04b055e6741a4d3298d02ec2344f30876d13dfe
+        // _roles[SUBMITTER_ROLE] slot =
+        // 0x5c3302b5c06292c55b333749a04b055e6741a4d3298d02ec2344f30876d13dfe
         let role_data_slot = alloy::primitives::keccak256(
-            [SUBMITTER_ROLE.as_slice(), ACCESS_CONTROL_BASE_SLOT.as_slice()].concat(),
+            [
+                SUBMITTER_ROLE.as_slice(),
+                ACCESS_CONTROL_BASE_SLOT.as_slice(),
+            ]
+            .concat(),
         );
         assert_eq!(
             role_data_slot,
