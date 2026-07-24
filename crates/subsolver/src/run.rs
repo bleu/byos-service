@@ -10,7 +10,11 @@ use {
             proposal::{Order, RouteParams, build_proposal},
             routing,
         },
-        infra::{blockchain::ChainClient, byos::ByosClient, orderbook::OrderbookClient},
+        infra::{
+            blockchain::{ChainClient, ReservesQuery},
+            byos::ByosClient,
+            orderbook::OrderbookClient,
+        },
     },
     alloy::{
         primitives::{Address, B256, Bytes, U256},
@@ -64,7 +68,9 @@ pub struct Subsolver {
     /// Live submissions by order UID: no resubmission until they expire or
     /// the validation verdict kills them.
     live: HashMap<Bytes, Live>,
-    /// Monotonic salt distinguishing otherwise identical proposals.
+    /// Monotonic salt distinguishing otherwise identical proposals. Seeded
+    /// from the clock at startup so a restarted process never reuses a
+    /// nonce from its previous life.
     next_nonce: u64,
 }
 
@@ -97,24 +103,55 @@ impl Subsolver {
             domain,
             trampoline,
             live: HashMap::new(),
-            next_nonce: 0,
+            next_nonce: u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock after the unix epoch")
+                    .as_millis(),
+            )
+            .expect("current time fits in u64 millis"),
             config,
         })
     }
 
     /// One pass of the loop: fetch the auction, check the verdict on live
     /// proposals, and submit a proposal for every eligible order without a
-    /// live one. Per-order failures (no route, rejection) are logged and
+    /// live one. All pair reserves are read in a single multicall, so the
+    /// pass costs one RPC round-trip however many orders it routes.
+    /// Per-order failures (no pool, no route, rejection) are logged and
     /// skipped — the next poll retries; only failures that void the whole
     /// pass surface as errors.
     pub async fn poll_once(&mut self, now: u64) -> Result<(), Error> {
         self.live.retain(|_, live| live.valid_until > now);
 
+        let mut pending = Vec::new();
         for order in self.orderbook.solvable_orders().await? {
-            if self.holds_live_proposal(&order.uid).await {
-                continue;
+            if !self.holds_live_proposal(&order.uid).await {
+                pending.push(order);
             }
-            match self.propose(&order, now).await {
+        }
+
+        let queries: Vec<_> = pending
+            .iter()
+            .map(|order| ReservesQuery {
+                pair: routing::pair_address(
+                    self.config.uniswap_factory,
+                    self.config.pair_init_code_hash,
+                    order.sell_token,
+                    order.buy_token,
+                ),
+                sell_token: order.sell_token,
+                buy_token: order.buy_token,
+            })
+            .collect();
+        let reserves = self.chain.reserves(&queries).await?;
+
+        for (order, reserves) in pending.into_iter().zip(reserves) {
+            let Some((reserve_sell, reserve_buy)) = reserves else {
+                tracing::warn!(order_uid = %order.uid, "no pair reserves; skipping order this poll");
+                continue;
+            };
+            match self.propose(&order, reserve_sell, reserve_buy, now).await {
                 Ok(Some(live)) => {
                     self.live.insert(order.uid, live);
                 }
@@ -157,21 +194,17 @@ impl Subsolver {
         }
     }
 
-    /// Routes, signs, and submits one order. `Ok(Some(live))` means a
-    /// proposal is now live; `Ok(None)` means the order is unroutable at the
-    /// current reserves (no pool, can't beat the limit price).
-    async fn propose(&mut self, order: &Order, now: u64) -> Result<Option<Live>, ProposeError> {
-        let pair = routing::pair_address(
-            self.config.uniswap_factory,
-            self.config.pair_init_code_hash,
-            order.sell_token,
-            order.buy_token,
-        );
-        let (reserve_sell, reserve_buy) = self
-            .chain
-            .reserves(pair, order.sell_token, order.buy_token)
-            .await?;
-
+    /// Routes, signs, and submits one order against the already-fetched
+    /// pair reserves. `Ok(Some(live))` means a proposal is now live;
+    /// `Ok(None)` means the order is unroutable at the current reserves
+    /// (can't beat the limit price).
+    async fn propose(
+        &mut self,
+        order: &Order,
+        reserve_sell: U256,
+        reserve_buy: U256,
+        now: u64,
+    ) -> Result<Option<Live>, crate::infra::byos::Error> {
         let valid_until = now + self.config.proposal_ttl.as_secs();
         let params = RouteParams {
             router: self.config.uniswap_router,
@@ -193,14 +226,6 @@ impl Subsolver {
         tracing::info!(order_uid = %order.uid, id, valid_until, "proposal submitted");
         Ok(Some(Live { id, valid_until }))
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ProposeError {
-    #[error("chain: {0}")]
-    Chain(#[from] crate::infra::blockchain::Error),
-    #[error("byos: {0}")]
-    Byos(#[from] crate::infra::byos::Error),
 }
 
 /// Binary entry point: parse CLI + TOML, build the sub-solver, and poll
@@ -271,7 +296,8 @@ mod tests {
         super::*,
         alloy::{
             primitives::{Address, B256, Bytes, Signature, U256, address, b256, keccak256},
-            providers::{Provider, ProviderBuilder},
+            providers::{Provider, ProviderBuilder, bindings::IMulticall3},
+            sol_types::SolCall,
             transports::mock::Asserter,
         },
         byos_common::contracts,
@@ -311,17 +337,24 @@ mod tests {
         }
     }
 
+    /// The multicall response for one routed poll: a single successful
+    /// `getReserves()` entry inside an `aggregate3` return.
     fn reserves_return(reserve0: u64, reserve1: u64) -> Bytes {
         let words = [
             U256::from(reserve0),
             U256::from(reserve1),
             U256::from(1_750_000_000u64),
         ];
-        words
+        let reserves: Bytes = words
             .iter()
             .flat_map(|word| B256::from(*word).0)
             .collect::<Vec<u8>>()
-            .into()
+            .into();
+        IMulticall3::aggregate3Call::abi_encode_returns(&vec![IMulticall3::Result {
+            success: true,
+            returnData: reserves,
+        }])
+        .into()
     }
 
     async fn mock_auction(orderbook: &MockServer) {
@@ -408,8 +441,9 @@ mod tests {
         asserter.push_success(&Bytes::from(
             B256::left_padding_from(TRAMPOLINE.as_slice()).0,
         ));
-        // One getReserves per routed poll: the initial submission and the
-        // post-expiry resubmission. The held poll in between must not hit RPC.
+        // One reserves multicall per routed poll: the initial submission and
+        // the post-expiry resubmission. The held poll in between must not
+        // hit RPC.
         asserter.push_success(&reserves_return(5_000_000, 10_000)); // USDC, WETH
         asserter.push_success(&reserves_return(5_000_000, 10_000));
 
@@ -464,6 +498,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovered, sub_solver_address);
+
+        // The nonce is clock-seeded (unix millis), so a restarted process
+        // never reuses one from a previous life.
+        assert!(first.nonce.parse::<u64>().unwrap() >= 1_750_000_000_000);
 
         // The resubmission is a fresh proposal: new lifetime, new nonce.
         let second = &submissions[1];
