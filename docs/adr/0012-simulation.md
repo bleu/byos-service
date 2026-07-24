@@ -10,13 +10,19 @@ Depends on: [ADR-0001](0001-proposal-api.md) (proposal lifecycle), [ADR-0002](00
 
 ## Decision
 
-### Simulation dispatch: `eth_estimateGas` with GPv2Settlement calling itself
+### Simulation dispatch: settlement code-override harness via `eth_estimateGas`
 
-Each proposal is simulated by sending an `eth_estimateGas` call where GPv2Settlement is both the `from` and `to` address. The calldata is a minimal `settle()` call with empty tokens, prices, and trades, and three intra-interactions:
+Each proposal is simulated by sending an `eth_estimateGas` call from the **user** (order owner) to the **settlement address**, whose code is overridden with a minimal simulation harness. The harness performs two calls:
 
-1. **`sellToken.transferFrom(user, settlement, sellAmount)`** -- simulation-only. Pulls the user's sell tokens into settlement, mimicking what the vault relayer does in a real settlement. The user (order owner, extracted from `OrderUid` bytes 32..52) has already approved the settlement contract, so this succeeds if the user holds enough tokens. No state overrides are needed.
-2. **`sellToken.transfer(trampoline, sellAmount)`** -- real BYOS interaction. Pushes tokens from settlement to the sub-solver's Trampoline.
-3. **`trampoline.execute(proposal, interactions, buyToken, signature)`** -- real BYOS interaction. Runs the sub-solver's route inside the Trampoline sandbox.
+1. **`sellToken.transferFrom(msg.sender, trampoline, sellAmount)`** -- pulls the user's sell tokens directly into the trampoline. The user has already approved the settlement contract, and because the harness lives at the settlement address, `msg.sender` for the ERC-20 is the settlement address — the existing approval is exercised.
+2. **`trampoline.execute(proposal, interactions, buyToken, signature)`** -- runs the sub-solver's route inside the Trampoline sandbox. Because the harness is at the settlement address, `msg.sender == SETTLEMENT`, passing the trampoline's access check.
+
+Two state overrides are applied:
+
+- **Settlement address**: `code` override injects the harness runtime bytecode. The harness is a trivial Solidity contract (~40 lines) compiled once; its bytecode is embedded as a constant.
+- **Escrow address**: `state_diff` override grants `SUBMITTER_ROLE` to the user (`tx.origin`). The trampoline checks `escrow.hasRole(SUBMITTER_ROLE, tx.origin)` to prevent unauthorized replay. The storage slot is computed from OpenZeppelin v5's ERC-7201 namespaced layout (deterministic, stable).
+
+No ERC-20 balance-slot detection or token-specific overrides are needed — the user's real token balance and real settlement approval are used directly.
 
 Using `eth_estimateGas` (rather than `eth_call` + a separate gas estimation step) gives both the success/revert verdict and the gas consumed in a single RPC call. A successful estimate means the proposal would settle; a revert means it would fail.
 
@@ -61,11 +67,12 @@ Short-circuits on the first non-`Accept` verdict. The `Verdict::Accept` variant 
 
 ### Configuration: `--settlement-address`
 
-A new CLI arg `--settlement-address` (env: `SETTLEMENT_ADDRESS`) is required when `--rpc-url` is set. It specifies the GPv2Settlement contract address, used as both `from` and `to` for simulation calls.
+A new CLI arg `--settlement-address` (env: `SETTLEMENT_ADDRESS`) is required when `--rpc-url` is set. It specifies the GPv2Settlement contract address, used as the target for simulation calls and whose code is overridden with the simulation harness.
 
 ## Consequences
 
 - **`POST /proposals` has two new required fields.** Existing sub-solver clients must send `sellToken` and `buyToken`. The reference `subsolver` crate must be updated.
 - **Proposals without simulation are invisible to `/solve`.** In `AcceptAll` mode (no RPC), `/solve` returns empty solutions. This is correct -- without chain connectivity, proposals cannot be meaningfully scored or settled.
 - **RPC load scales with active proposals.** Every active proposal is re-simulated on every tick. The trampoline cache mitigates one call per sub-solver, but `eth_estimateGas` runs every tick for every live proposal. Acceptable for the expected M1 proposal volume.
+- **Token-agnostic.** The simulation works with any ERC-20 token — no balance-slot detection or per-token probing is needed. The harness bytecode is a fixed constant tied to the BYOS contract ABI, not to the token ecosystem.
 - **Anvil integration tests** are deferred to COW-1165. Unit tests use mock providers (unreachable RPC) to verify error classification and deferral behavior.

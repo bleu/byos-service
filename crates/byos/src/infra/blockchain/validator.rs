@@ -1,7 +1,8 @@
 //! Composite proposal validator and simulation validator.
 //!
-//! [`SimulationValidator`] dispatches `eth_estimateGas` against GPv2Settlement
-//! and resolves trampoline addresses via `TrampolineFactory.addressOf`.
+//! [`SimulationValidator`] dispatches `eth_estimateGas` with a settlement
+//! code-override harness and resolves trampoline addresses via
+//! `TrampolineFactory.addressOf`.
 //!
 //! [`ProposalValidator`] composes
 //! [`EscrowValidator`](super::escrow::EscrowValidator)
@@ -17,7 +18,6 @@ use {
     alloy::{
         primitives::Address,
         providers::Provider,
-        rpc::types::TransactionRequest,
         transports::RpcError,
     },
     byos_common::contracts::TrampolineFactory,
@@ -29,12 +29,13 @@ use {
 // SimulationValidator
 // ---------------------------------------------------------------------------
 
-/// Validates proposals by simulating them via `eth_estimateGas` against the
-/// GPv2Settlement contract. Also resolves trampoline addresses via
+/// Validates proposals by simulating them via `eth_estimateGas` with a
+/// settlement code-override harness. Also resolves trampoline addresses via
 /// `TrampolineFactory.addressOf(sub_solver)` and caches them per sub-solver.
 pub struct SimulationValidator<P> {
     provider: P,
     settlement_address: Address,
+    escrow_address: Address,
     trampoline_factory: Address,
     /// Cached trampoline addresses: sub_solver → trampoline. Persistent across
     /// ticks (trampoline addresses are deterministic and never change).
@@ -42,10 +43,16 @@ pub struct SimulationValidator<P> {
 }
 
 impl<P: Provider + Clone> SimulationValidator<P> {
-    pub fn new(provider: P, settlement_address: Address, trampoline_factory: Address) -> Self {
+    pub fn new(
+        provider: P,
+        settlement_address: Address,
+        escrow_address: Address,
+        trampoline_factory: Address,
+    ) -> Self {
         Self {
             provider,
             settlement_address,
+            escrow_address,
             trampoline_factory,
             trampoline_cache: Mutex::new(HashMap::new()),
         }
@@ -99,7 +106,7 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
             },
         };
 
-        // 2. Build simulation calldata.
+        // 2. Build simulation (tx + state overrides).
         let on_chain_proposal = byos_common::contracts::Proposal {
             orderUidHash: proposal.order_uid_hash,
             sellAmount: proposal.sell_amount,
@@ -108,8 +115,9 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
             nonce: proposal.nonce,
         };
 
-        let calldata = simulation::build_simulation_calldata(&simulation::SimulationParams {
+        let sim = simulation::build_simulation(&simulation::SimulationParams {
             settlement: self.settlement_address,
+            escrow: self.escrow_address,
             sell_token: proposal.sell_token,
             buy_token: proposal.buy_token,
             trampoline,
@@ -119,13 +127,14 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for SimulationValidator
             signature: proposal.signature.clone(),
         });
 
-        // 3. Dispatch eth_estimateGas.
-        let tx = TransactionRequest::default()
-            .from(self.settlement_address)
-            .to(self.settlement_address)
-            .input(calldata.into());
-
-        match self.provider.estimate_gas(tx).await {
+        // 3. Dispatch eth_estimateGas with state overrides.
+        match self
+            .provider
+            .estimate_gas(sim.tx)
+            .account_override(sim.settlement_override.0, sim.settlement_override.1)
+            .account_override(sim.escrow_override.0, sim.escrow_override.1)
+            .await
+        {
             Ok(gas) => Some(Verdict::Accept {
                 gas_used: Some(gas),
                 trampoline: Some(trampoline),
@@ -232,6 +241,7 @@ mod tests {
         let validator = SimulationValidator::new(
             provider,
             address!("9008D19f58AAbD9eD0D60971565AA8510560ab41"),
+            address!("0000000000000000000000000000000000000EEE"),
             address!("0000000000000000000000000000000000000042"),
         );
 
@@ -251,7 +261,8 @@ mod tests {
     fn trampoline_cache_returns_stored_address() {
         let provider = alloy::providers::ProviderBuilder::new()
             .connect_http("http://127.0.0.1:1".parse().unwrap());
-        let validator = SimulationValidator::new(provider, Address::ZERO, Address::ZERO);
+        let validator =
+            SimulationValidator::new(provider, Address::ZERO, Address::ZERO, Address::ZERO);
 
         let sub_solver = address!("0000000000000000000000000000000000000001");
         let trampoline = address!("0000000000000000000000000000000000000099");
