@@ -5,7 +5,7 @@ use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::{ScoreInput, score_proposal},
+        scoring::{GAS_ESTIMATE, ScoreInput, score_proposal},
     },
     alloy::primitives::{Address, U256},
     axum::{Json, extract::State},
@@ -16,20 +16,23 @@ use {
     },
     std::{
         collections::HashMap,
+        sync::atomic::Ordering,
         time::{SystemTime, UNIX_EPOCH},
     },
 };
 
-/// Fixed gas estimate for M1 (no simulation-based estimate yet).
-const M1_GAS_ESTIMATE: u64 = 200_000;
-
 /// POST /solve — the driver-facing solver engine endpoint.
 pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) -> Json<Solutions> {
+    // Publish the auction's gas price so the background escrow validator uses
+    // a fresh value instead of the startup fallback.
+    let gp: u64 = auction.effective_gas_price.try_into().unwrap_or(u64::MAX);
+    state.gas_price().store(gp, Ordering::Relaxed);
+
     let mut solutions = Vec::new();
     let now = U256::from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .expect("system clock before Unix epoch")
             .as_secs(),
     );
 
@@ -42,7 +45,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         }
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
-        let gas_cost = U256::from(M1_GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
+        let gas_cost = U256::from(GAS_ESTIMATE).saturating_mul(auction.effective_gas_price);
 
         // The surplus token is the buy token for sell orders, sell token for buy
         // orders.
@@ -60,7 +63,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         // Score and select the best proposal for this order.
         let best = proposals
             .iter()
-            .filter(|p| p.valid_until > now)
+            .filter(|p| p.valid_until >= now)
             .filter_map(|p| {
                 let score = score_proposal(&ScoreInput {
                     order_sell: order.sell_amount,
@@ -93,7 +96,7 @@ fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solut
     // We need a trampoline address to encode interactions. For M1, we use
     // Address::ZERO as a placeholder — in production this comes from
     // ITrampolineFactory.addressOf(subSolver) resolved at proposal ingestion.
-    // TODO(COW-1162): resolve trampoline address during ingestion simulation.
+    // TODO: resolve trampoline address during ingestion.
     let trampoline = Address::ZERO;
 
     let trampoline_interactions = encode_trampoline_interactions(
@@ -152,7 +155,7 @@ fn build_solution(id: u64, order: &auction::Order, proposal: &Proposal) -> solut
         pre_interactions: vec![],
         interactions,
         post_interactions: vec![],
-        gas: Some(M1_GAS_ESTIMATE),
+        gas: Some(GAS_ESTIMATE),
         flashloans: None,
         wrappers: vec![],
     }

@@ -82,7 +82,7 @@ Proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signatu
 
 ### Ingestion validation: async, signature-only request path
 
-`POST /proposals` does exactly two things inline: parse the request and recover the signer (`ecrecover`). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature failures still reject synchronously with a 4xx.
+`POST /proposals` does three things inline: parse the request, recover the signer (`ecrecover`), and check that the proposal is not already expired (`valid_until < now`). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature failures and already-expired proposals reject synchronously with a 4xx — there is no point accepting, storing, and auditing a proposal that is dead on arrival.
 
 All on-chain work — the escrow balance check and the simulation `eth_call` — runs in a background validator loop, off the request path. Each tick (configurable interval, default 12s, one mainnet block; block-driven ticking is a decision for the simulation work, COW-1162) sweeps expired proposals, then judges every `Submitted` proposal and flips it to `Active`, `Rejected`, or `SimFailed`. Sub-solvers poll `GET /proposal/{id}` for the verdict; a rejection carries its typed reason.
 
@@ -98,12 +98,13 @@ Escrow balance is cached with a short TTL (~1 block period) for rate-limiting. T
 Synchronous (request path):
 1. IP filter (shed floods)
 2. Parse + `ecrecover` (identify signer)
-3. Signer rate limit check (shed per-identity spam)
-4. Cached escrow balance tier check (shed ineligible signers, in-memory read)
+3. Expiry check (`valid_until < now` → 4xx, reject DOA proposals before storing)
+4. Signer rate limit check (shed per-identity spam)
+5. Cached escrow balance tier check (shed ineligible signers, in-memory read)
 
 Background validator:
-5. Authoritative escrow balance check (RPC)
-6. Gatekeeping + simulation `eth_call` (expensive, only for eligible proposals)
+6. Authoritative escrow balance check (RPC)
+7. Gatekeeping + simulation `eth_call` (expensive, only for eligible proposals)
 
 ### API topology: two listeners, one process
 
