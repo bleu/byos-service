@@ -82,6 +82,32 @@ Short-circuits on the first non-`Accept` verdict. The `Verdict::Accept` variant 
 
 A new CLI arg `--settlement-address` (env: `SETTLEMENT_ADDRESS`) is required when `--rpc-url` is set. It specifies the GPv2Settlement contract address, used as the `from` address for simulation calls.
 
+## Alternatives rejected
+
+### A. Settlement calls itself with a fake `settle()`
+
+Build a minimal `settle()` calldata with empty trades and three intra-interactions: `transferFrom(user, settlement, sellAmount)`, `transfer(trampoline, sellAmount)`, `trampoline.execute(...)`. The settlement is both `from` and `to`.
+
+**Rejected because:** the `transferFrom` step requires the user to have approved the settlement contract. In CoW Protocol, users approve the **VaultRelayer**, not the settlement — so this simulation would revert on real mainnet state.
+
+### B. Settlement code override with a simulation harness
+
+Override the settlement contract's code with a compiled harness that calls `transferFrom(msg.sender, trampoline, sellAmount)` then `trampoline.execute(...)`. The user calls the harness at the settlement address.
+
+**Rejected because:** it has the same approval problem as alternative A. The harness at the settlement address calls `transferFrom` where the ERC-20 checks `allowance[user][settlement]`, which doesn't exist — users approved the VaultRelayer.
+
+### C. Multicall with trampoline code override
+
+Use Multicall3 to batch `sellToken.transfer(trampoline, sellAmount)` and `trampoline.execute(...)`. Override the trampoline's bytecode to change the immutable `SETTLEMENT` to the Multicall3 address.
+
+**Rejected because:** Multicall3 uses `call` (not `delegatecall`), so `msg.sender` for each subcall is the Multicall3 contract. The `sellToken.transfer()` would need Multicall3 to hold the sell tokens, which requires ERC-20 balance-slot detection — the same fragile, token-specific probing we wanted to avoid. `delegatecall` doesn't help either: it preserves `msg.sender` but changes the storage context to the caller's, so ERC-20 balance reads return wrong values.
+
+### D. ERC-20 balance state overrides on the trampoline
+
+Call `trampoline.execute()` directly from the settlement, giving the trampoline sell tokens via `state_diff` overrides on the ERC-20's `balanceOf` storage slot.
+
+**Rejected because:** detecting the correct storage slot for an arbitrary ERC-20's `balanceOf` mapping is fragile and requires ongoing maintenance. Different tokens use different slot layouts (Solidity mapping slots 0–10, Solady packed layout, proxy patterns, etc.). Tokens with non-standard layouts would either be incorrectly simulated or rejected as unsupported. The chosen approach avoids this entirely by using the user's real token balance.
+
 ## Consequences
 
 - **`POST /proposals` has two new required fields.** Existing sub-solver clients must send `sellToken` and `buyToken`. The reference `subsolver` crate must be updated.
