@@ -33,9 +33,10 @@ info:
     `version = "0.1"`, `chainId` of the target chain, and
     `verifyingContract` set to the TrampolineFactory address.
 
-    Reads are owner-scoped (ADR-0011): the recovered signer only ever sees
-    its own proposals. A non-owner requesting a proposal by id gets the same
-    `404` as a genuine miss, so proposal ids cannot be probed for existence.
+    Reads and cancellations are owner-scoped (ADR-0011): the recovered
+    signer only ever sees or cancels its own proposals. A non-owner
+    requesting or cancelling a proposal by id gets the same `404` as a
+    genuine miss, so proposal ids cannot be probed for existence.
 
     ## Proposal lifecycle
 
@@ -156,8 +157,9 @@ paths:
       description: |
         Requires an EIP-712 `CancelProposal` signature over the proposal id
         in the `X-Signature` header. The recovered signer must be the
-        proposal's sub-solver. Only live proposals (`submitted` or `active`)
-        can be cancelled.
+        proposal's sub-solver; a non-owner gets the same `404` as a genuine
+        miss (ADR-0011). Only live proposals (`submitted` or `active`) can
+        be cancelled.
       security:
         - cancelAuth: []
       responses:
@@ -169,14 +171,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "403":
-          description: The signer does not match the proposal's sub-solver.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "404":
-          description: No such proposal.
+          description: |
+            No such proposal — or a proposal owned by another sub-solver;
+            the two cases are indistinguishable on the wire (ADR-0011).
           content:
             application/json:
               schema:
@@ -498,7 +496,6 @@ components:
             - InsufficientEscrow
             - ProposalExpired
             - ProposalNotFound
-            - NotProposalOwner
             - ProposalNotCancellable
             - BadRequest
             - Internal

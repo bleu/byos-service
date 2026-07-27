@@ -384,6 +384,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_by_non_owner_is_masked_as_not_found() {
+        use alloy::sol_types::SolStruct;
+
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+        let state = test_state();
+        let owner = address!("0000000000000000000000000000000000000001");
+        let id = insert_proposal(&state, owner);
+
+        let intruder = PrivateKeySigner::random();
+        let cancel = eip712::CancelProposal {
+            proposalId: U256::from(id.0),
+        };
+        let signature =
+            alloy::signers::Signer::sign_hash(&intruder, &cancel.eip712_signing_hash(&domain))
+                .await
+                .expect("signing must succeed");
+
+        let response = public_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/proposal/{id}"))
+                    .header(
+                        "X-Signature",
+                        format!("0x{}", alloy::hex::encode(signature.as_bytes())),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Same 404 as a genuine miss — a 403 would be an existence oracle
+        // for proposal ids (ADR-0011).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(response).await["kind"], "ProposalNotFound");
+
+        // The proposal is untouched.
+        let proposal = state.store().get(id).expect("proposal must still exist");
+        assert_eq!(proposal.status, ProposalStatus::Active);
+    }
+
+    #[tokio::test]
     async fn post_without_token_fields_is_accepted() {
         // Token addresses come from the orderbook (ADR-0012), not the
         // sub-solver; the API contract must not require them.
