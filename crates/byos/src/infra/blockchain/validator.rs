@@ -478,6 +478,14 @@ mod tests {
         uri: String,
         orderbook: StubOrders,
     ) -> SimulationValidator<impl Provider, StubOrders> {
+        validator_with_gas_price(uri, orderbook, 0)
+    }
+
+    fn validator_with_gas_price(
+        uri: String,
+        orderbook: StubOrders,
+        gas_price: u64,
+    ) -> SimulationValidator<impl Provider, StubOrders> {
         let provider = alloy::providers::ProviderBuilder::new().connect_http(uri.parse().unwrap());
         SimulationValidator::new(
             provider,
@@ -485,7 +493,7 @@ mod tests {
             SETTLEMENT,
             ESCROW,
             FACTORY,
-            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(gas_price)),
             U256::ZERO,
         )
     }
@@ -613,6 +621,42 @@ mod tests {
         assert_eq!(
             verdict,
             Some(Verdict::Reject(RejectionReason::Unprofitable)),
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidation_of_active_proposal_skips_the_profitability_gate() {
+        // 1 gwei: the simulated 200k gas costs ~2e14 wei, dwarfing the
+        // 10_000-wei surplus at parity pricing — the score is deeply negative.
+        let gas_price = 1_000_000_000;
+
+        // The gate would reject these inputs on a first (Submitted) pass…
+        let server = rpc_server().await;
+        let validator = validator_with_gas_price(
+            server.uri(),
+            StubOrders::Found(Box::new(test_order_record())),
+            gas_price,
+        );
+        let verdict = validator.validate(&submitted_proposal()).await;
+        assert_eq!(
+            verdict,
+            Some(Verdict::Reject(RejectionReason::Unprofitable)),
+            "sanity: these inputs must be unprofitable at this gas price",
+        );
+
+        // …but re-validation of an Active proposal must not churn it: the
+        // simulation still runs (gas refresh), the gate is skipped.
+        let validator = validator_with_gas_price(
+            server.uri(),
+            StubOrders::Found(Box::new(test_order_record())),
+            gas_price,
+        );
+        let mut active = submitted_proposal();
+        active.status = ProposalStatus::Active;
+        let verdict = validator.validate(&active).await;
+        assert!(
+            matches!(verdict, Some(Verdict::Accept(Some(_)))),
+            "gas-price wobble must not reject an Active proposal, got {verdict:?}",
         );
     }
 
