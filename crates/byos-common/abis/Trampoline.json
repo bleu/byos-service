@@ -16,6 +16,11 @@
         "name": "_domainSeparator",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "_escrow",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
@@ -33,6 +38,19 @@
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ESCROW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -122,6 +140,11 @@
         ]
       },
       {
+        "name": "_sellToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "_buyToken",
         "type": "address",
         "internalType": "address"
@@ -134,6 +157,31 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "Executed",
+    "inputs": [
+      {
+        "name": "_orderUidHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_delta",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "_floor",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
   },
   {
     "type": "error",
@@ -180,6 +228,22 @@
   },
   {
     "type": "error",
+    "name": "Trampoline_FloorNotMet",
+    "inputs": [
+      {
+        "name": "_delta",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_floor",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "Trampoline_InvalidSignature",
     "inputs": []
   },
@@ -191,6 +255,11 @@
   {
     "type": "error",
     "name": "Trampoline_ProposalExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Trampoline_UnauthorizedSubmitter",
     "inputs": []
   }
 ]
