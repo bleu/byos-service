@@ -1,0 +1,507 @@
+openapi: 3.0.3
+
+info:
+  title: BYOS Proposal API
+  description: |
+    The public HTTP API by which sub-solvers submit signed settlement
+    proposals to the BYOS solver engine (ADR-0001).
+
+    The API is permissionless but collateral-gated: there is no registration
+    or API key. A sub-solver's identity is the address recovered from its
+    EIP-712 signatures, and its escrow deposit is the permission.
+
+    ## Conventions (ADR-0005)
+
+    Follows the CoW Protocol solver-engine wire idiom: camelCase JSON,
+    256-bit amounts as decimal strings, addresses and order UIDs as
+    `0x`-prefixed hex strings.
+
+    ## Authentication
+
+    Every endpoint except `POST /proposals` and `GET /healthz` requires an
+    EIP-712 signature in the `X-Signature` header, hex-encoded (65 bytes).
+    The signed message differs by operation:
+
+    - **Reads** (`GET`) sign the `ReadAuth` struct — `ReadAuth(uint256
+      version)` with `version = 1`. It is a bearer token: signed once, sent
+      on every request, no nonce or expiry (ADR-0011).
+    - **Cancellation** (`DELETE`) signs the `CancelProposal` struct —
+      `CancelProposal(uint256 proposalId)` — so each cancellation is
+      authorized individually.
+
+    All signatures share one EIP-712 domain: `name = "BYOS"`,
+    `version = "0.1"`, `chainId` of the target chain, and
+    `verifyingContract` set to the TrampolineFactory address.
+
+    Reads are owner-scoped (ADR-0011): the recovered signer only ever sees
+    its own proposals. A non-owner requesting a proposal by id gets the same
+    `404` as a genuine miss, so proposal ids cannot be probed for existence.
+
+    ## Proposal lifecycle
+
+    `POST /proposals` verifies the signature synchronously and answers `202
+    Accepted` — meaning "accepted for validation", not "accepted". The
+    proposal is stored as `submitted`; a background validator then runs the
+    escrow check and settlement simulation and flips it to `active`,
+    `rejected`, or `simFailed`. Sub-solvers poll `GET /proposal/{id}` for
+    the verdict. `rejected`, `simFailed`, `expired`, `cancelled`, and
+    `settled` are terminal — resubmission is a new `POST`.
+
+    The driver-facing `/solve` endpoint is not part of this spec: it is
+    served on a separate internal listener and implements the CoW Protocol
+    solver-engine spec (`crates/solvers/openapi.yml` in
+    cowprotocol/services).
+  version: 0.1.0
+  license:
+    name: GPL-3.0-or-later
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: http://localhost:8080
+    description: |
+      The public listener's bind address is deployment-specific
+      (`--public-addr`, default port 8080); there is no canonical
+      production URL yet.
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Health check.
+      description: Liveness probe. Always `200` with an empty body.
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+
+  /proposals:
+    post:
+      operationId: createProposal
+      summary: Submit a signed settlement proposal.
+      description: |
+        Parses the request, recovers the sub-solver address from the EIP-712
+        `ProposalData` signature, and rejects proposals whose `validUntil`
+        is already in the past. On success the proposal is stored as
+        `submitted` and validated in the background; poll
+        `GET /proposal/{id}` for the verdict.
+
+        Token addresses are not part of the request: they come from the
+        orderbook order during background validation (ADR-0012).
+
+        Proposals are immutable — there is no update operation. Replacement
+        is a new `POST`, optionally preceded by a `DELETE` of the old one.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProposalRequest"
+      responses:
+        "202":
+          description: |
+            Accepted for validation. The returned id is the handle for
+            polling and cancellation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateProposalResponse"
+        "400":
+          description: |
+            Malformed request (`BadRequest`), invalid or unrecoverable
+            signature (`InvalidSignature`, `SignatureRecoveryFailed`), or a
+            proposal that is already expired (`ProposalExpired`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /proposal/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProposalIdPath"
+    get:
+      operationId: getProposal
+      summary: Get one of the caller's proposals.
+      description: |
+        Returns the full proposal — amounts, status, and, when `status` is
+        `rejected`, the machine-readable `rejectionReason`. Owner-scoped:
+        the proposal is only returned if the `X-Signature` signer is its
+        sub-solver.
+      security:
+        - readAuth: []
+      responses:
+        "200":
+          description: The caller's proposal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetProposalResponse"
+        "400":
+          description: Missing or invalid `X-Signature` header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: |
+            No such proposal — or a proposal owned by another sub-solver;
+            the two cases are indistinguishable on the wire (ADR-0011).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      operationId: cancelProposal
+      summary: Cancel a live proposal.
+      description: |
+        Requires an EIP-712 `CancelProposal` signature over the proposal id
+        in the `X-Signature` header. The recovered signer must be the
+        proposal's sub-solver. Only live proposals (`submitted` or `active`)
+        can be cancelled.
+      security:
+        - cancelAuth: []
+      responses:
+        "204":
+          description: Proposal cancelled.
+        "400":
+          description: Missing or invalid `X-Signature` header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The signer does not match the proposal's sub-solver.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such proposal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The proposal is already in a terminal state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /proposals/by-solver:
+    get:
+      operationId: listProposalsBySolver
+      summary: List the caller's own proposals.
+      description: |
+        Lists the caller's proposals across all orders. Identity comes
+        entirely from the `X-Signature` header — there is no address
+        parameter (ADR-0011).
+      security:
+        - readAuth: []
+      responses:
+        "200":
+          description: The caller's proposals (metadata only).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListProposalsResponse"
+        "400":
+          description: Missing or invalid `X-Signature` header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /proposals/{orderUid}:
+    get:
+      operationId: listProposalsByOrder
+      summary: List the caller's proposals on one order.
+      description: |
+        Owner-scoped (ADR-0011): returns only the caller's own proposals on
+        the given order. Competitors' proposals on the same order are
+        invisible.
+      security:
+        - readAuth: []
+      parameters:
+        - name: orderUid
+          in: path
+          required: true
+          description: 56-byte CoW Protocol order UID as a hex string.
+          schema:
+            $ref: "#/components/schemas/OrderUid"
+      responses:
+        "200":
+          description: The caller's proposals on this order (metadata only).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListProposalsResponse"
+        "400":
+          description: |
+            Invalid order UID, or missing or invalid `X-Signature` header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  securitySchemes:
+    readAuth:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: |
+        EIP-712 signature over the `ReadAuth` struct (`version = 1`),
+        hex-encoded (65 bytes). A bearer token: the recovered signer scopes
+        what the caller may read (ADR-0011).
+    cancelAuth:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: |
+        EIP-712 signature over the `CancelProposal` struct for the proposal
+        id being cancelled, hex-encoded (65 bytes).
+
+  parameters:
+    ProposalIdPath:
+      name: id
+      in: path
+      required: true
+      description: Server-assigned proposal id.
+      schema:
+        $ref: "#/components/schemas/ProposalId"
+
+  schemas:
+    Address:
+      description: An Ethereum address, 20 bytes as a `0x`-prefixed hex string.
+      type: string
+      pattern: "^0x[0-9a-fA-F]{40}$"
+      example: "0x9008d19f58aabd9ed0d60971565aa8510560ab41"
+    OrderUid:
+      description: |
+        A 56-byte CoW Protocol order UID (32-byte order hash + 20-byte owner
+        + 4-byte validTo) as a hex string. The `0x` prefix is optional on
+        input; responses always include it.
+      type: string
+      pattern: "^(0x)?[0-9a-fA-F]{112}$"
+    U256:
+      description: A 256-bit unsigned integer as a decimal string.
+      type: string
+      pattern: "^[0-9]+$"
+      example: "1000000000000000000"
+    UnixTimestamp:
+      description: |
+        A Unix timestamp in seconds, as a decimal string (256-bit range on
+        the wire; the signed `ProposalData.validUntil` is a `uint256`).
+      type: string
+      pattern: "^[0-9]+$"
+      example: "1753650000"
+    HexBytes:
+      description: Arbitrary bytes as a hex string, `0x` prefix optional.
+      type: string
+      pattern: "^(0x)?([0-9a-fA-F]{2})*$"
+    Signature:
+      description: A 65-byte ECDSA signature as a hex string, `0x` prefix optional.
+      type: string
+      pattern: "^(0x)?[0-9a-fA-F]{130}$"
+    ProposalId:
+      description: Server-assigned proposal id (unsigned 64-bit integer).
+      type: integer
+      format: int64
+      minimum: 0
+      example: 42
+    ProposalStatus:
+      description: |
+        Lifecycle state of a proposal (ADR-0001):
+
+        - `submitted` — signature verified, awaiting background validation.
+        - `active` — passed gatekeeping; eligible for `/solve` selection.
+        - `rejected` — failed a gatekeeping rule; see `rejectionReason`.
+        - `expired` — `validUntil` passed.
+        - `settled` — the order was filled by this proposal.
+        - `simFailed` — the settlement simulation reverted.
+        - `cancelled` — cancelled by a signed `DELETE`.
+
+        All states except `submitted` and `active` are terminal.
+      type: string
+      enum:
+        - submitted
+        - active
+        - rejected
+        - expired
+        - settled
+        - simFailed
+        - cancelled
+    RejectionReason:
+      description: |
+        Why the background validator rejected a proposal (ADR-0007):
+
+        - `InsufficientEscrow` — the sub-solver's escrow balance is below
+          the required minimum. Fix: deposit escrow and resubmit.
+        - `UnsupportedOrder` — the order is outside the simulation envelope
+          (hooks, partial fill, non-erc20 balances — ADR-0012).
+        - `AmountMismatch` — the proposal's fill-or-kill amount differs from
+          the order's (sell amount for sell orders, buy amount for buy
+          orders).
+        - `OrderNotFound` — the orderbook does not know the proposal's
+          order UID.
+      type: string
+      enum:
+        - InsufficientEscrow
+        - UnsupportedOrder
+        - AmountMismatch
+        - OrderNotFound
+    Interaction:
+      description: |
+        One arbitrary call executed inside the sub-solver's Trampoline at
+        settlement. The sub-solver is fully responsible for the complete
+        route, including required approvals (ADR-0001).
+      type: object
+      required:
+        - target
+        - value
+        - callData
+      properties:
+        target:
+          $ref: "#/components/schemas/Address"
+        value:
+          description: Native token value sent with the call, in wei.
+          allOf:
+            - $ref: "#/components/schemas/U256"
+        callData:
+          $ref: "#/components/schemas/HexBytes"
+    CreateProposalRequest:
+      type: object
+      required:
+        - orderUid
+        - sellAmount
+        - buyAmount
+        - interactions
+        - validUntil
+        - nonce
+        - signature
+      properties:
+        orderUid:
+          $ref: "#/components/schemas/OrderUid"
+        sellAmount:
+          description: Amount of the order's sell token the proposal takes.
+          allOf:
+            - $ref: "#/components/schemas/U256"
+        buyAmount:
+          description: Amount of the order's buy token the proposal delivers.
+          allOf:
+            - $ref: "#/components/schemas/U256"
+        interactions:
+          description: The sub-solver's settlement route.
+          type: array
+          items:
+            $ref: "#/components/schemas/Interaction"
+        validUntil:
+          description: Unix timestamp after which the proposal expires.
+          allOf:
+            - $ref: "#/components/schemas/UnixTimestamp"
+        nonce:
+          description: |
+            Sub-solver-chosen salt for signature uniqueness. The service
+            enforces no ordering or uniqueness (ADR-0001).
+          allOf:
+            - $ref: "#/components/schemas/U256"
+        signature:
+          description: |
+            EIP-712 signature over the `ProposalData` struct, whose typehash
+            and `interactionsHash` commitment are defined by the
+            byos-contracts repo. The recovered signer is the sub-solver's
+            identity: its escrow key and the CREATE2 salt for its Trampoline.
+          allOf:
+            - $ref: "#/components/schemas/Signature"
+    CreateProposalResponse:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          $ref: "#/components/schemas/ProposalId"
+    GetProposalResponse:
+      type: object
+      required:
+        - id
+        - subSolver
+        - orderUid
+        - sellAmount
+        - buyAmount
+        - validUntil
+        - status
+      properties:
+        id:
+          $ref: "#/components/schemas/ProposalId"
+        subSolver:
+          description: The sub-solver address recovered from the proposal signature.
+          allOf:
+            - $ref: "#/components/schemas/Address"
+        orderUid:
+          $ref: "#/components/schemas/OrderUid"
+        sellAmount:
+          $ref: "#/components/schemas/U256"
+        buyAmount:
+          $ref: "#/components/schemas/U256"
+        validUntil:
+          $ref: "#/components/schemas/UnixTimestamp"
+        status:
+          $ref: "#/components/schemas/ProposalStatus"
+        rejectionReason:
+          description: Only present when `status` is `rejected`.
+          allOf:
+            - $ref: "#/components/schemas/RejectionReason"
+    ProposalMetadata:
+      description: |
+        Metadata only — no amounts, no interactions. List views never expose
+        full proposal contents (ADR-0001); fetch `GET /proposal/{id}` for
+        amounts and the rejection reason.
+      type: object
+      required:
+        - id
+        - subSolver
+        - validUntil
+        - status
+      properties:
+        id:
+          $ref: "#/components/schemas/ProposalId"
+        subSolver:
+          $ref: "#/components/schemas/Address"
+        validUntil:
+          $ref: "#/components/schemas/UnixTimestamp"
+        status:
+          $ref: "#/components/schemas/ProposalStatus"
+    ListProposalsResponse:
+      type: object
+      required:
+        - proposals
+      properties:
+        proposals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProposalMetadata"
+    Error:
+      description: |
+        JSON error body (ADR-0007). `kind` is the machine-readable
+        catalogue; `description` is human-readable and may vary.
+      type: object
+      required:
+        - kind
+        - description
+      properties:
+        kind:
+          type: string
+          enum:
+            - InvalidSignature
+            - SignatureRecoveryFailed
+            - InsufficientEscrow
+            - ProposalExpired
+            - ProposalNotFound
+            - NotProposalOwner
+            - ProposalNotCancellable
+            - BadRequest
+            - Internal
+        description:
+          type: string
+          example: "Proposal validUntil is in the past"
