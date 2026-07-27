@@ -26,7 +26,7 @@ use {
         contracts::{Interaction, Proposal},
         eip712,
     },
-    std::time::{Instant, SystemTime, UNIX_EPOCH},
+    std::time::{SystemTime, UNIX_EPOCH},
 };
 
 // ---------------------------------------------------------------------------
@@ -123,7 +123,6 @@ pub async fn create_proposal(
         rejection_reason: None,
         gas_used: None,
         trampoline: None,
-        created_at: Instant::now(),
     };
 
     let id = state.store().insert(stored);
@@ -237,6 +236,7 @@ pub async fn cancel_proposal(
         crate::domain::proposal::StoreError::StaleTransition { .. } => {
             Error::from(Kind::ProposalNotCancellable)
         }
+        crate::domain::proposal::StoreError::Database(_) => Error::from(Kind::Internal),
     })?;
 
     tracing::info!(%id, %signer, "proposal cancelled");

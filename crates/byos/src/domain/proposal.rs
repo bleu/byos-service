@@ -11,7 +11,7 @@ use {
             Arc,
             atomic::{AtomicU64, Ordering},
         },
-        time::{Instant, SystemTime},
+        time::SystemTime,
     },
 };
 
@@ -78,8 +78,10 @@ impl std::str::FromStr for OrderUid {
     }
 }
 
-/// Lifecycle state of a proposal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, strum::Display)]
+/// Lifecycle state of a proposal. The camelCase string form is shared by the
+/// wire (serde), the `proposals.status` column (strum Display/EnumString),
+/// and audit payloads — one vocabulary everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, strum::Display, strum::EnumString)]
 #[serde(rename_all = "camelCase")]
 #[strum(serialize_all = "camelCase")]
 pub enum ProposalStatus {
@@ -122,7 +124,6 @@ pub struct Proposal {
     /// `TrampolineFactory.addressOf(sub_solver)`. Set by the validator on
     /// first validation; `None` until resolved.
     pub trampoline: Option<Address>,
-    pub created_at: Instant,
 }
 
 /// Store-level error.
@@ -139,6 +140,8 @@ pub enum StoreError {
         expected: String,
         actual: ProposalStatus,
     },
+    #[error("database error")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Test fixture: a minimal proposal in the given status.
@@ -167,7 +170,6 @@ pub(crate) fn test_proposal(
         rejection_reason: None,
         gas_used: None,
         trampoline: None,
-        created_at: Instant::now(),
     }
 }
 
