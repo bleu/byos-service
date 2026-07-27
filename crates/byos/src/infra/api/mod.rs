@@ -388,7 +388,7 @@ mod tests {
         // Token addresses come from the orderbook (ADR-0012), not the
         // sub-solver; the API contract must not require them.
         let state = test_state();
-        let app = router(state);
+        let app = public_router(state);
         let signer = PrivateKeySigner::random();
         let (mut body, _) = signed_proposal_body_for(&signer).await;
         body.as_object_mut().unwrap().remove("sellToken");
