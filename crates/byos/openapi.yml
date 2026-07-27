@@ -124,10 +124,11 @@ paths:
       operationId: getProposal
       summary: Get one of the caller's proposals.
       description: |
-        Returns the full proposal — amounts, status, and, when `status` is
-        `rejected`, the machine-readable `rejectionReason`. Owner-scoped:
-        the proposal is only returned if the `X-Signature` signer is its
-        sub-solver.
+        Returns the proposal's amounts, status, and, when `status` is
+        `rejected`, the machine-readable `rejectionReason`. The submitted
+        `interactions`, `nonce`, and `signature` are not echoed back.
+        Owner-scoped: the proposal is only returned if the `X-Signature`
+        signer is its sub-solver.
       security:
         - readAuth: []
       responses:
