@@ -4,3 +4,4 @@ mod audit_db;
 mod cancel_proposal;
 mod create_proposal;
 mod list_proposals;
+mod solve_isolation;

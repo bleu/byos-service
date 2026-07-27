@@ -91,7 +91,10 @@ impl TestDb {
 
 /// One in-process service instance and an HTTP client pointed at it.
 pub struct TestApp {
+    /// Public listener (proposal CRUD).
     pub addr: SocketAddr,
+    /// Internal listener (`/solve`, driver-only — COW-1174).
+    pub internal_addr: SocketAddr,
     client: reqwest::Client,
     shutdown: oneshot::Sender<()>,
     handle: JoinHandle<anyhow::Result<()>>,
@@ -109,9 +112,25 @@ impl TestApp {
         database_url: &str,
         validation_interval_secs: u64,
     ) -> Self {
+        Self::spawn_with(database_url, validation_interval_secs, &[]).await
+    }
+
+    /// Spawn with a `--solve-bearer-token`, so tests can exercise the
+    /// driver-auth path end to end.
+    pub async fn spawn_with_solve_bearer_token(database_url: &str, token: &str) -> Self {
+        Self::spawn_with(database_url, 3600, &["--solve-bearer-token", token]).await
+    }
+
+    async fn spawn_with(
+        database_url: &str,
+        validation_interval_secs: u64,
+        extra_args: &[&str],
+    ) -> Self {
         let args = [
             "byos",
             "--public-addr",
+            "127.0.0.1:0",
+            "--internal-addr",
             "127.0.0.1:0",
             "--chain-id",
             &CHAIN_ID.to_string(),
@@ -122,15 +141,19 @@ impl TestApp {
             "--validation-interval-secs",
             &validation_interval_secs.to_string(),
         ]
-        .map(String::from);
+        .into_iter()
+        .chain(extra_args.iter().copied())
+        .map(String::from)
+        .collect::<Vec<_>>();
 
         let (bind_tx, bind_rx) = oneshot::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(crate::run_until(args, bind_tx, shutdown_rx));
-        let addr = bind_rx.await.expect("service failed to bind");
+        let addrs = bind_rx.await.expect("service failed to bind");
 
         Self {
-            addr,
+            addr: addrs.public,
+            internal_addr: addrs.internal,
             client: reqwest::Client::new(),
             shutdown: shutdown_tx,
             handle,
@@ -139,6 +162,10 @@ impl TestApp {
 
     pub fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.addr)
+    }
+
+    pub fn internal_url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.internal_addr)
     }
 
     /// POST a JSON body; returns status and response JSON.
