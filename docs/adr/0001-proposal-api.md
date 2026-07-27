@@ -77,7 +77,7 @@ Synchronous (request path):
 
 Background validator:
 6. Authoritative escrow balance check (RPC)
-7. Gatekeeping + simulation `eth_call` (expensive, only for eligible proposals)
+7. Gatekeeping + simulation `eth_estimateGas` ([ADR-0012](0012-simulation.md); expensive, only for eligible proposals)
 
 ### API topology: two listeners, one process
 
