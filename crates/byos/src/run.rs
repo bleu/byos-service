@@ -107,6 +107,19 @@ pub(crate) struct Args {
     /// Seconds between background validation ticks (expiry sweep + verdicts).
     #[arg(long, env, default_value_t = 12)]
     validation_interval_secs: u64,
+
+    /// How long dropped proposals (rejected/simFailed/expired/cancelled)
+    /// stay readable after reaching their terminal state; the retention
+    /// sweep deletes them past this window and they 404. Their audit trail
+    /// is kept regardless. Accepts humantime strings, e.g. `1h`, `30m`.
+    #[arg(long, env, default_value = "1h", value_parser = humantime::parse_duration)]
+    dropped_retention: std::time::Duration,
+
+    /// Seconds between retention sweep passes. Deliberately slow — dropped
+    /// proposals only need to disappear on the order of the retention
+    /// window, not of a block.
+    #[arg(long, env, default_value_t = 300)]
+    retention_sweep_interval_secs: u64,
 }
 
 /// Connection-string wrapper whose `Debug` hides the value, so the startup
@@ -221,6 +234,14 @@ async fn run_with(
 
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
 
+    // Retention sweep (ADR-0013): bounds the proposals table by deleting
+    // dropped-tier rows past their window. audit_events is never touched.
+    let retention_loop = crate::infra::retention::spawn(
+        store.clone(),
+        std::time::Duration::from_secs(args.retention_sweep_interval_secs),
+        args.dropped_retention,
+    );
+
     // Background validator (ADR-0001, async ingestion). When --rpc-url is
     // set, the composite ProposalValidator gates proposals via on-chain escrow
     // balance checks and settlement simulation. Without an RPC endpoint the
@@ -277,12 +298,13 @@ async fn run_with(
     .await
     .context("API server exited with error")?;
 
-    // The validation loop holds the store — and with it an audit sender — so
-    // stop it first, or the writer's channel never closes and the drain below
-    // hangs. A verdict lost mid-tick to the abort is redone by the first
-    // tick after the next boot — proposals are durable now. Then awaiting
-    // the writer flushes everything still queued.
+    // The validation and retention loops hold the store — and with it an
+    // audit sender — so stop them first, or the writer's channel never
+    // closes and the drain below hangs. A verdict lost mid-tick to the
+    // abort is redone by the first tick after the next boot — proposals are
+    // durable now. Then awaiting the writer flushes everything still queued.
     validation_loop.abort();
+    retention_loop.abort();
     writer.await.context("audit writer task panicked")
 }
 

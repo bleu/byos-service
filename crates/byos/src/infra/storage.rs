@@ -16,7 +16,10 @@ use {
     alloy::primitives::{Address, Bytes, U256},
     byos_common::contracts::Interaction,
     sqlx::postgres::PgPool,
-    std::{sync::Arc, time::SystemTime},
+    std::{
+        sync::Arc,
+        time::{Duration, SystemTime},
+    },
 };
 
 /// Store-level error.
@@ -268,6 +271,30 @@ impl ProposalStore {
             },
         });
         Ok(())
+    }
+
+    /// Delete dropped-tier proposals (`Rejected`/`SimFailed`/`Expired`/
+    /// `Cancelled`) that reached their terminal state more than `older_than`
+    /// ago; returns how many were deleted. The money states (`Settled`, and
+    /// later `SettleFailed`/`Penalized`) are never swept, and `audit_events`
+    /// is never touched — the proposal's history outlives its row
+    /// (ADR-0013).
+    pub async fn sweep_dropped(&self, older_than: Duration) -> Result<u64, StoreError> {
+        const DROPPED: [ProposalStatus; 4] = [
+            ProposalStatus::Rejected,
+            ProposalStatus::SimFailed,
+            ProposalStatus::Expired,
+            ProposalStatus::Cancelled,
+        ];
+        let result = sqlx::query(
+            "DELETE FROM proposals WHERE status = ANY($1) AND status_changed_at < now() - \
+             make_interval(secs => $2)",
+        )
+        .bind(status_names(&DROPPED))
+        .bind(older_than.as_secs_f64())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Disambiguate a zero-row compare-and-swap: the proposal is either gone
@@ -525,12 +552,34 @@ mod tests {
     /// A fresh store on a fresh database, plus the audit receiver so tests
     /// can assert on emitted evidence.
     async fn test_store() -> (ProposalStore, mpsc::UnboundedReceiver<AuditEvent>) {
+        let (store, rx, _pool) = test_store_with_pool().await;
+        (store, rx)
+    }
+
+    /// Like [`test_store`], with direct pool access for tests that
+    /// manipulate rows underneath the store (e.g. backdating
+    /// `status_changed_at`).
+    async fn test_store_with_pool() -> (ProposalStore, mpsc::UnboundedReceiver<AuditEvent>, PgPool)
+    {
         let db = TestDb::create().await;
         let pool = crate::infra::audit::connect_and_migrate(&db.url)
             .await
             .expect("migrations run");
         let (tx, rx) = mpsc::unbounded_channel();
-        (ProposalStore::new(pool, tx), rx)
+        (ProposalStore::new(pool.clone(), tx), rx, pool)
+    }
+
+    /// Pretend the proposal reached its current status `secs` seconds ago.
+    async fn backdate_status_change(pool: &PgPool, id: ProposalId, secs: f64) {
+        sqlx::query(
+            "UPDATE proposals SET status_changed_at = now() - make_interval(secs => $2) WHERE id \
+             = $1",
+        )
+        .bind(as_db_id(id))
+        .bind(secs)
+        .execute(pool)
+        .await
+        .expect("backdate");
     }
 
     fn test_order_uid() -> OrderUid {
@@ -1040,6 +1089,93 @@ mod tests {
             .await
             .expect("snapshot");
         assert_eq!(live.len(), 2);
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn sweep_deletes_dropped_proposals_past_the_window() {
+        let (store, _audit, pool) = test_store_with_pool().await;
+        let uid = test_order_uid();
+        let id = store
+            .insert(test_proposal(uid, SOLVER_A, ProposalStatus::Cancelled))
+            .await
+            .expect("insert");
+        backdate_status_change(&pool, id, 7200.0).await;
+
+        let deleted = store
+            .sweep_dropped(Duration::from_secs(3600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(deleted, 1);
+        assert!(
+            store.get(id).await.expect("get").is_none(),
+            "a swept proposal reads as gone (404 on the wire)"
+        );
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn sweep_spares_fresh_dropped_rows() {
+        let (store, _audit) = test_store().await;
+        let id = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Rejected,
+            ))
+            .await
+            .expect("insert");
+
+        let deleted = store
+            .sweep_dropped(Duration::from_secs(3600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(deleted, 0, "still inside the retention window");
+        assert!(store.get(id).await.expect("get").is_some());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn sweep_never_touches_settled_or_live_proposals() {
+        let (store, _audit, pool) = test_store_with_pool().await;
+        let settled = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Settled,
+            ))
+            .await
+            .expect("insert");
+        let active = store
+            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
+            .await
+            .expect("insert");
+        let submitted = store
+            .insert(test_proposal(
+                OrderUid([0xcc; 56]),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
+            .await
+            .expect("insert");
+        for id in [settled, active, submitted] {
+            backdate_status_change(&pool, id, 7200.0).await;
+        }
+
+        let deleted = store
+            .sweep_dropped(Duration::from_secs(3600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(deleted, 0);
+        for id in [settled, active, submitted] {
+            assert!(
+                store.get(id).await.expect("get").is_some(),
+                "proposal {id} must survive the sweep"
+            );
+        }
     }
 
     /// The owner cancels after the validator snapshotted the proposal but

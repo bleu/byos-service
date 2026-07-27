@@ -1186,6 +1186,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "humantime",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",

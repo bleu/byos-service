@@ -121,6 +121,26 @@ impl TestApp {
         Self::spawn_with(database_url, 3600, &["--solve-bearer-token", token]).await
     }
 
+    /// Spawn with a custom retention window and sweep cadence (validation
+    /// stays parked), so tests can watch the sweep delete dropped proposals.
+    pub async fn spawn_with_retention(
+        database_url: &str,
+        dropped_retention: &str,
+        sweep_interval_secs: u64,
+    ) -> Self {
+        Self::spawn_with(
+            database_url,
+            3600,
+            &[
+                "--dropped-retention",
+                dropped_retention,
+                "--retention-sweep-interval-secs",
+                &sweep_interval_secs.to_string(),
+            ],
+        )
+        .await
+    }
+
     async fn spawn_with(
         database_url: &str,
         validation_interval_secs: u64,
