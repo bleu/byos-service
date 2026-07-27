@@ -82,7 +82,7 @@ impl<P: Provider> EscrowValidator<P> {
     }
 }
 
-impl<P: Provider + Clone + Send + Sync> ValidateProposal for EscrowValidator<P> {
+impl<P: Provider + Send + Sync> ValidateProposal for EscrowValidator<P> {
     fn begin_tick(&self) {
         self.clear_cache();
     }

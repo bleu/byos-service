@@ -54,7 +54,7 @@ pub struct SimulationValidator<P, O> {
     authenticator: Mutex<Option<Address>>,
 }
 
-impl<P: Provider + Clone, O: FetchOrder> SimulationValidator<P, O> {
+impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
     pub fn new(
         provider: P,
         orderbook: O,
@@ -104,9 +104,7 @@ impl<P: Provider + Clone, O: FetchOrder> SimulationValidator<P, O> {
     }
 }
 
-impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
-    for SimulationValidator<P, O>
-{
+impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationValidator<P, O> {
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
         // 1. Fetch the order (cheap after first fetch — forever cache) and check the
         //    envelope before spending any RPC calls.
@@ -265,15 +263,13 @@ pub struct ProposalValidator<P, O> {
     simulation: SimulationValidator<P, O>,
 }
 
-impl<P: Provider + Clone, O: FetchOrder> ProposalValidator<P, O> {
+impl<P: Provider, O: FetchOrder> ProposalValidator<P, O> {
     pub fn new(escrow: EscrowValidator<P>, simulation: SimulationValidator<P, O>) -> Self {
         Self { escrow, simulation }
     }
 }
 
-impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
-    for ProposalValidator<P, O>
-{
+impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for ProposalValidator<P, O> {
     fn begin_tick(&self) {
         self.escrow.begin_tick();
         // Simulation trampoline cache is persistent — no per-tick clearing.
@@ -378,7 +374,7 @@ mod tests {
     fn validator_with(
         uri: String,
         orderbook: StubOrders,
-    ) -> SimulationValidator<impl Provider + Clone, StubOrders> {
+    ) -> SimulationValidator<impl Provider, StubOrders> {
         let provider = alloy::providers::ProviderBuilder::new().connect_http(uri.parse().unwrap());
         SimulationValidator::new(provider, orderbook, SETTLEMENT, ESCROW, FACTORY)
     }

@@ -68,11 +68,6 @@ impl OrderUid {
         arr.copy_from_slice(&bytes);
         Ok(Self(arr))
     }
-
-    /// Extract the 20-byte owner address from bytes 32..52 of the order UID.
-    pub fn owner(&self) -> Address {
-        Address::from_slice(&self.0[32..52])
-    }
 }
 
 impl std::str::FromStr for OrderUid {
@@ -536,19 +531,6 @@ mod tests {
 
     const SOLVER_A: Address = address!("0000000000000000000000000000000000000001");
     const SOLVER_B: Address = address!("0000000000000000000000000000000000000002");
-
-    #[test]
-    fn order_uid_owner_extracts_bytes_32_to_52() {
-        let mut uid = [0u8; 56];
-        // bytes 0..32: order hash
-        uid[..32].fill(0xaa);
-        // bytes 32..52: owner address
-        uid[32..52].copy_from_slice(SOLVER_A.as_slice());
-        // bytes 52..56: validTo
-        uid[52..56].fill(0xff);
-
-        assert_eq!(OrderUid(uid).owner(), SOLVER_A);
-    }
 
     fn test_store() -> (InMemoryProposalStore, mpsc::UnboundedReceiver<AuditEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
