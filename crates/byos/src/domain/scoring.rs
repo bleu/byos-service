@@ -10,8 +10,10 @@ use alloy::primitives::{U256, utils::Unit};
 pub const ESCROW_GAS_ESTIMATION: u64 = 200_000;
 
 /// Buffer added to simulated gas for scoring: `gas = simulated_gas +
-/// GAS_BUFFER`.
-pub const GAS_BUFFER: u64 = 100_000;
+/// GAS_BUFFER`. Small by design: the full-settle simulation (ADR-0012)
+/// already covers intrinsic gas and the whole settlement path, so the buffer
+/// only absorbs warm/cold storage differences and driver batching variance.
+pub const GAS_BUFFER: u64 = 30_000;
 
 /// Effective gas for a simulated proposal: simulated gas + safety buffer.
 pub fn effective_gas(simulated: u64) -> u64 {
@@ -62,6 +64,11 @@ pub fn score_proposal(input: &ScoreInput) -> Option<U256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_gas_adds_the_buffer() {
+        assert_eq!(effective_gas(200_000), 230_000);
+    }
 
     #[test]
     fn sell_order_positive_surplus() {
