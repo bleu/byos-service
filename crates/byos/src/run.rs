@@ -1,6 +1,6 @@
 //! Startup: parse CLI args → init tracing → build app → serve with graceful
-//! shutdown. The `run()` variant accepts a `oneshot::Sender<SocketAddr>` so
-//! e2e tests can discover the bound port.
+//! shutdown. The `run()` variant accepts a `oneshot::Sender<BoundAddrs>` so
+//! e2e tests can discover the bound ports.
 
 use {
     crate::{
@@ -37,6 +37,21 @@ pub(crate) struct Args {
     /// Public API listener address (proposals endpoints).
     #[arg(long, env, default_value = "0.0.0.0:8080")]
     public_addr: SocketAddr,
+
+    /// Internal API listener address (`/solve`). Only our co-deployed driver
+    /// may call `/solve` — the proposal book it returns is MEV-relevant — so
+    /// keep this address unreachable from the internet (COW-1174). Defaults
+    /// to loopback.
+    #[arg(long, env, default_value = "127.0.0.1:8081")]
+    internal_addr: SocketAddr,
+
+    /// Optional shared secret for `/solve`: when set, requests must carry
+    /// `Authorization: Bearer <token>`. The driver sends it via its
+    /// `[solver.request-headers]` config. Defense-in-depth on top of the
+    /// listener split, not a substitute for it. Prefer the SOLVE_BEARER_TOKEN
+    /// env var — CLI arguments are visible to other users via `ps`.
+    #[arg(long, env)]
+    solve_bearer_token: Option<SolveBearerToken>,
 
     /// Chain ID for the EIP-712 domain.
     #[arg(long, env)]
@@ -93,6 +108,25 @@ struct DatabaseUrl(String);
 #[derive(Clone)]
 struct RpcUrl(String);
 
+/// Bearer-token wrapper whose `Debug` hides the value (ADR-0006: secrets
+/// redact themselves).
+#[derive(Clone)]
+struct SolveBearerToken(String);
+
+impl std::str::FromStr for SolveBearerToken {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_owned()))
+    }
+}
+
+impl std::fmt::Debug for SolveBearerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
 impl std::str::FromStr for DatabaseUrl {
     type Err = std::convert::Infallible;
 
@@ -130,10 +164,11 @@ pub async fn start(args: impl IntoIterator<Item = String>) {
     }
 }
 
-/// Entry point for tests — caller passes args and receives the bound address.
+/// Entry point for tests — caller passes args and receives the bound
+/// addresses.
 pub async fn run(
     args: impl IntoIterator<Item = String>,
-    bind_tx: oneshot::Sender<SocketAddr>,
+    bind_tx: oneshot::Sender<api::BoundAddrs>,
 ) -> anyhow::Result<()> {
     let args = Args::parse_from(args);
     run_with(args, Some(bind_tx), None).await
@@ -143,7 +178,7 @@ pub async fn run(
 /// exercise graceful shutdown (audit drain) without process signals.
 pub async fn run_until(
     args: impl IntoIterator<Item = String>,
-    bind_tx: oneshot::Sender<SocketAddr>,
+    bind_tx: oneshot::Sender<api::BoundAddrs>,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     let args = Args::parse_from(args);
@@ -152,7 +187,7 @@ pub async fn run_until(
 
 async fn run_with(
     args: Args,
-    bind_tx: Option<oneshot::Sender<SocketAddr>>,
+    bind_tx: Option<oneshot::Sender<api::BoundAddrs>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
 ) -> anyhow::Result<()> {
     init_tracing(&args.log, args.json_logs);
@@ -210,9 +245,16 @@ async fn run_with(
         crate::infra::validation::spawn(store, crate::domain::validator::AcceptAll, period)
     };
 
-    api::serve(args.public_addr, state, bind_tx, shutdown_rx)
-        .await
-        .context("public API server exited with error")?;
+    api::serve(
+        args.public_addr,
+        args.internal_addr,
+        state,
+        args.solve_bearer_token.as_ref().map(|t| t.0.as_str()),
+        bind_tx,
+        shutdown_rx,
+    )
+    .await
+    .context("API server exited with error")?;
 
     // The validation loop holds the store — and with it an audit sender — so
     // stop it first, or the writer's channel never closes and the drain below

@@ -1,4 +1,6 @@
-//! Public API: proposal CRUD endpoints and health check.
+//! HTTP API, served as two listeners with opposite trust boundaries
+//! (COW-1174): the public one carries the proposal CRUD endpoints for
+//! sub-solvers, the internal one carries `/solve` for the co-deployed driver.
 
 pub mod dto;
 pub mod error;
@@ -10,6 +12,7 @@ use {
     alloy::sol_types::Eip712Domain,
     axum::{
         Router,
+        response::IntoResponse,
         routing::{delete, get, post},
     },
     std::{
@@ -67,7 +70,11 @@ impl AppState {
 // Router + serve
 // ---------------------------------------------------------------------------
 
-fn router(state: AppState) -> Router {
+/// Internet-facing router: proposal CRUD + health check. `/solve` must never
+/// be mounted here — the proposal book it returns (amounts, routes,
+/// signatures) is MEV-relevant, so only the co-deployed driver may read it
+/// (COW-1174).
+fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(routes::healthz))
         .route("/proposals", post(routes::create_proposal))
@@ -78,11 +85,52 @@ fn router(state: AppState) -> Router {
             "/proposals/by-solver",
             get(routes::list_proposals_by_solver),
         )
-        .route("/solve", post(solve::solve))
         .with_state(state)
 }
 
-/// Typed error for the public API server (ADR-0007: library functions avoid
+/// Driver-facing router: `/solve` + health check, served on an internal bind
+/// address that only the co-deployed driver reaches (COW-1174). When
+/// `solve_bearer_token` is set, `/solve` additionally requires
+/// `Authorization: Bearer <token>` — the driver sends it via its
+/// `[solver.request-headers]` config. `/healthz` stays open for probes.
+fn internal_router(state: AppState, solve_bearer_token: Option<&str>) -> Router {
+    let mut solve = Router::new().route("/solve", post(solve::solve));
+    if let Some(token) = solve_bearer_token {
+        let expected = token.to_owned();
+        solve = solve.route_layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let expected = expected.clone();
+                async move {
+                    // RFC 7235: the auth scheme name is case-insensitive
+                    // ("Bearer" == "bearer"); the token itself is not.
+                    let authorized = req
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.split_once(' '))
+                        .is_some_and(|(scheme, token)| {
+                            scheme.eq_ignore_ascii_case("Bearer") && token == expected
+                        });
+                    if authorized {
+                        next.run(req).await
+                    } else {
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                        )
+                            .into_response()
+                    }
+                }
+            },
+        ));
+    }
+    Router::new()
+        .route("/healthz", get(routes::healthz))
+        .merge(solve)
+        .with_state(state)
+}
+
+/// Typed error for the API servers (ADR-0007: library functions avoid
 /// `anyhow::Result`; callers can match on failure modes).
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -92,31 +140,60 @@ pub enum ServeError {
     Serve(#[source] std::io::Error),
 }
 
-/// Bind, serve, and wait for graceful shutdown (ctrl-c, or `shutdown_rx` so
-/// tests can stop an in-process instance).
+/// Where the two listeners actually bound — tests bind port 0 and need the
+/// resolved addresses back.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundAddrs {
+    pub public: SocketAddr,
+    pub internal: SocketAddr,
+}
+
+/// Bind both listeners, serve, and wait for graceful shutdown (ctrl-c, or
+/// `shutdown_rx` so tests can stop an in-process instance).
 pub async fn serve(
-    addr: SocketAddr,
+    public_addr: SocketAddr,
+    internal_addr: SocketAddr,
     state: AppState,
-    bind_tx: Option<oneshot::Sender<SocketAddr>>,
+    solve_bearer_token: Option<&str>,
+    bind_tx: Option<oneshot::Sender<BoundAddrs>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
 ) -> Result<(), ServeError> {
-    let app = router(state);
+    let public = public_router(state.clone());
+    let internal = internal_router(state, solve_bearer_token);
 
-    let listener = tokio::net::TcpListener::bind(addr)
+    let public_listener = tokio::net::TcpListener::bind(public_addr)
         .await
         .map_err(ServeError::Bind)?;
-    let local_addr = listener.local_addr().map_err(ServeError::Bind)?;
+    let internal_listener = tokio::net::TcpListener::bind(internal_addr)
+        .await
+        .map_err(ServeError::Bind)?;
+    let bound = BoundAddrs {
+        public: public_listener.local_addr().map_err(ServeError::Bind)?,
+        internal: internal_listener.local_addr().map_err(ServeError::Bind)?,
+    };
 
-    tracing::info!(port = local_addr.port(), "serving public API");
+    tracing::info!(public = %bound.public, internal = %bound.internal, "serving API");
 
     if let Some(tx) = bind_tx {
-        let _ = tx.send(local_addr);
+        let _ = tx.send(bound);
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
-        .await
-        .map_err(ServeError::Serve)?;
+    // One shutdown signal fanned out to both servers: when the spawned task
+    // drops the watch sender, every receiver's `changed()` resolves.
+    let (watch_tx, watch_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        shutdown_signal(shutdown_rx).await;
+        drop(watch_tx);
+    });
+    let stop = |mut rx: tokio::sync::watch::Receiver<()>| async move {
+        let _ = rx.changed().await;
+    };
+
+    tokio::try_join!(
+        axum::serve(public_listener, public).with_graceful_shutdown(stop(watch_rx.clone())),
+        axum::serve(internal_listener, internal).with_graceful_shutdown(stop(watch_rx)),
+    )
+    .map_err(ServeError::Serve)?;
 
     Ok(())
 }
@@ -244,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_proposal_exposes_reason_on_the_wire() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = public_router(state.clone());
         let signer = PrivateKeySigner::random();
         let (body, _) = signed_proposal_body_for(&signer).await;
 
@@ -266,7 +343,7 @@ mod tests {
 
         let domain = eip712::byos_domain(CHAIN_ID, factory());
         let state = test_state();
-        let app = router(state);
+        let app = public_router(state);
 
         let signer = PrivateKeySigner::random();
         let (body, _) = signed_proposal_body_for(&signer).await;
@@ -309,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn post_returns_202_and_proposal_is_submitted() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = public_router(state.clone());
         let signer = PrivateKeySigner::random();
         let (body, _) = signed_proposal_body_for(&signer).await;
 
@@ -353,7 +430,7 @@ mod tests {
         if let Some(sig) = signature {
             request = request.header("X-Signature", sig);
         }
-        let response = router(state)
+        let response = public_router(state)
             .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -510,9 +587,8 @@ mod tests {
         state.store().insert(proposal);
     }
 
-    async fn post_solve(app: &Router, auction: &serde_json::Value) -> serde_json::Value {
-        let response = app
-            .clone()
+    async fn raw_post_solve(app: &Router, auction: &serde_json::Value) -> axum::response::Response {
+        app.clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -522,15 +598,178 @@ mod tests {
                     .unwrap(),
             )
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn post_solve(app: &Router, auction: &serde_json::Value) -> serde_json::Value {
+        let response = raw_post_solve(app, auction).await;
         assert_eq!(response.status(), StatusCode::OK);
         json_body(response).await
     }
 
     #[tokio::test]
+    async fn solve_is_not_reachable_on_the_public_router() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = raw_post_solve(&public_router(state), &auction).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn proposal_endpoints_are_not_reachable_on_the_internal_router() {
+        let state = test_state();
+        let signer = PrivateKeySigner::random();
+        let (body, _) = signed_proposal_body_for(&signer).await;
+
+        let app = internal_router(state, None);
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/proposals/by-solver")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    async fn post_solve_with_auth(
+        app: &Router,
+        auction: &serde_json::Value,
+        authorization: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/solve")
+                    .header("content-type", "application/json")
+                    .header("authorization", authorization)
+                    .body(Body::from(auction.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn solve_without_bearer_token_is_rejected_when_one_is_configured() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = raw_post_solve(&app, &auction).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // RFC 7235: a 401 names the expected auth scheme.
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn solve_with_the_configured_bearer_token_succeeds() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = post_solve_with_auth(&app, &auction, "Bearer driver-secret").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let solutions = json_body(response).await["solutions"].clone();
+        assert_eq!(solutions.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn solve_bearer_scheme_is_case_insensitive() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = post_solve_with_auth(&app, &auction, "bearer driver-secret").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn solve_with_a_wrong_bearer_token_is_rejected() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = post_solve_with_auth(&app, &auction, "Bearer not-the-secret").await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn solve_with_a_case_changed_token_is_rejected() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = post_solve_with_auth(&app, &auction, "Bearer DRIVER-SECRET").await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn healthz_stays_open_when_a_bearer_token_is_configured() {
+        let response = internal_router(test_state(), Some("driver-secret"))
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn healthz_responds_on_both_routers() {
+        let healthz = |app: Router| async move {
+            app.oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        };
+
+        assert_eq!(healthz(public_router(test_state())).await, StatusCode::OK);
+        assert_eq!(
+            healthz(internal_router(test_state(), None)).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
     async fn solve_sell_order_prices_are_cross_multiplied() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950);
 
         let auction = auction_json("sell", "1000", "900");
@@ -549,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn solve_sell_order_executed_amount_is_sell() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950);
 
         let auction = auction_json("sell", "1000", "900");
@@ -562,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn solve_buy_order_executed_amount_is_buy() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 950, 900);
 
         let auction = auction_json("buy", "1000", "900");
@@ -575,7 +814,7 @@ mod tests {
     #[tokio::test]
     async fn solve_selects_best_of_n_proposals() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = internal_router(state.clone(), None);
 
         // Two proposals for the same order; second has more surplus.
         insert_active_proposal(&state, Address::ZERO, 1_000, 920);
@@ -593,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn solve_no_proposals_returns_empty() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = internal_router(state.clone(), None);
         // No proposals inserted.
 
         let auction = auction_json("sell", "1000", "900");
@@ -610,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn post_rejects_already_expired_proposal() {
         let state = test_state();
-        let app = router(state);
+        let app = public_router(state);
         let signer = PrivateKeySigner::random();
         let domain = eip712::byos_domain(CHAIN_ID, factory());
 

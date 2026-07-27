@@ -107,6 +107,12 @@ BYOS monitors the chain directly for settlement outcomes. It watches `GPv2Settle
 
 This keeps BYOS self-contained — no driver modifications required. The driver treats BYOS as a vanilla solver engine, interacting only via `/solve`. BYOS needs chain awareness anyway for continuous simulation; the settlement watcher piggybacks on the same infrastructure.
 
+### `/solve` trust boundary: internal listener only
+
+`/solve` and the public proposal API have opposite trust boundaries. The proposal API must be internet-reachable so sub-solvers can submit; `/solve` must only be reachable by our co-deployed driver, because its response is the full standing proposal book for an auction — sub-solver amounts, routes, and signatures, all MEV-relevant. The two endpoint groups therefore never share a socket: `/solve` (plus `/healthz`) binds to a separate internal address (`--internal-addr`, loopback by default), and origin is enforced by network topology rather than path obscurity (COW-1174).
+
+As defense-in-depth, `--solve-bearer-token` optionally requires `Authorization: Bearer <token>` on `/solve`; the driver sends it via its `[solver.request-headers]` config. The token complements the listener split, it does not replace it.
+
 ### `/solve` latency: non-issue by design
 
 The entire `/solve` hot path is served from an in-memory cache with local computation only:
