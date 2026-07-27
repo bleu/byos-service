@@ -12,6 +12,27 @@ use {
 
 #[ignore]
 #[tokio::test]
+async fn accepts_valid_until_at_the_lifetime_cap_boundary() {
+    let db = TestDb::create().await;
+    let app = TestApp::spawn(&db.url).await;
+    let signer = PrivateKeySigner::random();
+    // Just inside the default 300s cap (a few seconds of slack for the time
+    // between building the fixture and the handler reading its clock).
+    let fixture = ProposalFixture {
+        valid_until: U256::from(setup::unix_now() + 295),
+        ..Default::default()
+    };
+
+    let body = fixture.signed_body(&signer).await;
+    let (status, created) = app.post_json("/proposals", &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(created["id"].is_u64(), "response must carry an id");
+
+    app.stop().await;
+}
+
+#[ignore]
+#[tokio::test]
 async fn rejects_valid_until_beyond_the_lifetime_cap() {
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;
