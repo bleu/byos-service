@@ -140,8 +140,8 @@ A background sweep (its own slow loop, every few minutes — no reason to couple
 - **BYOS gains a `/notify` endpoint** on the internal listener, and `/solve` gains a synchronous `solutions` insert. Both are prerequisites for `Executing` and everything after it.
 - **ADR-0010 is rewritten**: the outcome source is the stock driver's notifications, not a driver fork. Any fork discussion is now about other features only.
 - **Breaking API changes for sub-solvers**: `validUntil` more than a few minutes out is rejected at `POST`; dropped proposals 404 an hour after dying; the status vocabulary grows (`executing`, `settleFailed`, `penalized`) and `GET` exposes `penalty_tx_hash` and settlement tx hashes.
-- **ADR-0001's persistence section and restart consequence are superseded** (annotated in place). The two-listener topology, rate limiting, and authentication are untouched.
-- **ADR-0012's re-validation section is amended**: only `Submitted` and `Active` simulate; the first pass additionally applies the profitability gate.
+- **ADR-0001 is trimmed where this ADR takes over** (lifecycle section, persistence hot-store half, restart consequence — each replaced by a pointer here). The two-listener topology, rate limiting, and authentication are untouched.
+- **ADR-0012's re-validation section is edited in place**: only `Submitted` and `Active` simulate; the first pass additionally applies the profitability gate.
 - **COW-1177 (terminal-proposal pruning) is resolved** by the retention sweep; the in-memory leak ceases to exist along with the in-memory store.
 - **`POST` gets one DB write on the request path** (and `DELETE`/`GET` their reads). The async-ingestion rule from ADR-0001 — no RPC, no simulation on the sync side — still holds; a local indexed insert is not in that class.
 - **Simulation load is bounded**: worst case one `eth_estimateGas` per proposal per tick for at most `--max-proposal-lifetime`.

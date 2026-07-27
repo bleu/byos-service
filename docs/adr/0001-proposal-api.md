@@ -43,46 +43,19 @@ struct CancelProposal {
 
 Same domain as proposals. `CancelProposal` is purely an API-authentication type — it is never verified on-chain, so it is owned by this repo. BYOS recovers the signer, verifies it matches the proposal's solver, then deletes. Follows the CoW pattern (CoW uses `OrderCancellation { orderUid }` for order cancellations). Sub-solvers discover their proposal IDs via `GET /proposals/{order_uid}`.
 
-### GET metadata: per-proposal, no amounts
+### GET metadata
 
-> **Superseded by [ADR-0011](0011-owner-scoped-reads.md):** reads are now signature-gated and owner-scoped; the public-metadata trade-off below no longer holds.
+Owned by [ADR-0011](0011-owner-scoped-reads.md): reads are signature-gated and owner-scoped.
 
-`GET /proposals/{order_uid}` returns:
+### Proposal lifecycle
 
-```json
-{
-  "proposals": [
-    { "id": 42, "solver": "0xabc...", "validUntil": 1750000000, "status": "active" },
-    { "id": 43, "solver": "0xdef...", "validUntil": 1750000060, "status": "active" }
-  ]
-}
-```
+Owned by [ADR-0013](0013-proposal-lifecycle-and-retention.md): the state machine, transition rules (compare-and-swap status writes), rejection semantics, and retention.
 
-Per-proposal metadata: `id`, `solver`, `validUntil`, `status`. **No amounts, no interaction data.** Amounts would reveal pricing strategy; interactions would reveal routing — both are competitively sensitive. Solver addresses are already recoverable from on-chain settlement calldata (Trampoline CREATE2 address maps to sub-solver), so pre-settlement address visibility is an accepted trade-off.
-
-The public per-order view lists `Active` proposals only — a `Submitted` proposal has not passed gatekeeping, and showing it would leak submission attempts BYOS has not vouched for. The owner's own management view (`GET /proposals/by-solver/{address}`) includes `Submitted` alongside `Active`, so a sub-solver can see pending work.
-
-### Proposal lifecycle: explicit state machine, permanent drop on failure
-
-A proposal enters as `Submitted` (signature verified, awaiting validation) and moves through enforced transitions — every status write is a compare-and-swap against the expected current state, so concurrent events (a cancellation racing the validator) cannot resurrect or overwrite each other; the stale write is dropped:
-
-- `Submitted → Active` — background validation passed.
-- `Submitted → Rejected` — failed a gatekeeping rule (e.g. insufficient escrow, order no longer in the orderbook). Carries a machine-readable `rejectionReason` (PascalCase enum per [ADR-0007](0007-error-handling.md)), exposed on `GET /proposal/{id}`.
-- `Submitted | Active → SimFailed` — simulation reverted.
-- `Submitted | Active → Expired` — `valid_until` passed.
-- `Submitted | Active → Cancelled` — signed `DELETE`. Only live proposals can be cancelled; a `DELETE` against a terminal state is a `409`.
-- `Active → Settled` — order filled by this proposal.
-- `Rejected`, `SimFailed`, `Expired`, `Cancelled`, `Settled` are terminal.
-
-`Rejected` and `SimFailed` are deliberately distinct verdicts: `Rejected` means "you are not eligible" (fix: deposit escrow), `SimFailed` means "your route does not work against current chain state" (fix: rebuild the route). Both are permanent — no suspension/retry. Permanent drop keeps the store simple, reduces simulation load (no re-checking failed proposals), and ensures fresh gatekeeping on resubmission; sub-solvers run continuous polling loops and naturally resubmit.
-
-Order-death signals (order filled by another solver, or cancelled in the orderbook) come from the driver, not from a chain watcher ([ADR-0010](0010-settlement-outcome-source.md)) and not from the simulation (its `settle()` uses empty trades, so GPv2 fill-tracking is never exercised): the auction contents on `/solve` say which orders are still live (a heuristic — absence from one auction is not proof of death), and the driver's settlement outcome is authoritative for our own fills. Wiring these signals into the validator loop is follow-up work.
-
-Proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signature form one signed unit, so there is no update operation on an existing proposal. Replacement is a new `POST` (optionally preceded by a `DELETE` of the old one) — which is why the API has no `PUT`.
+What this ADR keeps: proposals are immutable. Amounts, interactions, `validUntil`, nonce, and signature form one signed unit, so there is no update operation on an existing proposal. Replacement is a new `POST` (optionally preceded by a `DELETE` of the old one) — which is why the API has no `PUT`.
 
 ### Ingestion validation: async, signature-only request path
 
-`POST /proposals` does three things inline: parse the request, recover the signer (`ecrecover`), and check that the proposal is not already expired (`valid_until < now`). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature failures and already-expired proposals reject synchronously with a 4xx — there is no point accepting, storing, and auditing a proposal that is dead on arrival.
+`POST /proposals` does three things inline: parse the request, recover the signer (`ecrecover`), and check the expiry window (`valid_until` must be in the future but no further out than the lifetime cap, [ADR-0013](0013-proposal-lifecycle-and-retention.md)). On success it stores the proposal as `Submitted` and answers `202 Accepted` with the proposal `id` — meaning "accepted for validation," not "accepted." Signature and expiry-window failures reject synchronously with a 4xx — there is no point accepting, storing, and auditing a proposal that is dead on arrival.
 
 All on-chain work — the escrow balance check and the simulation `eth_estimateGas` ([ADR-0012](0012-simulation.md)) — runs in a background validator loop, off the request path. Each tick (configurable interval, default 12s) sweeps expired proposals, then validates every `Submitted` and `Active` proposal. `Submitted` proposals are flipped to `Active`, `Rejected`, or `SimFailed`; `Active` proposals are re-validated and flipped to `SimFailed` if the simulation now reverts. Sub-solvers poll `GET /proposal/{id}` for the verdict; a rejection carries its typed reason.
 
@@ -93,12 +66,12 @@ All on-chain work — the escrow balance check and the simulation `eth_estimateG
 
 The two layers are independent: the IP filter sheds floods before any cryptography; the signer limit caps each identity after recovery. Both numbers are placeholders — this ADR commits to the two-layer structure, and the actual limits are operational tuning parameters set at deployment.
 
-Escrow balance is cached with a short TTL (~1 block period) for rate-limiting. The per-request check is an in-memory read against that cache — no RPC on the request path; refreshing costs one call per known sub-solver per block. The authoritative escrow check that gates actual settlement happens at `/solve` selection ([ADR-0002](0002-solver-engine.md)). The reject-early pipeline, split across the sync/async boundary — everything on the request path is memory-only; the async-ingestion rule bans RPC and simulation from the sync side, not cheap in-memory checks:
+Escrow balance is cached with a short TTL (~1 block period) for rate-limiting. The per-request check is an in-memory read against that cache — no RPC on the request path; refreshing costs one call per known sub-solver per block. The authoritative escrow check that gates actual settlement happens at `/solve` selection ([ADR-0002](0002-solver-engine.md)). The reject-early pipeline, split across the sync/async boundary — the async-ingestion rule bans RPC and simulation from the request path; cheap in-memory checks and the local store write are fine:
 
 Synchronous (request path):
 1. IP filter (shed floods)
 2. Parse + `ecrecover` (identify signer)
-3. Expiry check (`valid_until < now` → 4xx, reject DOA proposals before storing; [ADR-0013](0013-proposal-lifecycle-and-retention.md) adds the upper bound — `valid_until` more than `--max-proposal-lifetime` out also rejects)
+3. Expiry-window check (`valid_until` in the past, or beyond the lifetime cap of [ADR-0013](0013-proposal-lifecycle-and-retention.md) → 4xx before storing)
 4. Signer rate limit check (shed per-identity spam)
 5. Cached escrow balance tier check (shed ineligible signers, in-memory read)
 
@@ -111,24 +84,20 @@ Background validator:
 - **Public port** — `/proposals` endpoints (POST, GET, DELETE). Public internet, rate-limited, authenticated.
 - **Internal port** — `/solve` endpoint. Called only by CoW driver/autopilot, trusted, latency-critical.
 
-Separate listeners prevent public traffic from starving `/solve` of resources. The proposal store is shared in-memory within the single process. Network-level isolation is straightforward (firewall the internal port).
+Separate listeners prevent public traffic from starving `/solve` of resources. Both run in one process against the same proposal store. Network-level isolation is straightforward (firewall the internal port).
 
-### Persistence: in-memory hot path + async write-behind
+### Persistence: Postgres store + async write-behind audit trail
 
-> **Hot store superseded by [ADR-0013](0013-proposal-lifecycle-and-retention.md):** the proposal store moved to a Postgres `proposals` table (single source of truth, no in-memory map, no cache); live proposals now survive restarts, and proposal IDs come from a Postgres sequence instead of the audit-trail reseed. The audit-trail half of this section (write-behind `audit_events`, fail-fast boot, no deletion path) still stands.
+The proposal store — current state, a Postgres `proposals` table, single source of truth — is owned by [ADR-0013](0013-proposal-lifecycle-and-retention.md), along with its retention policy. What stays here is the audit trail:
 
-- **Hot store** — in-memory (`RwLock<HashMap>` or equivalent). Serves `/solve` with no DB query on the auction-critical path. Rebuilt from fresh submissions on restart.
 - **Audit trail** — proposal lifecycle events are asynchronously persisted to Postgres (via sqlx) as an append-only `audit_events` log, for dispute evidence. [ADR-0003](0003-slash-attribution-flow.md) requires BYOS to map settlements back to proposals for Track A debits and Track B passthrough. Track B claims arrive up to 3 months later — the audit log must retain proposals for at least that window.
 
-Hot proposals live minutes; audit records live months. Separating the two avoids conflating their lifecycle requirements.
+The `proposals` table holds what *is*; `audit_events` holds what *happened*. Separating the two avoids conflating their lifecycle requirements. Write-behind mechanics (COW-1172):
 
-The write-behind path (COW-1172) supersedes this ADR's original "SQLite WAL, flat log, or equivalent" suggestion with Postgres: a managed instance gives the evidence off-host durability (a lost audit log means absorbing Track B costs), and it aligns with the M2 plan to move the store to Postgres. Mechanics:
-
-- **Events, not snapshots.** One row per lifecycle event (`received` with the full signed proposal body, `cancelled`, and later driver-reported outcomes per [ADR-0010](0010-settlement-outcome-source.md)). Disputes care about what happened when; the writer never does read-modify-write.
-- **Emission is in the store, by construction.** Every mutation of the in-memory store emits an event into an unbounded channel; a writer task drains it into Postgres. New mutation paths cannot forget to leave evidence.
+- **Events, not snapshots.** One row per lifecycle event (`received` with the full signed proposal body, `cancelled`, status changes, and driver-reported outcomes per [ADR-0010](0010-settlement-outcome-source.md)). Disputes care about what happened when; the writer never does read-modify-write.
+- **Emission is in the store, by construction.** Every mutation of the proposal store emits an event into an unbounded channel; a writer task drains it into Postgres. New mutation paths cannot forget to leave evidence.
 - **Fail-fast boot, retry-forever runtime, drain on shutdown.** The service refuses to start without a reachable database and applied migrations; a runtime outage queues events in memory while the writer retries with backoff; graceful shutdown flushes the queue before exit.
-- **The audit trail is the proposal-ID authority.** The in-memory ID counter reseeds from `max(proposal_id)` at boot, so restarts never reissue an ID and evidence rows stay unambiguous.
-- **No deletion path.** The 3-month window is a floor, not a TTL. Any future retention policy must also cover dispute-processing time beyond claim arrival, and is deliberately left to a separate decision.
+- **No deletion path.** The 3-month window is a floor, not a TTL. Any future retention policy must also cover dispute-processing time beyond claim arrival ([ADR-0013](0013-proposal-lifecycle-and-retention.md) reconfirmed keeping the log indefinitely for now).
 
 ## Alternatives considered
 
@@ -143,7 +112,7 @@ Contract-side alternatives (BYOS-unilateral execution, amounts-only signing with
 - **Eager per-submission validation task (async, but validate immediately).** Keep the request path signature-only, but fire a background task per submission instead of waiting for the next loop tick — near-immediate verdicts. Rejected — two validation entry points to keep consistent for a latency win the polling loop doesn't need; the loop interval already bounds verdict delay to ~one block.
 - **Single listener for both public API and /solve.** Simpler, but public traffic can starve the latency-critical `/solve` endpoint. Rejected — `/solve` latency is a hard SLA.
 - **Pure in-memory (no persistence).** Simplest, but loses dispute evidence on restart. Track B claims arrive months later. Rejected — the audit trail is required by the slashing policy.
-- **Fully durable hot store (DB-backed /solve).** Proposals survive restarts without resubmission, but adds DB latency to the auction-critical path. Rejected — sub-solver resubmission on restart is acceptable given short proposal lifetimes and continuous polling.
+- **In-memory hot store (memory-only /solve, resubmission on restart).** The original choice here, to keep DB queries off the auction-critical path. Reversed by [ADR-0013](0013-proposal-lifecycle-and-retention.md): at actual volumes an indexed Postgres read is ~1 ms against a seconds-scale deadline, and durability removes the restart-resubmission failure mode.
 
 ## Consequences
 
@@ -151,7 +120,5 @@ Contract-side alternatives (BYOS-unilateral execution, amounts-only signing with
 - **Verdict latency is bounded by the validator tick interval** (default 12s), not by the request round-trip. Simulation (COW-1162) must be built inside the background validator from the start — not inline and then moved.
 - **Sub-solvers must include all required interactions (hooks, approvals) in their proposals.** BYOS can reject at gatekeeping but cannot patch proposals post-submission. A sub-solver who omits required hooks will be rejected; one who passes gatekeeping but causes an EBBO violation is still liable (gatekeeping is non-exculpatory per [ADR-0003](0003-slash-attribution-flow.md)).
 - **The signing schema is an external dependency.** The `ProposalData` struct, typehash, and domain are fixed by the contracts repo; a contracts redeployment (v2 factory) invalidates all outstanding signatures, and sub-solver clients (including `subsolver` and `proposal-dto` here) must update their domain configuration. Signature code in this repo must be tested against contract-provided vectors, not a local re-derivation.
-- **Pre-settlement information leakage via GET.** Solver addresses per order are visible before settlement. An observer can map which sub-solvers are competing on which orders. Accepted — addresses are recoverable post-settlement from on-chain data anyway, and the v1 sub-solver set is expected to be small. *Superseded by [ADR-0011](0011-owner-scoped-reads.md): this visibility no longer exists.*
-- **BYOS restart requires sub-solver resubmission.** The in-memory hot store is lost. Mitigated by short proposal lifetimes and sub-solvers' continuous polling loops — proposals are naturally refreshed within one poll interval. *Superseded by [ADR-0013](0013-proposal-lifecycle-and-retention.md): the Postgres-backed store survives restarts; no resubmission needed.*
 - **Audit trail becomes an operational dependency for dispute resolution.** If the audit log is lost or corrupted, BYOS cannot prove attribution for Track B claims and must absorb the cost. Requires backup/retention policy.
 - **Rate limiting by escrow balance creates a pay-to-play throughput gradient.** Well-capitalized sub-solvers get higher rate limits. Accepted — consistent with the collateral-gated permission model, and prevents under-collateralized signers from consuming simulation resources.

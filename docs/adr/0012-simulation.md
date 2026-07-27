@@ -76,9 +76,7 @@ The old fixed `GAS_ESTIMATE` constant is retained only for the escrow balance th
 
 ### Continuous re-validation of active proposals
 
-> Amended by [ADR-0013](0013-proposal-lifecycle-and-retention.md): re-validation covers `Submitted` and `Active` only — `Executing` proposals (settlement in flight) are not simulated. The first simulation additionally applies the profitability gate (score ≤ 0 → `Rejected(Unprofitable)`); the gate is not re-applied on re-validation.
-
-The background validation loop validates both `Submitted` and `Active` proposals on every tick. For `Submitted` proposals, a successful validation transitions them to `Active` and writes `gas_used`, `trampoline`, and the order's token addresses. For `Active` proposals, re-validation updates `gas_used` with the fresh simulation result; if the simulation now reverts, the proposal transitions to `SimFailed`.
+The background validation loop validates `Submitted` and `Active` proposals on every tick — `Executing` proposals (settlement in flight) are not simulated ([ADR-0013](0013-proposal-lifecycle-and-retention.md)). For `Submitted` proposals, a successful validation transitions them to `Active` and writes `gas_used`, `trampoline`, and the order's token addresses; this first pass also applies the profitability gate — a non-positive score rejects as `Unprofitable` ([ADR-0013](0013-proposal-lifecycle-and-retention.md)). For `Active` proposals, re-validation updates `gas_used` with the fresh simulation result; if the simulation now reverts, the proposal transitions to `SimFailed`. The profitability gate is not re-applied on re-validation.
 
 This catches proposals that become invalid due to on-chain state changes (pool liquidity moved, user balance changed, order filled or invalidated on-chain, etc.) without waiting for the driver's post-encoding re-simulation.
 
