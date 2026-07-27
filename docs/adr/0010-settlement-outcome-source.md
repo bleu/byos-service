@@ -10,7 +10,7 @@ When a BYOS settlement fails, we charge the responsible sub-solver (Track A, [AD
 
 The first plan was a chain watcher: scan every block, find our settlement, check if it reverted. The second plan (this ADR's original version) was a driver fork with a custom outcome hook, since the driver — the process that submits the settlement and watches how it lands — already knows the outcome, and CoW runs the driver for us under the bonding pool arrangement.
 
-Then we checked what the standard driver↔solver-engine protocol already carries. In [`cowprotocol/services`](https://github.com/cowprotocol/services) (`crates/solvers-dto/src/notification.rs`), the driver notifies its solver engine per solution via `POST /notify`, with auction and solution ids and a kind that covers the full submission lifecycle:
+Then we checked what the standard driver↔solver-engine protocol already carries. In [`cowprotocol/services`](https://github.com/cowprotocol/services) (`crates/solvers-dto/src/notification.rs`), the driver notifies its solver engine per solution via `POST /notify`, with auction and solution ids (both optional on the wire — some kinds fire before a solution exists, e.g. `DeserializationError`) and a kind that covers the full submission lifecycle:
 
 - `SettlementStarted` — our solution won and the driver began submitting the tx.
 - `Success { transaction }` — settled, with tx hash.
@@ -40,7 +40,7 @@ Get the outcome from the stock driver's `/notify` notifications. No fork, no cha
 ## Consequences
 
 - No chain indexer to build or run, and outcome observation has no dependency on CoW accepting a fork — the notification protocol is how every driver talks to its solver engine. (The fork tracked in COW-1190 remains, for fee configuration — a separate concern.)
-- BYOS must expose `/notify` and keep the `solutions` mapping durable ([ADR-0013](0013-proposal-lifecycle-and-retention.md)); a notification that cannot be attributed is an alert-worthy bug.
+- BYOS must expose `/notify` and keep the `solutions` mapping durable ([ADR-0013](0013-proposal-lifecycle-and-retention.md)). The ids are optional on the wire, so the handler must tolerate notifications it cannot join to a solution — but an *outcome* notification (`SettlementStarted`, `Success`, `Revert`, `Cancelled`, `Expired`, `Fail`) that cannot be attributed is an alert-worthy bug.
 - Missed-deadline detection is free, from the driver's `Expired`/`Cancelled` notifications.
 - Private submissions are covered, because the driver is the source.
 - Lost notifications are survivable for liveness: ADR-0013's executing-timeout returns the proposal to `Active`, and re-simulation reconciles reality. A lost `Revert` does cost the Track A debit for that settlement unless recovered by hand from the audit trail and chain — acceptable at expected volumes, revisit if it ever happens.
