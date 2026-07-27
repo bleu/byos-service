@@ -98,7 +98,7 @@ Escrow balance is cached with a short TTL (~1 block period) for rate-limiting. T
 Synchronous (request path):
 1. IP filter (shed floods)
 2. Parse + `ecrecover` (identify signer)
-3. Expiry check (`valid_until < now` → 4xx, reject DOA proposals before storing)
+3. Expiry check (`valid_until < now` → 4xx, reject DOA proposals before storing; [ADR-0013](0013-proposal-lifecycle-and-retention.md) adds the upper bound — `valid_until` more than `--max-proposal-lifetime` out also rejects)
 4. Signer rate limit check (shed per-identity spam)
 5. Cached escrow balance tier check (shed ineligible signers, in-memory read)
 
@@ -114,6 +114,8 @@ Background validator:
 Separate listeners prevent public traffic from starving `/solve` of resources. The proposal store is shared in-memory within the single process. Network-level isolation is straightforward (firewall the internal port).
 
 ### Persistence: in-memory hot path + async write-behind
+
+> **Hot store superseded by [ADR-0013](0013-proposal-lifecycle-and-retention.md):** the proposal store moved to a Postgres `proposals` table (single source of truth, no in-memory map, no cache); live proposals now survive restarts, and proposal IDs come from a Postgres sequence instead of the audit-trail reseed. The audit-trail half of this section (write-behind `audit_events`, fail-fast boot, no deletion path) still stands.
 
 - **Hot store** — in-memory (`RwLock<HashMap>` or equivalent). Serves `/solve` with no DB query on the auction-critical path. Rebuilt from fresh submissions on restart.
 - **Audit trail** — proposal lifecycle events are asynchronously persisted to Postgres (via sqlx) as an append-only `audit_events` log, for dispute evidence. [ADR-0003](0003-slash-attribution-flow.md) requires BYOS to map settlements back to proposals for Track A debits and Track B passthrough. Track B claims arrive up to 3 months later — the audit log must retain proposals for at least that window.
@@ -150,6 +152,6 @@ Contract-side alternatives (BYOS-unilateral execution, amounts-only signing with
 - **Sub-solvers must include all required interactions (hooks, approvals) in their proposals.** BYOS can reject at gatekeeping but cannot patch proposals post-submission. A sub-solver who omits required hooks will be rejected; one who passes gatekeeping but causes an EBBO violation is still liable (gatekeeping is non-exculpatory per [ADR-0003](0003-slash-attribution-flow.md)).
 - **The signing schema is an external dependency.** The `ProposalData` struct, typehash, and domain are fixed by the contracts repo; a contracts redeployment (v2 factory) invalidates all outstanding signatures, and sub-solver clients (including `subsolver` and `proposal-dto` here) must update their domain configuration. Signature code in this repo must be tested against contract-provided vectors, not a local re-derivation.
 - **Pre-settlement information leakage via GET.** Solver addresses per order are visible before settlement. An observer can map which sub-solvers are competing on which orders. Accepted — addresses are recoverable post-settlement from on-chain data anyway, and the v1 sub-solver set is expected to be small. *Superseded by [ADR-0011](0011-owner-scoped-reads.md): this visibility no longer exists.*
-- **BYOS restart requires sub-solver resubmission.** The in-memory hot store is lost. Mitigated by short proposal lifetimes and sub-solvers' continuous polling loops — proposals are naturally refreshed within one poll interval.
+- **BYOS restart requires sub-solver resubmission.** The in-memory hot store is lost. Mitigated by short proposal lifetimes and sub-solvers' continuous polling loops — proposals are naturally refreshed within one poll interval. *Superseded by [ADR-0013](0013-proposal-lifecycle-and-retention.md): the Postgres-backed store survives restarts; no resubmission needed.*
 - **Audit trail becomes an operational dependency for dispute resolution.** If the audit log is lost or corrupted, BYOS cannot prove attribution for Track B claims and must absorb the cost. Requires backup/retention policy.
 - **Rate limiting by escrow balance creates a pay-to-play throughput gradient.** Well-capitalized sub-solvers get higher rate limits. Accepted — consistent with the collateral-gated permission model, and prevents under-collateralized signers from consuming simulation resources.

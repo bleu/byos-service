@@ -76,6 +76,8 @@ The old fixed `GAS_ESTIMATE` constant is retained only for the escrow balance th
 
 ### Continuous re-validation of active proposals
 
+> Amended by [ADR-0013](0013-proposal-lifecycle-and-retention.md): re-validation covers `Submitted` and `Active` only — `Executing` proposals (settlement in flight) are not simulated. The first simulation additionally applies the profitability gate (score ≤ 0 → `Rejected(Unprofitable)`); the gate is not re-applied on re-validation.
+
 The background validation loop validates both `Submitted` and `Active` proposals on every tick. For `Submitted` proposals, a successful validation transitions them to `Active` and writes `gas_used`, `trampoline`, and the order's token addresses. For `Active` proposals, re-validation updates `gas_used` with the fresh simulation result; if the simulation now reverts, the proposal transitions to `SimFailed`.
 
 This catches proposals that become invalid due to on-chain state changes (pool liquidity moved, user balance changed, order filled or invalidated on-chain, etc.) without waiting for the driver's post-encoding re-simulation.
@@ -123,6 +125,6 @@ A revert-at-the-end simulation entrypoint in the trampoline bytecode (Uniswap Qu
 - **`POST /proposals` carries no token addresses.** The orderbook is the source of truth; the reference `subsolver` client already matches this contract.
 - **The orderbook is a runtime dependency of validation.** If it is down, proposals defer (they are not rejected). One fetch per order uid over the process lifetime.
 - **Proposals without simulation are invisible to `/solve`.** In `AcceptAll` mode (no RPC), `/solve` returns empty solutions. This is correct -- without chain connectivity, proposals cannot be meaningfully scored or settled.
-- **RPC load scales with active proposals.** Every active proposal is re-simulated on every tick. The trampoline and authenticator caches mitigate the lookups, but `eth_estimateGas` runs every tick for every live proposal. Acceptable for the expected M1 proposal volume.
+- **RPC load scales with active proposals.** Every active proposal is re-simulated on every tick. The trampoline and authenticator caches mitigate the lookups, but `eth_estimateGas` runs every tick for every live proposal. Acceptable for the expected M1 proposal volume — and bounded per proposal by the ingestion lifetime cap ([ADR-0013](0013-proposal-lifecycle-and-retention.md)).
 - **Hooked orders are rejected, not settled.** A scope cut, not a technical wall: the pre/post interaction slots in the encoder are where driver-matching hook interactions would go (COW-1197).
 - **Anvil integration tests** are deferred to COW-1165; the fork spike test (`SpikeRealOrder.t.sol`, attached to COW-1181) seeds that work. Unit tests pin the `settle()` encoding byte-for-byte against Solidity's `abi.encodeCall` for a real mainnet order, and a fake-RPC test pins the wire shape of the estimate request (sender, calldata, both overrides).
