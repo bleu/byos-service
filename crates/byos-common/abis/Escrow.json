@@ -18,14 +18,19 @@
         "internalType": "address"
       },
       {
+        "name": "_submitters",
+        "type": "address[]",
+        "internalType": "address[]"
+      },
+      {
         "name": "_cooldownPeriod",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "_trampolineFactory",
+        "name": "_settlement",
         "type": "address",
-        "internalType": "contract ITrampolineFactory"
+        "internalType": "address"
       },
       {
         "name": "_name",
@@ -56,6 +61,19 @@
   {
     "type": "function",
     "name": "OPERATOR_ROLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "SUBMITTER_ROLE",
     "inputs": [],
     "outputs": [
       {

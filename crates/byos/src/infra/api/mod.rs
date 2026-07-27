@@ -307,7 +307,7 @@ mod tests {
 
     struct RejectAll;
 
-    impl crate::domain::validator::ProposalValidator for RejectAll {
+    impl crate::domain::validator::ValidateProposal for RejectAll {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
@@ -381,6 +381,21 @@ mod tests {
         // …cancelling it again conflicts with its terminal state.
         let second = delete(app.clone()).await;
         assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_without_token_fields_is_accepted() {
+        // Token addresses come from the orderbook (ADR-0012), not the
+        // sub-solver; the API contract must not require them.
+        let state = test_state();
+        let app = router(state);
+        let signer = PrivateKeySigner::random();
+        let (mut body, _) = signed_proposal_body_for(&signer).await;
+        body.as_object_mut().unwrap().remove("sellToken");
+        body.as_object_mut().unwrap().remove("buyToken");
+
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
@@ -584,6 +599,8 @@ mod tests {
         let mut proposal = test_proposal(OrderUid(ORDER_UID), sub_solver, ProposalStatus::Active);
         proposal.sell_amount = U256::from(sell_amount);
         proposal.buy_amount = U256::from(buy_amount);
+        proposal.gas_used = Some(200_000);
+        proposal.trampoline = Some(Address::ZERO);
         state.store().insert(proposal);
     }
 

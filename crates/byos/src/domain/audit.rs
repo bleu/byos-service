@@ -165,6 +165,8 @@ mod tests {
             ),
             sell_amount: U256::from(1_000_000u64),
             buy_amount: U256::from(990_000u64),
+            sell_token: address!("00000000000000000000000000000000000000cc"),
+            buy_token: address!("00000000000000000000000000000000000000dd"),
             interactions: vec![Interaction {
                 target: address!("00000000000000000000000000000000000000bb"),
                 value: U256::from(5u64),
@@ -178,6 +180,8 @@ mod tests {
             signature: Bytes::from(vec![0x11; 65]),
             status: ProposalStatus::Active,
             rejection_reason: None,
+            gas_used: None,
+            trampoline: None,
             created_at: std::time::Instant::now(),
         };
         AuditEvent {

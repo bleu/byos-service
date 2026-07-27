@@ -27,6 +27,7 @@ alloy = { version = "1", default-features = false, features = [
     "provider-http",
     "network",
     "contract",
+    "json-rpc",
     "rpc-types",
     "consensus",
     "eips",
@@ -37,6 +38,7 @@ anyhow = "1"
 axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
 humantime-serde = "1"
 parking_lot = "0.12"
 reqwest = { version = "0.12", features = ["json"] }

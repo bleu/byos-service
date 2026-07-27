@@ -5,9 +5,20 @@
 
 use alloy::primitives::{U256, utils::Unit};
 
-/// Fixed gas estimate for M1 (no simulation-based estimate yet). Used by both
-/// the `/solve` scoring path and the escrow balance threshold.
-pub const GAS_ESTIMATE: u64 = 200_000;
+/// Conservative gas floor for escrow threshold calculations. Not used for
+/// scoring — `/solve` uses the actual simulated gas from each proposal.
+pub const ESCROW_GAS_ESTIMATION: u64 = 200_000;
+
+/// Buffer added to simulated gas for scoring: `gas = simulated_gas +
+/// GAS_BUFFER`. Small by design: the full-settle simulation (ADR-0012)
+/// already covers intrinsic gas and the whole settlement path, so the buffer
+/// only absorbs warm/cold storage differences and driver batching variance.
+pub const GAS_BUFFER: u64 = 30_000;
+
+/// Effective gas for a simulated proposal: simulated gas + safety buffer.
+pub fn effective_gas(simulated: u64) -> u64 {
+    simulated + GAS_BUFFER
+}
 
 pub struct ScoreInput {
     pub order_sell: U256,
@@ -53,6 +64,11 @@ pub fn score_proposal(input: &ScoreInput) -> Option<U256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_gas_adds_the_buffer() {
+        assert_eq!(effective_gas(200_000), 230_000);
+    }
 
     #[test]
     fn sell_order_positive_surplus() {

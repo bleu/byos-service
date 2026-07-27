@@ -27,6 +27,7 @@ dependencies = [
  "alloy-contract",
  "alloy-core",
  "alloy-eips",
+ "alloy-json-rpc",
  "alloy-network",
  "alloy-provider",
  "alloy-rpc-client",
@@ -1184,6 +1185,7 @@ dependencies = [
  "byos-common",
  "chrono",
  "clap",
+ "futures",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",
@@ -1198,6 +1200,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

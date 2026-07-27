@@ -110,6 +110,10 @@ pub async fn create_proposal(
         order_uid_hash,
         sell_amount,
         buy_amount,
+        // Token addresses come from the orderbook order during validation
+        // (ADR-0012); placeholders until the first Accept verdict.
+        sell_token: alloy::primitives::Address::ZERO,
+        buy_token: alloy::primitives::Address::ZERO,
         interactions,
         interactions_hash,
         valid_until,
@@ -117,6 +121,8 @@ pub async fn create_proposal(
         signature: Bytes::from(signature_bytes),
         status: ProposalStatus::Submitted,
         rejection_reason: None,
+        gas_used: None,
+        trampoline: None,
         created_at: Instant::now(),
     };
 

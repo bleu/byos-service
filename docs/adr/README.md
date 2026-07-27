@@ -19,6 +19,7 @@ This repo owns the service-scoped ADRs for BYOS. ADRs 0001–0003 were designed 
 | [0009](0009-testing-strategy.md) | Testing strategy (from cowprotocol/services) | accepted |
 | [0010](0010-settlement-outcome-source.md) | Settlement outcome source & Track A trigger | **proposed** |
 | [0011](0011-owner-scoped-reads.md) | Signature-gated, owner-scoped proposal reads | accepted |
+| [0012](0012-simulation.md) | Proposal simulation via `eth_estimateGas` | accepted |
 
 ## Known open questions
 

@@ -8,4 +8,5 @@
 
 pub mod contracts;
 pub mod eip712;
+pub mod settlement;
 pub mod trampoline;
