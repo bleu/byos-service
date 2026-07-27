@@ -61,16 +61,21 @@ pub(crate) struct Args {
     /// tests that don't need chain connectivity). Prefer the RPC_URL env var
     /// in production — the URL may contain API keys. When set, requires
     /// `--escrow-address`, `--min-collateral`, and `--default-gas-price`.
-    #[arg(long, env, requires_all = ["escrow_address", "min_collateral", "default_gas_price", "settlement_address"])]
+    #[arg(long, env, requires_all = ["escrow_address", "min_collateral", "default_gas_price", "settlement_address", "orderbook_url"])]
     rpc_url: Option<RpcUrl>,
+
+    /// CoW orderbook base URL (e.g. https://api.cow.fi/mainnet) for fetching
+    /// the orders proposals settle. Required when `--rpc-url` is set.
+    #[arg(long, env)]
+    orderbook_url: Option<reqwest::Url>,
 
     /// Escrow contract address for sub-solver balance checks. Required when
     /// `--rpc-url` is set.
     #[arg(long, env)]
     escrow_address: Option<alloy::primitives::Address>,
 
-    /// GPv2Settlement contract address. Used as both `from` and `to` for
-    /// simulation `eth_estimateGas` calls. Required when `--rpc-url` is set.
+    /// GPv2Settlement contract address. The simulation's `settle()` target.
+    /// Required when `--rpc-url` is set.
     #[arg(long, env)]
     settlement_address: Option<alloy::primitives::Address>,
 
@@ -213,8 +218,16 @@ async fn run_with(
             U256::from(min_collateral),
             gas_price,
         );
-        let simulation =
-            SimulationValidator::new(provider, settlement_address, args.trampoline_factory);
+        let orderbook = crate::infra::orderbook::OrderbookClient::new(
+            args.orderbook_url.expect("clap requires_all guarantees it"),
+        );
+        let simulation = SimulationValidator::new(
+            provider,
+            orderbook,
+            settlement_address,
+            escrow_address,
+            args.trampoline_factory,
+        );
         let validator = ProposalValidator::new(escrow, simulation);
         crate::infra::validation::spawn(store, validator, period)
     } else {

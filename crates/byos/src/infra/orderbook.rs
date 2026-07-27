@@ -29,6 +29,16 @@ pub enum OrderbookError {
     Transient(String),
 }
 
+/// Source of orderbook orders. The seam the validator mocks in tests;
+/// [`OrderbookClient`] is the production implementation.
+pub trait FetchOrder: Send + Sync {
+    /// Fetches the order for `uid`.
+    fn order(
+        &self,
+        uid: &OrderUid,
+    ) -> impl Future<Output = Result<OrderRecord, OrderbookError>> + Send;
+}
+
 /// Client for one CoW orderbook instance, with a forever cache keyed by uid.
 pub struct OrderbookClient {
     http: reqwest::Client,
@@ -44,9 +54,11 @@ impl OrderbookClient {
             cache: Mutex::new(HashMap::new()),
         }
     }
+}
 
+impl FetchOrder for OrderbookClient {
     /// Fetches the order for `uid`, from cache when already seen.
-    pub async fn order(&self, uid: &OrderUid) -> Result<OrderRecord, OrderbookError> {
+    async fn order(&self, uid: &OrderUid) -> Result<OrderRecord, OrderbookError> {
         if let Some(record) = self.cache.lock().get(uid).cloned() {
             return Ok(record);
         }

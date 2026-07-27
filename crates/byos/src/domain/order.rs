@@ -40,34 +40,44 @@ impl OrderRecord {
     }
 }
 
+/// Test fixture: an in-envelope fill-or-kill sell order whose amounts match
+/// [`super::proposal::test_proposal`].
+#[cfg(test)]
+pub(crate) fn test_order_record() -> OrderRecord {
+    use {
+        alloy::primitives::{Address, Bytes, U256, address},
+        byos_common::settlement::SigningScheme,
+    };
+    OrderRecord {
+        order: CowOrder {
+            sell_token: address!("00000000000000000000000000000000000000aa"),
+            buy_token: address!("00000000000000000000000000000000000000bb"),
+            receiver: Address::ZERO,
+            sell_amount: U256::from(1_000_000_u64),
+            buy_amount: U256::from(990_000_u64),
+            valid_to: u32::MAX,
+            app_data: Default::default(),
+            fee_amount: U256::ZERO,
+            kind: OrderKind::Sell,
+            partially_fillable: false,
+            signing_scheme: SigningScheme::Eip712,
+            signature: Bytes::from(vec![0u8; 65]),
+        },
+        has_hooks: false,
+        erc20_balances: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::*,
         crate::domain::proposal::{ProposalStatus, test_proposal},
-        alloy::primitives::{Address, Bytes, U256, address},
-        byos_common::settlement::{OrderKind, SigningScheme},
+        alloy::primitives::{Address, U256},
     };
 
     fn sample_order() -> OrderRecord {
-        OrderRecord {
-            order: CowOrder {
-                sell_token: address!("00000000000000000000000000000000000000aa"),
-                buy_token: address!("00000000000000000000000000000000000000bb"),
-                receiver: Address::ZERO,
-                sell_amount: U256::from(1_000_000_u64),
-                buy_amount: U256::from(990_000_u64),
-                valid_to: u32::MAX,
-                app_data: Default::default(),
-                fee_amount: U256::ZERO,
-                kind: OrderKind::Sell,
-                partially_fillable: false,
-                signing_scheme: SigningScheme::Eip712,
-                signature: Bytes::from(vec![0u8; 65]),
-            },
-            has_hooks: false,
-            erc20_balances: true,
-        }
+        test_order_record()
     }
 
     /// A proposal whose amounts match `sample_order` exactly.

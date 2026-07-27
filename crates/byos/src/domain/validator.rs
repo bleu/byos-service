@@ -17,6 +17,8 @@ pub enum RejectionReason {
     /// The proposal's fill-or-kill amount differs from the order's (sell
     /// amount for sell orders, buy amount for buy orders).
     AmountMismatch,
+    /// The orderbook does not know the proposal's order uid.
+    OrderNotFound,
 }
 
 /// Outcome of validating a single proposal.
