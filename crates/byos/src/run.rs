@@ -3,16 +3,14 @@
 //! e2e tests can discover the bound ports.
 
 use {
-    crate::{
-        domain::proposal::InMemoryProposalStore,
-        infra::{
-            api::{self, AppState},
-            audit,
-            blockchain::{
-                escrow::EscrowValidator,
-                validator::{ProposalValidator, SimulationValidator},
-            },
+    crate::infra::{
+        api::{self, AppState},
+        audit,
+        blockchain::{
+            escrow::EscrowValidator,
+            validator::{ProposalValidator, SimulationValidator},
         },
+        storage::ProposalStore,
     },
     alloy::{primitives::U256, providers::Provider},
     anyhow::Context,
@@ -207,17 +205,15 @@ async fn run_with(
 
     tracing::info!(?args, "starting byos");
 
-    // Fail-fast: no audit database, no service (ADR-0001 — the audit trail
-    // is required by the slashing policy, so "up but not auditing" must be
-    // an impossible state).
+    // Fail-fast: no database, no service (ADR-0001/ADR-0013 — Postgres holds
+    // both the proposal state and the audit trail the slashing policy
+    // requires, so "up but not persisting" must be an impossible state).
     let pool = audit::connect_and_migrate(&args.database_url.0).await?;
-    let last_id = audit::max_proposal_id(&pool).await?;
 
     let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
     let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
-    let writer = audit::spawn(pool, audit_rx);
-    let store = Arc::new(InMemoryProposalStore::new(audit_tx));
-    store.seed_next_id(last_id);
+    let writer = audit::spawn(pool.clone(), audit_rx);
+    let store = Arc::new(ProposalStore::new(pool, audit_tx));
 
     let default_gas_price = args.default_gas_price.unwrap_or(0);
     let gas_price = Arc::new(AtomicU64::new(default_gas_price));
@@ -283,9 +279,9 @@ async fn run_with(
 
     // The validation loop holds the store — and with it an audit sender — so
     // stop it first, or the writer's channel never closes and the drain below
-    // hangs. A verdict lost mid-tick to the abort is moot: the in-memory
-    // store vanishes at shutdown anyway. Then awaiting the writer flushes
-    // everything still queued.
+    // hangs. A verdict lost mid-tick to the abort is redone by the first
+    // tick after the next boot — proposals are durable now. Then awaiting
+    // the writer flushes everything still queued.
     validation_loop.abort();
     writer.await.context("audit writer task panicked")
 }

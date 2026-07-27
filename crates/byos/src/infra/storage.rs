@@ -10,7 +10,7 @@
 use {
     crate::domain::{
         audit,
-        proposal::{OrderUid, Proposal, ProposalId, ProposalStatus, StoreError},
+        proposal::{OrderUid, Proposal, ProposalId, ProposalStatus},
         validator::RejectionReason,
     },
     alloy::primitives::{Address, Bytes, U256},
@@ -18,6 +18,24 @@ use {
     sqlx::postgres::PgPool,
     std::{sync::Arc, time::SystemTime},
 };
+
+/// Store-level error.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StoreError {
+    #[error("proposal {0} not found")]
+    NotFound(ProposalId),
+    #[error("proposal {0} not owned by {1}")]
+    NotOwner(ProposalId, Address),
+    #[error("proposal {id} is {actual}, expected {expected}")]
+    StaleTransition {
+        id: ProposalId,
+        expected: String,
+        actual: ProposalStatus,
+    },
+    #[error("database error")]
+    Database(#[from] sqlx::Error),
+}
 
 pub struct ProposalStore {
     pool: PgPool,
@@ -47,9 +65,8 @@ impl ProposalStore {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO proposals (sub_solver, order_uid, order_uid_hash, sell_amount, \
              buy_amount, sell_token, buy_token, interactions, interactions_hash, valid_until, \
-             nonce, signature, status, rejection_reason, gas_used, trampoline) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
-             RETURNING id",
+             nonce, signature, status, rejection_reason, gas_used, trampoline) VALUES ($1, $2, \
+             $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id",
         )
         .bind(format!("{:#x}", proposal.sub_solver))
         .bind(proposal.order_uid.to_string())
@@ -65,7 +82,11 @@ impl ProposalStore {
         .bind(proposal.signature.to_string())
         .bind(proposal.status.to_string())
         .bind(proposal.rejection_reason.map(|r| r.to_string()))
-        .bind(proposal.gas_used.map(|g| i64::try_from(g).expect("gas exceeds i64")))
+        .bind(
+            proposal
+                .gas_used
+                .map(|g| i64::try_from(g).expect("gas exceeds i64")),
+        )
         .bind(proposal.trampoline.map(|t| format!("{t:#x}")))
         .fetch_one(&self.pool)
         .await?;
@@ -92,8 +113,8 @@ impl ProposalStore {
         to: ProposalStatus,
     ) -> Result<(), StoreError> {
         let row: Option<(String, String)> = sqlx::query_as(
-            "UPDATE proposals SET status = $3, status_changed_at = now() \
-             WHERE id = $1 AND status = $2 RETURNING sub_solver, order_uid",
+            "UPDATE proposals SET status = $3, status_changed_at = now() WHERE id = $1 AND status \
+             = $2 RETURNING sub_solver, order_uid",
         )
         .bind(as_db_id(id))
         .bind(from.to_string())
@@ -172,11 +193,10 @@ impl ProposalStore {
         };
 
         sqlx::query(
-            "UPDATE proposals SET status = $2, rejection_reason = $3, \
-             gas_used = COALESCE($4, gas_used), trampoline = COALESCE($5, trampoline), \
-             sell_token = COALESCE($6, sell_token), buy_token = COALESCE($7, buy_token), \
-             status_changed_at = CASE WHEN status = $2 THEN status_changed_at ELSE now() END \
-             WHERE id = $1",
+            "UPDATE proposals SET status = $2, rejection_reason = $3, gas_used = COALESCE($4, \
+             gas_used), trampoline = COALESCE($5, trampoline), sell_token = COALESCE($6, \
+             sell_token), buy_token = COALESCE($7, buy_token), status_changed_at = CASE WHEN \
+             status = $2 THEN status_changed_at ELSE now() END WHERE id = $1",
         )
         .bind(as_db_id(id))
         .bind(to.to_string())
@@ -253,14 +273,15 @@ impl ProposalStore {
     /// Disambiguate a zero-row compare-and-swap: the proposal is either gone
     /// (`NotFound`) or sits in a different status (`StaleTransition`).
     async fn stale_or_missing(&self, id: ProposalId, expected: String) -> StoreError {
-        let status: Option<String> = match sqlx::query_scalar("SELECT status FROM proposals WHERE id = $1")
-            .bind(as_db_id(id))
-            .fetch_optional(&self.pool)
-            .await
-        {
-            Ok(status) => status,
-            Err(e) => return StoreError::Database(e),
-        };
+        let status: Option<String> =
+            match sqlx::query_scalar("SELECT status FROM proposals WHERE id = $1")
+                .bind(as_db_id(id))
+                .fetch_optional(&self.pool)
+                .await
+            {
+                Ok(status) => status,
+                Err(e) => return StoreError::Database(e),
+            };
         match status {
             None => StoreError::NotFound(id),
             Some(actual) => match actual.parse() {
@@ -280,8 +301,8 @@ impl ProposalStore {
         order_uid: &OrderUid,
     ) -> Result<Vec<Proposal>, StoreError> {
         let rows: Vec<ProposalRow> = sqlx::query_as(&format!(
-            "SELECT {PROPOSAL_COLUMNS} FROM proposals \
-             WHERE order_uid = $1 AND status = $2 ORDER BY id"
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE order_uid = $1 AND status = $2 ORDER \
+             BY id"
         ))
         .bind(order_uid.to_string())
         .bind(ProposalStatus::Active.to_string())
@@ -298,11 +319,14 @@ impl ProposalStore {
         sub_solver: Address,
     ) -> Result<Vec<Proposal>, StoreError> {
         let rows: Vec<ProposalRow> = sqlx::query_as(&format!(
-            "SELECT {PROPOSAL_COLUMNS} FROM proposals \
-             WHERE sub_solver = $1 AND status = ANY($2) ORDER BY id"
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE sub_solver = $1 AND status = ANY($2) \
+             ORDER BY id"
         ))
         .bind(format!("{sub_solver:#x}"))
-        .bind(status_names(&[ProposalStatus::Submitted, ProposalStatus::Active]))
+        .bind(status_names(&[
+            ProposalStatus::Submitted,
+            ProposalStatus::Active,
+        ]))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Proposal::try_from).collect()
@@ -325,11 +349,12 @@ impl ProposalStore {
 
     /// Look up a single proposal by ID.
     pub async fn get(&self, id: ProposalId) -> Result<Option<Proposal>, StoreError> {
-        let row: Option<ProposalRow> =
-            sqlx::query_as(&format!("SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE id = $1"))
-                .bind(as_db_id(id))
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<ProposalRow> = sqlx::query_as(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE id = $1"
+        ))
+        .bind(as_db_id(id))
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(Proposal::try_from).transpose()
     }
 }
@@ -349,8 +374,9 @@ fn status_names(statuses: &[ProposalStatus]) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 const PROPOSAL_COLUMNS: &str = "id, sub_solver, order_uid, order_uid_hash, sell_amount, \
-     buy_amount, sell_token, buy_token, interactions, interactions_hash, valid_until, nonce, \
-     signature, status, rejection_reason, gas_used, trampoline";
+                                buy_amount, sell_token, buy_token, interactions, \
+                                interactions_hash, valid_until, nonce, signature, status, \
+                                rejection_reason, gas_used, trampoline";
 
 /// The raw column values; [`Proposal::try_from`] parses them back into
 /// domain types. A parse failure means a corrupt row (we wrote these
@@ -389,7 +415,10 @@ impl TryFrom<ProposalRow> for Proposal {
     fn try_from(row: ProposalRow) -> Result<Self, StoreError> {
         Ok(Self {
             id: ProposalId(u64::try_from(row.id).map_err(|e| corrupt("id", e))?),
-            sub_solver: row.sub_solver.parse().map_err(|e| corrupt("sub_solver", e))?,
+            sub_solver: row
+                .sub_solver
+                .parse()
+                .map_err(|e| corrupt("sub_solver", e))?,
             order_uid: row.order_uid.parse().map_err(|e| corrupt("order_uid", e))?,
             order_uid_hash: row
                 .order_uid_hash
@@ -397,7 +426,10 @@ impl TryFrom<ProposalRow> for Proposal {
                 .map_err(|e| corrupt("order_uid_hash", e))?,
             sell_amount: parse_u256(&row.sell_amount).map_err(|e| corrupt("sell_amount", e))?,
             buy_amount: parse_u256(&row.buy_amount).map_err(|e| corrupt("buy_amount", e))?,
-            sell_token: row.sell_token.parse().map_err(|e| corrupt("sell_token", e))?,
+            sell_token: row
+                .sell_token
+                .parse()
+                .map_err(|e| corrupt("sell_token", e))?,
             buy_token: row.buy_token.parse().map_err(|e| corrupt("buy_token", e))?,
             interactions: interactions_from_json(&row.interactions)
                 .map_err(|e| corrupt("interactions", e))?,
@@ -459,9 +491,13 @@ fn interactions_from_json(value: &serde_json::Value) -> Result<Vec<Interaction>,
                     .ok_or_else(|| format!("missing field {name}"))
             };
             Ok(Interaction {
-                target: field("target")?.parse::<Address>().map_err(|e| e.to_string())?,
+                target: field("target")?
+                    .parse::<Address>()
+                    .map_err(|e| e.to_string())?,
                 value: parse_u256(field("value")?).map_err(|e| e.to_string())?,
-                callData: field("callData")?.parse::<Bytes>().map_err(|e| e.to_string())?,
+                callData: field("callData")?
+                    .parse::<Bytes>()
+                    .map_err(|e| e.to_string())?,
             })
         })
         .collect()
@@ -546,7 +582,13 @@ mod tests {
     #[tokio::test]
     async fn get_nonexistent_returns_none() {
         let (store, _audit) = test_store().await;
-        assert!(store.get(ProposalId(999)).await.expect("query ok").is_none());
+        assert!(
+            store
+                .get(ProposalId(999))
+                .await
+                .expect("query ok")
+                .is_none()
+        );
     }
 
     #[ignore]
@@ -626,7 +668,11 @@ mod tests {
     async fn reject_verdict_records_the_reason() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -664,7 +710,11 @@ mod tests {
     async fn accept_verdict_writes_the_simulation_outcome() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -714,7 +764,11 @@ mod tests {
         assert_eq!(status, ProposalStatus::Active);
 
         let fetched = store.get(id).await.expect("get").expect("exists");
-        assert_eq!(fetched.gas_used, Some(150_000), "re-validation refreshes gas");
+        assert_eq!(
+            fetched.gas_used,
+            Some(150_000),
+            "re-validation refreshes gas"
+        );
         assert!(
             audit.try_recv().is_err(),
             "Active → Active must not emit an audit event"
@@ -726,7 +780,11 @@ mod tests {
     async fn verdict_on_terminal_proposal_is_stale() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Cancelled))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Cancelled,
+            ))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -741,7 +799,10 @@ mod tests {
             ProposalStatus::Cancelled,
             "a stale Accept verdict must not resurrect a cancelled proposal"
         );
-        assert!(audit.try_recv().is_err(), "stale verdicts leave no evidence");
+        assert!(
+            audit.try_recv().is_err(),
+            "stale verdicts leave no evidence"
+        );
     }
 
     #[ignore]
@@ -749,7 +810,11 @@ mod tests {
     async fn transition_nonexistent_fails_with_not_found() {
         let (store, _audit) = test_store().await;
         let err = store
-            .transition(ProposalId(999), ProposalStatus::Active, ProposalStatus::Expired)
+            .transition(
+                ProposalId(999),
+                ProposalStatus::Active,
+                ProposalStatus::Expired,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
@@ -774,7 +839,10 @@ mod tests {
         assert_eq!(event.proposal_id(), id);
         assert_eq!(event.sub_solver(), SOLVER_A);
         assert_eq!(*event.order_uid(), test_order_uid());
-        assert!(matches!(event.kind, crate::domain::audit::AuditKind::Cancelled { .. }));
+        assert!(matches!(
+            event.kind,
+            crate::domain::audit::AuditKind::Cancelled { .. }
+        ));
     }
 
     #[ignore]
@@ -800,7 +868,11 @@ mod tests {
     async fn cancel_terminal_state_fails() {
         let (store, _audit) = test_store().await;
         let id = store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Settled))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Settled,
+            ))
             .await
             .expect("insert");
 
@@ -818,11 +890,18 @@ mod tests {
     async fn cancel_submitted_proposal_succeeds() {
         let (store, _audit) = test_store().await;
         let id = store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
 
-        store.cancel(id, SOLVER_A).await.expect("cancel before verdict");
+        store
+            .cancel(id, SOLVER_A)
+            .await
+            .expect("cancel before verdict");
         assert_eq!(
             store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::Cancelled
@@ -842,11 +921,21 @@ mod tests {
     async fn list_by_order_uid_returns_only_active_proposals_on_that_order() {
         let (store, _audit) = test_store().await;
         let uid = test_order_uid();
-        store.insert(make_proposal(uid.clone(), SOLVER_A)).await.expect("insert");
-        store.insert(make_proposal(uid.clone(), SOLVER_A)).await.expect("insert");
+        store
+            .insert(make_proposal(uid.clone(), SOLVER_A))
+            .await
+            .expect("insert");
+        store
+            .insert(make_proposal(uid.clone(), SOLVER_A))
+            .await
+            .expect("insert");
         // Submitted on the same order: not yet gatekept, must not appear.
         store
-            .insert(test_proposal(uid.clone(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                uid.clone(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
         // Active on a different order: must not appear.
@@ -865,15 +954,29 @@ mod tests {
     async fn list_by_sub_solver_shows_live_proposals_of_that_owner_only() {
         let (store, _audit) = test_store().await;
         store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
-        store.insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A)).await.expect("insert");
         store
-            .insert(test_proposal(OrderUid([0xcc; 56]), SOLVER_A, ProposalStatus::Rejected))
+            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
             .await
             .expect("insert");
-        store.insert(make_proposal(test_order_uid(), SOLVER_B)).await.expect("insert");
+        store
+            .insert(test_proposal(
+                OrderUid([0xcc; 56]),
+                SOLVER_A,
+                ProposalStatus::Rejected,
+            ))
+            .await
+            .expect("insert");
+        store
+            .insert(make_proposal(test_order_uid(), SOLVER_B))
+            .await
+            .expect("insert");
 
         let results = store.list_by_sub_solver(SOLVER_A).await.expect("list");
         assert_eq!(results.len(), 2, "submitted + active, not the rejected one");
@@ -885,11 +988,26 @@ mod tests {
     async fn cancelled_proposals_disappear_from_the_lists() {
         let (store, _audit) = test_store().await;
         let uid = test_order_uid();
-        let id = store.insert(make_proposal(uid.clone(), SOLVER_A)).await.expect("insert");
+        let id = store
+            .insert(make_proposal(uid.clone(), SOLVER_A))
+            .await
+            .expect("insert");
         store.cancel(id, SOLVER_A).await.expect("cancel");
 
-        assert!(store.list_by_order_uid(&uid).await.expect("list").is_empty());
-        assert!(store.list_by_sub_solver(SOLVER_A).await.expect("list").is_empty());
+        assert!(
+            store
+                .list_by_order_uid(&uid)
+                .await
+                .expect("list")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_by_sub_solver(SOLVER_A)
+                .await
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[ignore]
@@ -897,12 +1015,23 @@ mod tests {
     async fn snapshot_by_statuses_returns_the_matching_rows() {
         let (store, _audit) = test_store().await;
         store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
-        store.insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A)).await.expect("insert");
         store
-            .insert(test_proposal(OrderUid([0xcc; 56]), SOLVER_A, ProposalStatus::Expired))
+            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
+            .await
+            .expect("insert");
+        store
+            .insert(test_proposal(
+                OrderUid([0xcc; 56]),
+                SOLVER_A,
+                ProposalStatus::Expired,
+            ))
             .await
             .expect("insert");
 
@@ -921,7 +1050,11 @@ mod tests {
     async fn cancellation_during_validation_wins_over_the_verdict() {
         let (store, _audit) = test_store().await;
         let id = store
-            .insert(test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::Submitted))
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
             .await
             .expect("insert");
 

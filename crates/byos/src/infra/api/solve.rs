@@ -1,5 +1,6 @@
-//! `/solve` hot path: served entirely from the in-memory proposal cache.
-//! Zero simulation, zero RPC, zero DB on this path (ADR-0002).
+//! `/solve` hot path: one indexed read over the live proposal rows per
+//! auction order (ADR-0013 — no cache layer until latency data says
+//! otherwise). Zero simulation, zero RPC on this path (ADR-0002).
 
 use {
     super::AppState,
@@ -39,7 +40,15 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
     for order in &auction.orders {
         let order_uid = OrderUid(order.uid);
 
-        let proposals = state.store().list_by_order_uid(&order_uid);
+        let proposals = match state.store().list_by_order_uid(&order_uid).await {
+            Ok(proposals) => proposals,
+            Err(e) => {
+                // Skip this order rather than fail the whole auction — a
+                // missing bid loses one round, a 500 loses them all.
+                tracing::error!(%e, order_uid = %order_uid, "solve: proposal lookup failed");
+                continue;
+            }
+        };
         if proposals.is_empty() {
             continue;
         }
