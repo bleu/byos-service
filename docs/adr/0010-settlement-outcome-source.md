@@ -31,7 +31,7 @@ Get the outcome from the stock driver's `/notify` notifications. No fork, no cha
 
 ## Alternatives considered
 
-- **Driver fork with a custom outcome hook** (this ADR's original decision). Obsolete: the stock `/notify` protocol already delivers the outcome per solution, including tx hashes. The bleu driver fork (COW-1190) still exists for other needs — fee configuration — but outcome observation is no longer among its reasons, and this ADR no longer depends on it.
+- **Driver fork with a custom outcome hook** (this ADR's original decision). Obsolete: the stock `/notify` protocol already delivers the outcome per solution, including tx hashes. The fork idea is dropped entirely (COW-1190 canceled) — the other candidate reason, fee handling, turned out to be solver-side scoring work (COW-1189): driver fees are a price wedge that redistributes the delivered amount between user and settlement custody, never touching the trampoline's delivery obligation.
 - **Chain watcher (scan blocks).** Rejected. Rebuilds what the driver does, misses private and dropped txs, and cannot spot a missed deadline without knowing what we sent. Fallback only if notifications prove unreliable in practice.
 - **Autopilot observations.** Rejected. CoW-run, tied to its database, wrong attribution level (solver, not sub-solver), gas table dropped (migration `V090`). Useful as a reference for the receipt read, not as a source.
 - **Shepherd (WASM) module.** Rejected here. Shepherd earns its place when you subscribe to chain events; we have a push plus one read. Still a fit for event-driven jobs like TWAP or EthFlow.
@@ -39,7 +39,7 @@ Get the outcome from the stock driver's `/notify` notifications. No fork, no cha
 
 ## Consequences
 
-- No chain indexer to build or run, and outcome observation has no dependency on CoW accepting a fork — the notification protocol is how every driver talks to its solver engine. (The fork tracked in COW-1190 remains, for fee configuration — a separate concern.)
+- No chain indexer to build or run, and no driver fork at all — the notification protocol is how every driver talks to its solver engine, and no other BYOS need justifies a fork either.
 - BYOS must expose `/notify` and keep the `solutions` mapping durable ([ADR-0013](0013-proposal-lifecycle-and-retention.md)). The ids are optional on the wire, so the handler must tolerate notifications it cannot join to a solution — but an *outcome* notification (`SettlementStarted`, `Success`, `Revert`, `Cancelled`, `Expired`, `Fail`) that cannot be attributed is an alert-worthy bug.
 - Missed-deadline detection is free, from the driver's `Expired`/`Cancelled` notifications.
 - Private submissions are covered, because the driver is the source.
