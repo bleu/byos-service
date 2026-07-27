@@ -134,8 +134,6 @@ fn received_payload(p: &Proposal) -> serde_json::Value {
         "orderUidHash": p.order_uid_hash,
         "sellAmount": p.sell_amount.to_string(),
         "buyAmount": p.buy_amount.to_string(),
-        "sellToken": p.sell_token,
-        "buyToken": p.buy_token,
         "interactions": p.interactions.iter().map(|i| serde_json::json!({
             "target": i.target,
             "value": i.value.to_string(),
