@@ -13,15 +13,26 @@ use {
     super::{escrow::EscrowValidator, simulation},
     crate::{
         domain::{
-            proposal::Proposal,
+            proposal::{Proposal, ProposalStatus},
+            scoring,
             validator::{RejectionReason, SimulationOutcome, ValidateProposal, Verdict},
         },
         infra::orderbook::{FetchOrder, OrderbookError},
     },
-    alloy::{primitives::Address, providers::Provider, transports::RpcError},
-    byos_common::contracts::TrampolineFactory,
+    alloy::{
+        primitives::{Address, U256},
+        providers::Provider,
+        transports::RpcError,
+    },
+    byos_common::{contracts::TrampolineFactory, settlement::OrderKind},
     parking_lot::Mutex,
-    std::collections::HashMap,
+    std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    },
 };
 
 // The primitives GPv2Settlement binding has no `authenticator()`; a minimal
@@ -47,6 +58,12 @@ pub struct SimulationValidator<P, O> {
     settlement_address: Address,
     escrow_address: Address,
     trampoline_factory: Address,
+    /// Last-seen auction gas price, shared with `/solve` — the "current gas
+    /// price" of the profitability gate (ADR-0013).
+    gas_price: Arc<AtomicU64>,
+    /// Profitability floor in wei: the first simulation rejects proposals
+    /// whose score does not exceed this (`--min-proposal-score`, default 0).
+    min_score: U256,
     /// Cached trampoline addresses: sub_solver → trampoline. Persistent across
     /// ticks (trampoline addresses are deterministic and never change).
     trampoline_cache: Mutex<HashMap<Address, Address>>,
@@ -61,6 +78,8 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
         settlement_address: Address,
         escrow_address: Address,
         trampoline_factory: Address,
+        gas_price: Arc<AtomicU64>,
+        min_score: U256,
     ) -> Self {
         Self {
             provider,
@@ -68,6 +87,8 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
             settlement_address,
             escrow_address,
             trampoline_factory,
+            gas_price,
+            min_score,
             trampoline_cache: Mutex::new(HashMap::new()),
             authenticator: Mutex::new(None),
         }
@@ -88,6 +109,70 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
 
         self.trampoline_cache.lock().insert(sub_solver, addr);
         Ok(addr)
+    }
+
+    /// The profitability gate (ADR-0013): scores the proposal against its
+    /// order (`score = surplus + fee - gas`, ADR-0002) with the simulated gas
+    /// and the last-seen gas price.
+    ///
+    /// - `Some(Ok(()))` — score exceeds the minimum, proposal may activate.
+    /// - `Some(Err(Unprofitable))` — score too low, or the orderbook cannot
+    ///   price the surplus token (an auction couldn't either, so the proposal
+    ///   could never win `/solve`).
+    /// - `None` — transient price-fetch failure, defer to the next tick.
+    async fn profitability(
+        &self,
+        proposal: &Proposal,
+        record: &crate::domain::order::OrderRecord,
+        gas: u64,
+    ) -> Option<Result<(), RejectionReason>> {
+        // The surplus token: buy token for sell orders, sell token for buy
+        // orders (same rule as /solve).
+        let surplus_token = match record.order.kind {
+            OrderKind::Sell => record.order.buy_token,
+            OrderKind::Buy => record.order.sell_token,
+        };
+        let native_price = match self.orderbook.native_price(surplus_token).await {
+            Ok(price) => price,
+            Err(OrderbookError::NotFound) => {
+                tracing::info!(
+                    id = %proposal.id,
+                    token = %surplus_token,
+                    "orderbook has no native price for the surplus token, rejecting",
+                );
+                return Some(Err(RejectionReason::Unprofitable));
+            }
+            Err(OrderbookError::Transient(e)) => {
+                tracing::warn!(
+                    id = %proposal.id,
+                    error = %e,
+                    "native price fetch failed (transient), deferring to next tick",
+                );
+                return None;
+            }
+        };
+
+        let gas_cost = U256::from(scoring::effective_gas(gas))
+            .saturating_mul(U256::from(self.gas_price.load(Ordering::Relaxed)));
+        let score = scoring::score_proposal(&scoring::ScoreInput {
+            order_sell: record.order.sell_amount,
+            order_buy: record.order.buy_amount,
+            proposal_sell: proposal.sell_amount,
+            proposal_buy: proposal.buy_amount,
+            is_sell_order: record.order.kind == OrderKind::Sell,
+            gas_cost,
+            native_price,
+        });
+        if score.is_none_or(|s| s <= self.min_score) {
+            tracing::info!(
+                id = %proposal.id,
+                ?score,
+                min_score = %self.min_score,
+                "proposal scores at or below the minimum, rejecting",
+            );
+            return Some(Err(RejectionReason::Unprofitable));
+        }
+        Some(Ok(()))
     }
 
     /// Resolve `settlement.authenticator()`, from cache after the first call.
@@ -200,12 +285,24 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             .account_override(sim.escrow_override.0, sim.escrow_override.1)
             .await
         {
-            Ok(gas) => Some(Verdict::Accept(Some(SimulationOutcome {
-                gas_used: gas,
-                trampoline,
-                sell_token: record.order.sell_token,
-                buy_token: record.order.buy_token,
-            }))),
+            Ok(gas) => {
+                // 6. Profitability gate (ADR-0013), first simulation only:
+                //    re-validation skips it so gas-price wobble cannot churn
+                //    Active proposals; /solve re-scores at auction time.
+                if proposal.status == ProposalStatus::Submitted {
+                    match self.profitability(proposal, &record, gas).await {
+                        Some(Ok(())) => { /* profitable — activate */ }
+                        Some(Err(reason)) => return Some(Verdict::Reject(reason)),
+                        None => return None,
+                    }
+                }
+                Some(Verdict::Accept(Some(SimulationOutcome {
+                    gas_used: gas,
+                    trampoline,
+                    sell_token: record.order.sell_token,
+                    buy_token: record.order.buy_token,
+                })))
+            }
             Err(e) if is_revert(&e) => {
                 tracing::info!(
                     id = %proposal.id,
@@ -319,6 +416,12 @@ mod tests {
                 Self::Transient => Err(OrderbookError::Transient("boom".into())),
             }
         }
+
+        /// Parity pricing: 10^18 wei per 10^18 atoms, so surplus in token
+        /// units equals surplus in wei.
+        async fn native_price(&self, _token: Address) -> Result<U256, OrderbookError> {
+            Ok(alloy::primitives::utils::Unit::ETHER.wei())
+        }
     }
 
     const SETTLEMENT: Address = address!("9008D19f58AAbD9eD0D60971565AA8510560ab41");
@@ -376,7 +479,15 @@ mod tests {
         orderbook: StubOrders,
     ) -> SimulationValidator<impl Provider, StubOrders> {
         let provider = alloy::providers::ProviderBuilder::new().connect_http(uri.parse().unwrap());
-        SimulationValidator::new(provider, orderbook, SETTLEMENT, ESCROW, FACTORY)
+        SimulationValidator::new(
+            provider,
+            orderbook,
+            SETTLEMENT,
+            ESCROW,
+            FACTORY,
+            Arc::new(AtomicU64::new(0)),
+            U256::ZERO,
+        )
     }
 
     fn submitted_proposal() -> Proposal {
@@ -490,6 +601,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unprofitable_first_simulation_rejects_proposal() {
+        let server = rpc_server().await;
+        // Order limit equal to the proposal's buy amount: zero surplus, so
+        // the score cannot exceed zero no matter the gas price.
+        let mut record = test_order_record();
+        record.order.buy_amount = submitted_proposal().buy_amount;
+        let validator = validator_with(server.uri(), StubOrders::Found(Box::new(record)));
+
+        let verdict = validator.validate(&submitted_proposal()).await;
+        assert_eq!(
+            verdict,
+            Some(Verdict::Reject(RejectionReason::Unprofitable)),
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_order_rejects_proposal() {
         let server = rpc_server().await;
         let validator = validator_with(server.uri(), StubOrders::NotFound);
@@ -546,6 +673,8 @@ mod tests {
             Address::ZERO,
             Address::ZERO,
             Address::ZERO,
+            Arc::new(AtomicU64::new(0)),
+            U256::ZERO,
         );
 
         let sub_solver = address!("0000000000000000000000000000000000000001");

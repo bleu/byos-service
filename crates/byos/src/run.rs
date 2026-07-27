@@ -262,7 +262,7 @@ async fn run_with(
             provider.clone(),
             escrow_address,
             U256::from(min_collateral),
-            gas_price,
+            gas_price.clone(),
         );
         let orderbook = crate::infra::orderbook::OrderbookClient::new(
             args.orderbook_url.expect("clap requires_all guarantees it"),
@@ -273,6 +273,8 @@ async fn run_with(
             settlement_address,
             escrow_address,
             args.trampoline_factory,
+            gas_price,
+            U256::ZERO,
         );
         let validator = ProposalValidator::new(escrow, simulation);
         crate::infra::validation::spawn(store, validator, period)

@@ -40,8 +40,10 @@ impl OrderRecord {
     }
 }
 
-/// Test fixture: an in-envelope fill-or-kill sell order whose amounts match
-/// [`super::proposal::test_proposal`].
+/// Test fixture: an in-envelope fill-or-kill sell order matching
+/// [`super::proposal::test_proposal`]: same sell amount (the envelope
+/// requirement for sell orders), buy limit below the proposal's 990_000 so
+/// the pair carries positive surplus.
 #[cfg(test)]
 pub(crate) fn test_order_record() -> OrderRecord {
     use {
@@ -54,7 +56,7 @@ pub(crate) fn test_order_record() -> OrderRecord {
             buy_token: address!("00000000000000000000000000000000000000bb"),
             receiver: Address::ZERO,
             sell_amount: U256::from(1_000_000_u64),
-            buy_amount: U256::from(990_000_u64),
+            buy_amount: U256::from(980_000_u64),
             valid_to: u32::MAX,
             app_data: Default::default(),
             fee_amount: U256::ZERO,
@@ -80,10 +82,10 @@ mod tests {
         test_order_record()
     }
 
-    /// A proposal whose amounts match `sample_order` exactly.
+    /// A proposal inside `sample_order`'s envelope.
     fn matching_proposal() -> Proposal {
-        // test_proposal uses sell=1_000_000, buy=990_000 — same as
-        // sample_order.
+        // test_proposal sells 1_000_000, matching sample_order's sell amount
+        // (the envelope requirement for a sell order).
         test_proposal(
             crate::domain::proposal::OrderUid([0u8; 56]),
             Address::ZERO,

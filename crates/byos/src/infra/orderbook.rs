@@ -37,6 +37,15 @@ pub trait FetchOrder: Send + Sync {
         &self,
         uid: &OrderUid,
     ) -> impl Future<Output = Result<OrderRecord, OrderbookError>> + Send;
+
+    /// Fetches the token's native price with auction reference-price
+    /// semantics: how much wei buys 10^18 atoms of the token
+    /// (`ScoreInput::native_price`). `NotFound` means the orderbook cannot
+    /// price the token.
+    fn native_price(
+        &self,
+        token: Address,
+    ) -> impl Future<Output = Result<U256, OrderbookError>> + Send;
 }
 
 /// Client for one CoW orderbook instance, with a forever cache keyed by uid.
@@ -96,6 +105,51 @@ impl FetchOrder for OrderbookClient {
 
         self.cache.lock().insert(uid.clone(), record.clone());
         Ok(record)
+    }
+
+    /// Fetches `GET /api/v1/token/{token}/native_price`. The endpoint answers
+    /// `{"price": <f64>}` in native atoms per token atom; the auction
+    /// reference price is that times 10^18. Not cached — prices move, and the
+    /// profitability gate only calls this once per proposal (first
+    /// simulation).
+    async fn native_price(&self, token: Address) -> Result<U256, OrderbookError> {
+        let url = format!(
+            "{}/api/v1/token/{token:#x}/native_price",
+            self.base_url.as_str().trim_end_matches('/'),
+        );
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| OrderbookError::Transient(e.to_string()))?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(OrderbookError::NotFound);
+        }
+        if !response.status().is_success() {
+            return Err(OrderbookError::Transient(format!(
+                "unexpected status {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct PriceDto {
+            price: f64,
+        }
+        let dto: PriceDto = response
+            .json()
+            .await
+            .map_err(|e| OrderbookError::Transient(e.to_string()))?;
+        if !dto.price.is_finite() || dto.price < 0.0 {
+            return Err(OrderbookError::Transient(format!(
+                "unusable native price {}",
+                dto.price
+            )));
+        }
+        // f64→u128 `as` saturates, so absurd prices clamp instead of wrapping.
+        Ok(U256::from((dto.price * 1e18) as u128))
     }
 }
 
