@@ -286,9 +286,9 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             .await
         {
             Ok(gas) => {
-                // 6. Profitability gate (ADR-0013), first simulation only:
-                //    re-validation skips it so gas-price wobble cannot churn
-                //    Active proposals; /solve re-scores at auction time.
+                // 6. Profitability gate (ADR-0013), first simulation only: re-validation skips
+                //    it so gas-price wobble cannot churn Active proposals; /solve re-scores at
+                //    auction time.
                 if proposal.status == ProposalStatus::Submitted {
                     match self.profitability(proposal, &record, gas).await {
                         Some(Ok(())) => { /* profitable — activate */ }
