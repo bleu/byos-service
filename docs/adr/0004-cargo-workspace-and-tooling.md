@@ -20,7 +20,7 @@ Adopt the services conventions, trimmed to this repo's size:
 - **Clippy at `-D warnings`**: `cargo clippy --locked --workspace --all-features --all-targets -- -D warnings`.
 - **Justfile as the single command surface** for developers and CI: `fmt`, `fmt-check`, `clippy`, `test-unit`, `test-e2e`, `build`. CI invokes just recipes rather than raw cargo commands so local runs and CI are identical.
 - **cargo-nextest as the test runner** (see [ADR-0009](0009-testing-strategy.md)).
-- **Licensing**: all crates are `GPL-3.0-or-later` (matching [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts) and the `cowprotocol-primitives` dependency, which is GPL and would pull linked code under GPL anyway — see COW-1176). We previously mixed LGPL and permissive licenses per crate; a single workspace-wide license is simpler and unambiguous.
+- **Licensing**: all crates are `GPL-3.0-or-later`, forced by the `cowprotocol-primitives` dependency (GPL linking pulls the whole binary under GPL — see COW-1176). We previously mixed LGPL and permissive licenses per crate; one workspace-wide license is simpler. [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts) stays `LGPL-3.0-or-later` — it has no GPL dependency, and LGPL code can be consumed by a GPL program.
 
 Deliberately not adopted (yet):
 
