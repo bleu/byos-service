@@ -91,13 +91,17 @@ pub async fn create_proposal(
     tracing::info!(%sub_solver, "proposal signature verified");
 
     // 6. Reject proposals that are already expired — no point accepting,
-    // storing, and auditing a DOA proposal (ADR-0001).
+    // storing, and auditing a DOA proposal (ADR-0001) — or that outlive the
+    // lifetime cap, which bounds simulation cost per proposal (ADR-0013).
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_secs();
     if valid_until < U256::from(now) {
         return Err(Error::from(Kind::ProposalExpired));
+    }
+    if valid_until > U256::from(now + state.max_proposal_lifetime_secs()) {
+        return Err(Error::from(Kind::ProposalLifetimeExceeded));
     }
 
     // 7. Store as Submitted. The background validator picks it up and flips

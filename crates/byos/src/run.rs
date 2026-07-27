@@ -109,6 +109,12 @@ pub(crate) struct Args {
     /// Seconds between background validation ticks (expiry sweep + verdicts).
     #[arg(long, env, default_value_t = 12)]
     validation_interval_secs: u64,
+
+    /// Maximum proposal lifetime in seconds (ADR-0013): `POST /proposals`
+    /// rejects any `validUntil` further out than this. Bounds the worst-case
+    /// simulation cost per proposal.
+    #[arg(long, env, default_value_t = 300)]
+    max_proposal_lifetime_secs: u64,
 }
 
 /// Connection-string wrapper whose `Debug` hides the value, so the startup
@@ -221,7 +227,12 @@ async fn run_with(
 
     let default_gas_price = args.default_gas_price.unwrap_or(0);
     let gas_price = Arc::new(AtomicU64::new(default_gas_price));
-    let state = AppState::new(store.clone(), domain, gas_price.clone());
+    let state = AppState::new(
+        store.clone(),
+        domain,
+        gas_price.clone(),
+        args.max_proposal_lifetime_secs,
+    );
 
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
 

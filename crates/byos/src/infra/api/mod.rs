@@ -33,6 +33,9 @@ struct AppStateInner {
     /// `/solve`, read by the background escrow validator). Seeded with
     /// `--default-gas-price` at startup.
     gas_price: Arc<AtomicU64>,
+    /// Lifetime cap (ADR-0013): `POST` rejects `validUntil` further out than
+    /// now + this many seconds.
+    max_proposal_lifetime_secs: u64,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -45,11 +48,13 @@ impl AppState {
         store: Arc<InMemoryProposalStore>,
         domain: Eip712Domain,
         gas_price: Arc<AtomicU64>,
+        max_proposal_lifetime_secs: u64,
     ) -> Self {
         Self(Arc::new(AppStateInner {
             store,
             domain,
             gas_price,
+            max_proposal_lifetime_secs,
         }))
     }
 
@@ -63,6 +68,10 @@ impl AppState {
 
     pub fn gas_price(&self) -> &Arc<AtomicU64> {
         &self.0.gas_price
+    }
+
+    pub fn max_proposal_lifetime_secs(&self) -> u64 {
+        self.0.max_proposal_lifetime_secs
     }
 }
 
@@ -250,6 +259,7 @@ mod tests {
             Arc::new(InMemoryProposalStore::new(audit_tx)),
             domain,
             gas_price,
+            300,
         )
     }
 
@@ -258,12 +268,18 @@ mod tests {
     async fn signed_proposal_body_for(signer: &PrivateKeySigner) -> (serde_json::Value, Address) {
         let domain = eip712::byos_domain(CHAIN_ID, factory());
 
+        // Inside the 5-minute lifetime cap the test_state applies.
+        let valid_until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_secs()
+            + 240;
         let order_uid = [0xaa_u8; 56];
         let proposal = contracts::Proposal {
             orderUidHash: keccak256(order_uid),
             sellAmount: U256::from(1_000_000_u64),
             buyAmount: U256::from(990_000_u64),
-            validUntil: U256::from(99_999_999_999_u64),
+            validUntil: U256::from(valid_until),
             nonce: U256::from(1_u64),
         };
         let interactions: Vec<contracts::Interaction> = vec![];
@@ -277,7 +293,7 @@ mod tests {
             "sellAmount": "1000000",
             "buyAmount": "990000",
             "interactions": [],
-            "validUntil": "99999999999",
+            "validUntil": valid_until.to_string(),
             "nonce": "1",
             "signature": format!("0x{}", alloy::hex::encode(signature.as_bytes())),
         });

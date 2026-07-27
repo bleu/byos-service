@@ -3,9 +3,32 @@
 
 use {
     crate::tests::setup::{self, ProposalFixture, TestApp, TestDb},
-    alloy::{primitives::Address, signers::local::PrivateKeySigner},
+    alloy::{
+        primitives::{Address, U256},
+        signers::local::PrivateKeySigner,
+    },
     reqwest::StatusCode,
 };
+
+#[ignore]
+#[tokio::test]
+async fn rejects_valid_until_beyond_the_lifetime_cap() {
+    let db = TestDb::create().await;
+    let app = TestApp::spawn(&db.url).await;
+    let signer = PrivateKeySigner::random();
+    // One hour out — far beyond the default 5-minute cap (ADR-0013).
+    let fixture = ProposalFixture {
+        valid_until: U256::from(setup::unix_now() + 3_600),
+        ..Default::default()
+    };
+
+    let body = fixture.signed_body(&signer).await;
+    let (status, err) = app.post_json("/proposals", &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["kind"], "ProposalLifetimeExceeded");
+
+    app.stop().await;
+}
 
 #[ignore]
 #[tokio::test]
@@ -35,7 +58,7 @@ async fn create_and_get_round_trip() {
     assert_eq!(got["orderUid"], body["orderUid"]);
     assert_eq!(got["sellAmount"], "1000000");
     assert_eq!(got["buyAmount"], "990000");
-    assert_eq!(got["validUntil"], u32::MAX.to_string());
+    assert_eq!(got["validUntil"], fixture.valid_until.to_string());
     // Ingestion is async: POST stores the proposal as `submitted`; the
     // background validator (parked far out here) is what flips it to active.
     assert_eq!(got["status"], "submitted");
