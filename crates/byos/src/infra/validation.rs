@@ -27,7 +27,10 @@ pub fn spawn(
     period: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(period);
+        // First tick a full period out — a plain `interval` fires
+        // immediately, which would race service startup (and tests that
+        // park the loop with a long period would still get one tick).
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
             let now = SystemTime::now()
