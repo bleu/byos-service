@@ -406,12 +406,14 @@ mod tests {
         Found(Box<OrderRecord>),
         NotFound,
         Transient,
+        /// The order fetch succeeds but the native-price fetch is down.
+        PriceOutage(Box<OrderRecord>),
     }
 
     impl FetchOrder for StubOrders {
         async fn order(&self, _uid: &OrderUid) -> Result<OrderRecord, OrderbookError> {
             match self {
-                Self::Found(record) => Ok((**record).clone()),
+                Self::Found(record) | Self::PriceOutage(record) => Ok((**record).clone()),
                 Self::NotFound => Err(OrderbookError::NotFound),
                 Self::Transient => Err(OrderbookError::Transient("boom".into())),
             }
@@ -420,7 +422,10 @@ mod tests {
         /// Parity pricing: 10^18 wei per 10^18 atoms, so surplus in token
         /// units equals surplus in wei.
         async fn native_price(&self, _token: Address) -> Result<U256, OrderbookError> {
-            Ok(alloy::primitives::utils::Unit::ETHER.wei())
+            match self {
+                Self::PriceOutage(_) => Err(OrderbookError::Transient("price boom".into())),
+                _ => Ok(alloy::primitives::utils::Unit::ETHER.wei()),
+            }
         }
     }
 
@@ -657,6 +662,21 @@ mod tests {
         assert!(
             matches!(verdict, Some(Verdict::Accept(Some(_)))),
             "gas-price wobble must not reject an Active proposal, got {verdict:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn native_price_outage_defers_first_verdict() {
+        let server = rpc_server().await;
+        let validator = validator_with(
+            server.uri(),
+            StubOrders::PriceOutage(Box::new(test_order_record())),
+        );
+
+        let verdict = validator.validate(&submitted_proposal()).await;
+        assert_eq!(
+            verdict, None,
+            "a transient price failure must defer, not reject or activate",
         );
     }
 
