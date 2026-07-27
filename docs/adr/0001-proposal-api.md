@@ -9,7 +9,7 @@ Status: accepted
 ## Context
 
 The public HTTP API by which sub-solvers submit signed proposals. Endpoints (RFP):
-- `POST /proposals` — `{order_uid, sell_amount, buy_amount, sell_token, buy_token, interactions, valid_until, nonce, signature}`
+- `POST /proposals` — `{order_uid, sell_amount, buy_amount, interactions, valid_until, nonce, signature}`; token addresses come from the orderbook order, not the sub-solver ([ADR-0012](0012-simulation.md))
 - `GET /proposals/{order_uid}` — metadata only, never full contents (no leakage channel)
 - `DELETE /proposals/{id}` — cancellation by the original signer
 
