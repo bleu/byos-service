@@ -63,10 +63,14 @@ impl FetchOrder for OrderbookClient {
             return Ok(record);
         }
 
-        let url = self
-            .base_url
-            .join(&format!("/api/v1/orders/0x{}", hex::encode(uid.0)))
-            .expect("base url joined with a valid path");
+        // Built by string concatenation, not `Url::join`: a join with an
+        // absolute path would replace the base URL's own path, silently
+        // dropping the network segment of e.g. https://api.cow.fi/mainnet.
+        let url = format!(
+            "{}/api/v1/orders/0x{}",
+            self.base_url.as_str().trim_end_matches('/'),
+            hex::encode(uid.0)
+        );
         let response = self
             .http
             .get(url)
@@ -287,6 +291,28 @@ mod tests {
         assert_eq!(record.order.signature.len(), 65);
         assert!(!record.has_hooks, "plain metadata is not hooks");
         assert!(record.erc20_balances);
+    }
+
+    #[tokio::test]
+    async fn base_url_path_prefix_is_preserved() {
+        // Production base URLs carry a network segment
+        // (https://api.cow.fi/mainnet); it must survive URL construction.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/mainnet/api/v1/orders/0x{}",
+                alloy::primitives::hex::encode(fixture_uid().0)
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(real_order_json()))
+            .mount(&server)
+            .await;
+
+        let client = OrderbookClient::new(format!("{}/mainnet", server.uri()).parse().unwrap());
+
+        client
+            .order(&fixture_uid())
+            .await
+            .expect("order should fetch through the prefixed path");
     }
 
     #[tokio::test]
