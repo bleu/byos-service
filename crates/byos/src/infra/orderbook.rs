@@ -107,7 +107,6 @@ impl FetchOrder for OrderbookClient {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrderDto {
-    owner: Address,
     receiver: Option<Address>,
     sell_token: Address,
     buy_token: Address,
@@ -164,12 +163,12 @@ impl OrderDto {
             order: CowOrder {
                 sell_token: self.sell_token,
                 buy_token: self.buy_token,
-                // Zero already means "same as owner" on-chain; normalize to
-                // the explicit owner for local readability.
-                receiver: self
-                    .receiver
-                    .filter(|r| *r != Address::ZERO)
-                    .unwrap_or(self.owner),
+                // Passed through untouched: the receiver is part of the
+                // signed order struct, so rewriting a zero ("same as owner",
+                // GPv2 convention) to the owner address would change the
+                // EIP-712 digest and break signature recovery in the
+                // simulation.
+                receiver: self.receiver.unwrap_or(Address::ZERO),
                 sell_amount: self.sell_amount,
                 buy_amount: self.buy_amount,
                 valid_to: self.valid_to,
@@ -313,6 +312,28 @@ mod tests {
             .order(&fixture_uid())
             .await
             .expect("order should fetch through the prefixed path");
+    }
+
+    #[tokio::test]
+    async fn null_receiver_stays_zero() {
+        // receiver is part of the signed order struct; a null ("same as
+        // owner") must reach the trade encoding as the zero address, not be
+        // rewritten to the owner.
+        let server = MockServer::start().await;
+        let mut body = real_order_json();
+        body["receiver"] = json!(null);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let record = client_with(&server)
+            .await
+            .order(&fixture_uid())
+            .await
+            .expect("order should fetch");
+
+        assert_eq!(record.order.receiver, Address::ZERO);
     }
 
     #[tokio::test]
