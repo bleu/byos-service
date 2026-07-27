@@ -81,10 +81,11 @@ paths:
       summary: Submit a signed settlement proposal.
       description: |
         Parses the request, recovers the sub-solver address from the EIP-712
-        `ProposalData` signature, and rejects proposals whose `validUntil`
-        is already in the past. On success the proposal is stored as
-        `submitted` and validated in the background; poll
-        `GET /proposal/{id}` for the verdict.
+        `ProposalData` signature, and checks the expiry window: `validUntil`
+        must be in the future but no further out than the maximum proposal
+        lifetime (ADR-0013; deployment-configurable, default 5 minutes). On
+        success the proposal is stored as `submitted` and validated in the
+        background; poll `GET /proposal/{id}` for the verdict.
 
         Token addresses are not part of the request: they come from the
         orderbook order during background validation (ADR-0012).
@@ -110,8 +111,10 @@ paths:
         "400":
           description: |
             Malformed request (`BadRequest`), invalid or unrecoverable
-            signature (`InvalidSignature`, `SignatureRecoveryFailed`), or a
-            proposal that is already expired (`ProposalExpired`).
+            signature (`InvalidSignature`, `SignatureRecoveryFailed`), a
+            proposal that is already expired (`ProposalExpired`), or a
+            `validUntil` beyond the maximum proposal lifetime
+            (`ProposalLifetimeExceeded`).
           content:
             application/json:
               schema:
@@ -344,12 +347,17 @@ components:
           orders).
         - `OrderNotFound` — the orderbook does not know the proposal's
           order UID.
+        - `Unprofitable` — the first simulation scored the proposal at or
+          below the minimum (`score = surplus + fee - gas`, ADR-0002), so it
+          could never win an auction (ADR-0013). Fix: improve the price or
+          resubmit when gas is cheaper.
       type: string
       enum:
         - InsufficientEscrow
         - UnsupportedOrder
         - AmountMismatch
         - OrderNotFound
+        - Unprofitable
     Interaction:
       description: |
         One arbitrary call executed inside the sub-solver's Trampoline at
@@ -396,7 +404,12 @@ components:
           items:
             $ref: "#/components/schemas/Interaction"
         validUntil:
-          description: Unix timestamp after which the proposal expires.
+          description: |
+            Unix timestamp after which the proposal expires. Must be in the
+            future, and at most the maximum proposal lifetime from now
+            (ADR-0013; deployment-configurable, default 5 minutes) —
+            otherwise the request is rejected with
+            `ProposalLifetimeExceeded`.
           allOf:
             - $ref: "#/components/schemas/UnixTimestamp"
         nonce:
@@ -496,6 +509,7 @@ components:
             - SignatureRecoveryFailed
             - InsufficientEscrow
             - ProposalExpired
+            - ProposalLifetimeExceeded
             - ProposalNotFound
             - ProposalNotCancellable
             - BadRequest
