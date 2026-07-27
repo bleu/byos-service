@@ -47,4 +47,4 @@ Full-stack e2e uses [`cowdao-grants/offline-mode`](https://github.com/cowdao-gra
 
 ## License
 
-[LGPL-3.0-or-later](LICENSE).
+[GPL-3.0-or-later](LICENSE).
