@@ -93,11 +93,7 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for EscrowValidator<P> 
         match self.get_balance(proposal.sub_solver).await {
             Ok(balance) => {
                 if balance >= threshold {
-                    Some(Verdict::Accept {
-                        gas_used: None,
-                        trampoline: None,
-                        tokens: None,
-                    })
+                    Some(Verdict::Accept(None))
                 } else {
                     tracing::info!(
                         id = %proposal.id,

@@ -21,18 +21,27 @@ pub enum RejectionReason {
     OrderNotFound,
 }
 
+/// Results of a successful simulation, stored on the proposal by the
+/// `Accept` verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SimulationOutcome {
+    /// Gas consumed by the simulation `eth_estimateGas` call.
+    pub gas_used: u64,
+    /// Trampoline resolved via `TrampolineFactory.addressOf(sub_solver)`.
+    pub trampoline: Address,
+    /// The order's tokens from the orderbook fetch (ADR-0012); stored on the
+    /// proposal for `/solve`.
+    pub sell_token: Address,
+    pub buy_token: Address,
+}
+
 /// Outcome of validating a single proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// Passed gatekeeping — proposal becomes `Active`. Carries optional
-    /// simulation results to store on the proposal.
-    Accept {
-        gas_used: Option<u64>,
-        trampoline: Option<Address>,
-        /// The order's `(sell_token, buy_token)` from the orderbook fetch
-        /// (ADR-0012); stored on the proposal for `/solve`.
-        tokens: Option<(Address, Address)>,
-    },
+    /// Passed gatekeeping — proposal becomes `Active`. Carries the
+    /// simulation outcome when a simulation ran; `None` for validators that
+    /// don't simulate (escrow-only, `AcceptAll`).
+    Accept(Option<SimulationOutcome>),
     /// Failed a gatekeeping rule (e.g. escrow) — proposal becomes `Rejected`.
     Reject(RejectionReason),
     /// Simulation reverted — proposal becomes `SimFailed`.
@@ -58,10 +67,6 @@ pub struct AcceptAll;
 
 impl ValidateProposal for AcceptAll {
     async fn validate(&self, _proposal: &Proposal) -> Option<Verdict> {
-        Some(Verdict::Accept {
-            gas_used: None,
-            trampoline: None,
-            tokens: None,
-        })
+        Some(Verdict::Accept(None))
     }
 }

@@ -59,16 +59,16 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .and_then(|t| t.reference_price)
             .unwrap_or(U256::ZERO);
 
-        // Score and select the best proposal for this order.
-        // Only proposals with simulation gas are eligible — proposals that
-        // haven't been simulated yet (gas_used: None) are skipped.
+        // Score and select the best proposal for this order. Only proposals
+        // with simulation gas are eligible — proposals that haven't been
+        // simulated yet (gas_used: None) are skipped.
         let best = proposals
             .iter()
             .filter(|p| p.valid_until > now)
-            .filter(|p| p.gas_used.is_some())
             .filter_map(|p| {
-                let gas_cost = U256::from(effective_gas(p.gas_used.unwrap()))
-                    .saturating_mul(auction.effective_gas_price);
+                let gas_used = p.gas_used?;
+                let gas_cost =
+                    U256::from(effective_gas(gas_used)).saturating_mul(auction.effective_gas_price);
                 let score = score_proposal(&ScoreInput {
                     order_sell: order.sell_amount,
                     order_buy: order.buy_amount,
@@ -78,18 +78,17 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                     gas_cost,
                     native_price,
                 })?;
-                (score > U256::ZERO).then_some((p, score))
+                (score > U256::ZERO).then_some((p, gas_used, score))
             })
-            .max_by_key(|(_, score)| *score);
+            .max_by_key(|(_, _, score)| *score);
 
-        let Some((proposal, _score)) = best else {
+        let Some((proposal, gas_used, _score)) = best else {
             continue;
         };
 
         // Build the solution using solvers-dto types.
-        // gas_used is guaranteed Some by the `.filter(|p| p.gas_used.is_some())` above.
         let id = solutions.len() as u64 + 1;
-        if let Some(sol) = build_solution(id, order, proposal, proposal.gas_used.unwrap()) {
+        if let Some(sol) = build_solution(id, order, proposal, gas_used) {
             solutions.push(sol);
         }
     }

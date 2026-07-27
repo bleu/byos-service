@@ -367,8 +367,8 @@ impl InMemoryProposalStore {
     /// Apply a validator verdict to a `Submitted` or `Active` proposal.
     ///
     /// - `Accept`: transitions `Submitted` → `Active`, or keeps `Active` →
-    ///   `Active` (re-validation). Writes `gas_used` and `trampoline` when
-    ///   present in the verdict.
+    ///   `Active` (re-validation). Writes the simulation outcome (gas,
+    ///   trampoline, tokens) onto the proposal when the verdict carries one.
     /// - `Reject`: transitions to `Rejected` with a rejection reason.
     /// - `SimFailed`: transitions to `SimFailed`.
     ///
@@ -401,24 +401,16 @@ impl InMemoryProposalStore {
                 let from_status = proposal.status;
                 let rejection_reason = match verdict {
                     Verdict::Reject(reason) => Some(reason),
-                    Verdict::Accept { .. } | Verdict::SimFailed => None,
+                    Verdict::Accept(_) | Verdict::SimFailed => None,
                 };
                 let p = Arc::make_mut(proposal);
                 p.status = match verdict {
-                    Verdict::Accept {
-                        gas_used,
-                        trampoline,
-                        tokens,
-                    } => {
-                        if let Some(g) = gas_used {
-                            p.gas_used = Some(g);
-                        }
-                        if let Some(t) = trampoline {
-                            p.trampoline = Some(t);
-                        }
-                        if let Some((sell, buy)) = tokens {
-                            p.sell_token = sell;
-                            p.buy_token = buy;
+                    Verdict::Accept(sim) => {
+                        if let Some(sim) = sim {
+                            p.gas_used = Some(sim.gas_used);
+                            p.trampoline = Some(sim.trampoline);
+                            p.sell_token = sim.sell_token;
+                            p.buy_token = sim.buy_token;
                         }
                         ProposalStatus::Active
                     }

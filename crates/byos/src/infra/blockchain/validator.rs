@@ -14,7 +14,7 @@ use {
     crate::{
         domain::{
             proposal::Proposal,
-            validator::{RejectionReason, ValidateProposal, Verdict},
+            validator::{RejectionReason, SimulationOutcome, ValidateProposal, Verdict},
         },
         infra::orderbook::{FetchOrder, OrderbookError},
     },
@@ -202,11 +202,12 @@ impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
             .account_override(sim.escrow_override.0, sim.escrow_override.1)
             .await
         {
-            Ok(gas) => Some(Verdict::Accept {
-                gas_used: Some(gas),
-                trampoline: Some(trampoline),
-                tokens: Some((record.order.sell_token, record.order.buy_token)),
-            }),
+            Ok(gas) => Some(Verdict::Accept(Some(SimulationOutcome {
+                gas_used: gas,
+                trampoline,
+                sell_token: record.order.sell_token,
+                buy_token: record.order.buy_token,
+            }))),
             Err(e) if is_revert(&e) => {
                 tracing::info!(
                     id = %proposal.id,
@@ -282,7 +283,7 @@ impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
         // 1. Escrow check (cheap, cached).
         let escrow_verdict = self.escrow.validate(proposal).await;
         match escrow_verdict {
-            Some(Verdict::Accept { .. }) => { /* continue to simulation */ }
+            Some(Verdict::Accept(_)) => { /* continue to simulation */ }
             _ => return escrow_verdict, // Reject, SimFailed, or None (deferred)
         }
 
@@ -405,14 +406,12 @@ mod tests {
         let verdict = validator.validate(&submitted_proposal()).await;
         assert_eq!(
             verdict,
-            Some(Verdict::Accept {
-                gas_used: Some(200_000),
-                trampoline: Some(TRAMPOLINE),
-                tokens: Some((
-                    test_order_record().order.sell_token,
-                    test_order_record().order.buy_token,
-                )),
-            }),
+            Some(Verdict::Accept(Some(SimulationOutcome {
+                gas_used: 200_000,
+                trampoline: TRAMPOLINE,
+                sell_token: test_order_record().order.sell_token,
+                buy_token: test_order_record().order.buy_token,
+            }))),
         );
 
         // Inspect the eth_estimateGas request that went over the wire.

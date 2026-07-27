@@ -192,14 +192,7 @@ mod tests {
         // before the verdict lands: applying the verdict must fail and the
         // cancellation must stick.
         store.cancel(id, sub_solver).expect("cancel succeeds");
-        let stale = store.resolve_verdict(
-            id,
-            crate::domain::validator::Verdict::Accept {
-                gas_used: None,
-                trampoline: None,
-                tokens: None,
-            },
-        );
+        let stale = store.resolve_verdict(id, crate::domain::validator::Verdict::Accept(None));
 
         assert!(stale.is_err(), "stale verdict must be dropped");
         assert_eq!(
