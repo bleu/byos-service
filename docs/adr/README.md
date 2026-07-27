@@ -22,6 +22,6 @@ This repo owns the service-scoped ADRs for BYOS. ADRs 0001–0003 were designed 
 
 ## Known open questions
 
-- **ADR-0002 is still proposed.** Its open questions (cross-sub-solver batching, thin vs fat Trampoline, ingestion-time profitability gate) are the first things to settle in M2, several pending CoW core team input. The "driver callbacks for outcome observation" question is resolved by [ADR-0010](0010-settlement-outcome-source.md).
+- **ADR-0002 is still proposed.** Cross-sub-solver batching is out of scope for now, and the fat Trampoline is confirmed (the contract/service split is owned by the contracts repo). The ingestion-time profitability gate is decided — reject unprofitable proposals at ingestion — with the write-up landing as part of the proposal-lifecycle review. The "driver callbacks for outcome observation" question is resolved by [ADR-0010](0010-settlement-outcome-source.md).
 - **Anvil-state regeneration procedure** — the e2e chain fixture bakes the BYOS contracts into offline-mode's `anvil-state.json` ([ADR-0009](0009-testing-strategy.md)); the exact regeneration workflow (and whether the deploy hook lands upstream in offline-mode) is settled when the e2e crate gains its first test.
 - **Reference-price source for scoring** — [ADR-0002](0002-solver-engine.md) assumes cached native-token reference prices for surplus/fee conversion; where they come from (auction payload, external feed) is unspecified.
