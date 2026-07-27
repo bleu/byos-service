@@ -41,6 +41,25 @@ stateDiagram-v2
     Penalized --> [*]
 ```
 
+Every transition, in one place:
+
+| From | To | Trigger |
+|---|---|---|
+| — | `Submitted` | `POST /proposals`: signature verified, expiry window OK; stored for background validation. |
+| `Submitted` | `Active` | First validation passes: escrow check, envelope check, simulation succeeds, score > 0. Writes `gas_used`, `trampoline`, token addresses. |
+| `Submitted` | `Rejected` | A gatekeeping rule fails: `InsufficientEscrow`, `UnsupportedOrder`, `AmountMismatch`, `OrderNotFound`, or `Unprofitable` (score ≤ 0 at first simulation). Carries the typed `rejectionReason`. |
+| `Submitted` | `SimFailed` | First simulation reverts. |
+| `Active` | `Active` | Re-validation tick: fresh simulation refreshes `gas_used`. No status change, no audit event. |
+| `Active` | `Rejected` | Escrow re-check fails on re-validation (balance dropped below the threshold). |
+| `Active` | `SimFailed` | Re-simulation reverts (order filled or expired on-chain, route broke, balances moved). |
+| `Submitted`, `Active` | `Expired` | Expiry sweep: `validUntil` is behind the clock. |
+| `Submitted`, `Active` | `Cancelled` | Signed `DELETE /proposals/{id}` by the owner. `DELETE` against any other state is a `409`. |
+| `Active` | `Executing` | Driver `/notify SettlementStarted`: our solution won and the settlement tx is being submitted. |
+| `Executing` | `Settled` | Driver `/notify Success { transaction }`: the tx landed. Tx hash recorded. |
+| `Executing` | `SettleFailed` | Driver `/notify Revert { transaction }`: the tx reverted on-chain. Tx hash recorded; the Track A debit follows ([ADR-0010](0010-settlement-outcome-source.md)). |
+| `Executing` | `Active` | Driver `/notify Cancelled`/`Expired`/`Fail` (submission abandoned, no tx landed), or `--executing-timeout` elapsed (lost notification, restart mid-settlement). The proposal re-enters competition; if the order is actually gone, re-simulation kills it. |
+| `SettleFailed` | `Penalized` | The Track A escrow debit lands on-chain. `penalty_tx_hash` recorded. |
+
 A state answers one question: what does the service do with the proposal right now?
 
 | State | Simulated | Offered to `/solve` | Expiry sweep | Cancellable | Exits | Retention |
