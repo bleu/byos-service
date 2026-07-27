@@ -29,6 +29,9 @@ pub enum Verdict {
     Accept {
         gas_used: Option<u64>,
         trampoline: Option<Address>,
+        /// The order's `(sell_token, buy_token)` from the orderbook fetch
+        /// (ADR-0012); stored on the proposal for `/solve`.
+        tokens: Option<(Address, Address)>,
     },
     /// Failed a gatekeeping rule (e.g. escrow) — proposal becomes `Rejected`.
     Reject(RejectionReason),
@@ -58,6 +61,7 @@ impl ValidateProposal for AcceptAll {
         Some(Verdict::Accept {
             gas_used: None,
             trampoline: None,
+            tokens: None,
         })
     }
 }

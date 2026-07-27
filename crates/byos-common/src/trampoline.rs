@@ -45,9 +45,8 @@ pub fn encode_trampoline_interactions(
         callData: transfer_calldata.into(),
     };
 
-    // 2. Trampoline.execute(proposal, interactions, sellToken, buyToken,
-    //    signature) — sellToken added in contracts #27 for the both-token
-    //    sweep.
+    // 2. Trampoline.execute(proposal, interactions, sellToken, buyToken, signature)
+    //    — sellToken added in contracts #27 for the both-token sweep.
     let execute_calldata = Trampoline::executeCall {
         _proposal: proposal.clone(),
         _interactions: interactions.to_vec(),

@@ -96,8 +96,7 @@ impl<P: Provider + Clone, O: FetchOrder> SimulationValidator<P, O> {
             return Ok(addr);
         }
 
-        let settlement =
-            ISettlementAuthenticator::new(self.settlement_address, &self.provider);
+        let settlement = ISettlementAuthenticator::new(self.settlement_address, &self.provider);
         let addr = settlement.authenticator().call().await?;
 
         *self.authenticator.lock() = Some(addr);
@@ -109,8 +108,8 @@ impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
     for SimulationValidator<P, O>
 {
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
-        // 1. Fetch the order (cheap after first fetch — forever cache) and
-        //    check the envelope before spending any RPC calls.
+        // 1. Fetch the order (cheap after first fetch — forever cache) and check the
+        //    envelope before spending any RPC calls.
         let record = match self.orderbook.order(&proposal.order_uid).await {
             Ok(record) => record,
             Err(OrderbookError::NotFound) => {
@@ -161,8 +160,8 @@ impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
             },
         };
 
-        // 3. Resolve the authenticator (one RPC call ever). Any failure is
-        //    transient: authenticator() on GPv2Settlement cannot revert.
+        // 3. Resolve the authenticator (one RPC call ever). Any failure is transient:
+        //    authenticator() on GPv2Settlement cannot revert.
         let authenticator = match self.resolve_authenticator().await {
             Ok(addr) => addr,
             Err(e) => {
@@ -206,6 +205,7 @@ impl<P: Provider + Clone + Send + Sync, O: FetchOrder> ValidateProposal
             Ok(gas) => Some(Verdict::Accept {
                 gas_used: Some(gas),
                 trampoline: Some(trampoline),
+                tokens: Some((record.order.sell_token, record.order.buy_token)),
             }),
             Err(e) if is_revert(&e) => {
                 tracing::info!(
@@ -341,7 +341,10 @@ mod tests {
             let result = match body["method"].as_str().unwrap_or_default() {
                 "eth_estimateGas" => serde_json::json!("0x30d40"),
                 "eth_call" => {
-                    let to = body["params"][0]["to"].as_str().unwrap_or_default().to_lowercase();
+                    let to = body["params"][0]["to"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_lowercase();
                     let addr = if to == format!("{FACTORY:#x}") {
                         TRAMPOLINE
                     } else {
@@ -394,7 +397,10 @@ mod tests {
     #[tokio::test]
     async fn simulation_dispatches_full_settle_with_overrides() {
         let server = rpc_server().await;
-        let validator = validator_with(server.uri(), StubOrders::Found(Box::new(test_order_record())));
+        let validator = validator_with(
+            server.uri(),
+            StubOrders::Found(Box::new(test_order_record())),
+        );
 
         let verdict = validator.validate(&submitted_proposal()).await;
         assert_eq!(
@@ -402,6 +408,10 @@ mod tests {
             Some(Verdict::Accept {
                 gas_used: Some(200_000),
                 trampoline: Some(TRAMPOLINE),
+                tokens: Some((
+                    test_order_record().order.sell_token,
+                    test_order_record().order.buy_token,
+                )),
             }),
         );
 

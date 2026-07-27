@@ -96,6 +96,7 @@ impl<P: Provider + Clone + Send + Sync> ValidateProposal for EscrowValidator<P> 
                     Some(Verdict::Accept {
                         gas_used: None,
                         trampoline: None,
+                        tokens: None,
                     })
                 } else {
                     tracing::info!(

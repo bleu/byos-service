@@ -408,12 +408,17 @@ impl InMemoryProposalStore {
                     Verdict::Accept {
                         gas_used,
                         trampoline,
+                        tokens,
                     } => {
                         if let Some(g) = gas_used {
                             p.gas_used = Some(g);
                         }
                         if let Some(t) = trampoline {
                             p.trampoline = Some(t);
+                        }
+                        if let Some((sell, buy)) = tokens {
+                            p.sell_token = sell;
+                            p.buy_token = buy;
                         }
                         ProposalStatus::Active
                     }

@@ -6,15 +6,15 @@
 //! a dummy submitter address. Two state overrides stand in for the
 //! permissions the dummy lacks:
 //!
-//! - **Authenticator** → code override with `AnyoneAuthenticator` (any
-//!   `from` passes the solver allowlist). Bytecode vendored from
+//! - **Authenticator** → code override with `AnyoneAuthenticator` (any `from`
+//!   passes the solver allowlist). Bytecode vendored from
 //!   `cowprotocol/services` `contracts/artifacts/AnyoneAuthenticator.json`
 //!   (MIT).
 //! - **Escrow** → `state_diff` granting `SUBMITTER_ROLE` to the dummy
 //!   (`tx.origin`). The Escrow inherits NON-upgradeable OpenZeppelin v5
 //!   `AccessControl`, so `_roles` lives at plain storage slot 5 — not the
-//!   ERC-7201 namespaced slot. Verified on a mainnet fork (COW-1181 spike)
-//!   and pinned by `forge inspect Escrow storage-layout` in byos-contracts.
+//!   ERC-7201 namespaced slot. Verified on a mainnet fork (COW-1181 spike) and
+//!   pinned by `forge inspect Escrow storage-layout` in byos-contracts.
 
 use {
     alloy::{

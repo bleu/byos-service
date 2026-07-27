@@ -199,8 +199,6 @@ mod tests {
             "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
             "sellAmount": "1000000",
             "buyAmount": "990000",
-            "sellToken": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-            "buyToken": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
             "interactions": [],
             "validUntil": "99999999999",
             "nonce": "1",
@@ -306,6 +304,21 @@ mod tests {
         // …cancelling it again conflicts with its terminal state.
         let second = delete(app.clone()).await;
         assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_without_token_fields_is_accepted() {
+        // Token addresses come from the orderbook (ADR-0012), not the
+        // sub-solver; the API contract must not require them.
+        let state = test_state();
+        let app = router(state);
+        let signer = PrivateKeySigner::random();
+        let (mut body, _) = signed_proposal_body_for(&signer).await;
+        body.as_object_mut().unwrap().remove("sellToken");
+        body.as_object_mut().unwrap().remove("buyToken");
+
+        let response = post_proposal(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
@@ -636,8 +649,6 @@ mod tests {
             "orderUid": format!("0x{}", alloy::hex::encode(order_uid)),
             "sellAmount": "1000000",
             "buyAmount": "990000",
-            "sellToken": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-            "buyToken": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
             "interactions": [],
             "validUntil": "1",
             "nonce": "1",

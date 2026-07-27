@@ -197,6 +197,7 @@ mod tests {
             crate::domain::validator::Verdict::Accept {
                 gas_used: None,
                 trampoline: None,
+                tokens: None,
             },
         );
 

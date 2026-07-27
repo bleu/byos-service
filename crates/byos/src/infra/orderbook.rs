@@ -153,7 +153,8 @@ impl OrderDto {
                 !metadata["hooks"].is_null() || !metadata["bridging"].is_null()
             })
             .unwrap_or(false);
-        let erc20_balances = self.sell_token_balance == "erc20" && self.buy_token_balance == "erc20";
+        let erc20_balances =
+            self.sell_token_balance == "erc20" && self.buy_token_balance == "erc20";
 
         OrderRecord {
             order: CowOrder {
@@ -161,7 +162,10 @@ impl OrderDto {
                 buy_token: self.buy_token,
                 // Zero already means "same as owner" on-chain; normalize to
                 // the explicit owner for local readability.
-                receiver: self.receiver.filter(|r| *r != Address::ZERO).unwrap_or(self.owner),
+                receiver: self
+                    .receiver
+                    .filter(|r| *r != Address::ZERO)
+                    .unwrap_or(self.owner),
                 sell_amount: self.sell_amount,
                 buy_amount: self.buy_amount,
                 valid_to: self.valid_to,
@@ -337,7 +341,8 @@ mod tests {
         let server = MockServer::start().await;
         let mut body = real_order_json();
         body["fullAppData"] = json!(
-            "{\"appCode\":\"CoW Swap\",\"metadata\":{\"bridging\":{\"destinationChainId\":\"56\"}}}"
+            "{\"appCode\":\"CoW \
+             Swap\",\"metadata\":{\"bridging\":{\"destinationChainId\":\"56\"}}}"
         );
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
