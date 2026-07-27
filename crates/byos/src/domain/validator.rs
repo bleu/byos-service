@@ -11,6 +11,12 @@ use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
 #[non_exhaustive]
 pub enum RejectionReason {
     InsufficientEscrow,
+    /// The order is outside the simulation envelope (hooks, partial fill,
+    /// non-erc20 balances — ADR-0012).
+    UnsupportedOrder,
+    /// The proposal's fill-or-kill amount differs from the order's (sell
+    /// amount for sell orders, buy amount for buy orders).
+    AmountMismatch,
 }
 
 /// Outcome of validating a single proposal.
