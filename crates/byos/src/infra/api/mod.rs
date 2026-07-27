@@ -96,20 +96,29 @@ fn public_router(state: AppState) -> Router {
 fn internal_router(state: AppState, solve_bearer_token: Option<&str>) -> Router {
     let mut solve = Router::new().route("/solve", post(solve::solve));
     if let Some(token) = solve_bearer_token {
-        let expected = format!("Bearer {token}");
+        let expected = token.to_owned();
         solve = solve.route_layer(axum::middleware::from_fn(
             move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let expected = expected.clone();
                 async move {
+                    // RFC 7235: the auth scheme name is case-insensitive
+                    // ("Bearer" == "bearer"); the token itself is not.
                     let authorized = req
                         .headers()
                         .get(axum::http::header::AUTHORIZATION)
                         .and_then(|value| value.to_str().ok())
-                        == Some(expected.as_str());
+                        .and_then(|value| value.split_once(' '))
+                        .is_some_and(|(scheme, token)| {
+                            scheme.eq_ignore_ascii_case("Bearer") && token == expected
+                        });
                     if authorized {
                         next.run(req).await
                     } else {
-                        axum::http::StatusCode::UNAUTHORIZED.into_response()
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                        )
+                            .into_response()
                     }
                 }
             },
@@ -631,6 +640,25 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    async fn post_solve_with_auth(
+        app: &Router,
+        auction: &serde_json::Value,
+        authorization: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/solve")
+                    .header("content-type", "application/json")
+                    .header("authorization", authorization)
+                    .body(Body::from(auction.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn solve_without_bearer_token_is_rejected_when_one_is_configured() {
         let state = test_state();
@@ -641,6 +669,11 @@ mod tests {
         let response = raw_post_solve(&app, &auction).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // RFC 7235: a 401 names the expected auth scheme.
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
     }
 
     #[tokio::test]
@@ -650,22 +683,23 @@ mod tests {
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/solve")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer driver-secret")
-                    .body(Body::from(auction.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = post_solve_with_auth(&app, &auction, "Bearer driver-secret").await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let solutions = json_body(response).await["solutions"].clone();
         assert_eq!(solutions.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn solve_bearer_scheme_is_case_insensitive() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = post_solve_with_auth(&app, &auction, "bearer driver-secret").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -675,18 +709,23 @@ mod tests {
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/solve")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer not-the-secret")
-                    .body(Body::from(auction.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = post_solve_with_auth(&app, &auction, "Bearer not-the-secret").await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn solve_with_a_case_changed_token_is_rejected() {
+        let state = test_state();
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let app = internal_router(state, Some("driver-secret"));
+
+        let auction = auction_json("sell", "1000", "900");
+        let response = post_solve_with_auth(&app, &auction, "Bearer DRIVER-SECRET").await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
