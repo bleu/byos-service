@@ -42,7 +42,7 @@ Signed once, sent on every request. No timestamp, no nonce, no path binding — 
 
 ### Non-owners get 404, not 403
 
-`GET /proposal/{id}` returns the same 404 for "does not exist" and "exists but not yours". A 403 would be an existence oracle — anyone could probe IDs 1..N and learn how many proposals are live. Since the point of this decision is that nothing leaks to non-owners, the two cases are indistinguishable on the wire.
+`GET /proposal/{id}` and `DELETE /proposal/{id}` return the same 404 for "does not exist" and "exists but not yours". A 403 would be an existence oracle — anyone could probe IDs 1..N (for DELETE, by signing `CancelProposal` messages) and learn how many proposals are live. Since the point of this decision is that nothing leaks to non-owners, the two cases are indistinguishable on the wire. The ownership check runs before the liveness check, so DELETE's 409 (already terminal) is only ever seen by the owner.
 
 ## Alternatives considered
 

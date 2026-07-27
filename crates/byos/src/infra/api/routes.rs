@@ -230,10 +230,14 @@ pub async fn cancel_proposal(
     let signer = eip712::recover_canceller(&signature, state.domain(), U256::from(id.0))
         .map_err(|_| Error::from(Kind::SignatureRecoveryFailed))?;
 
-    // 3. Cancel the proposal (store checks ownership).
+    // 3. Cancel the proposal (store checks ownership). Non-owners get the
+    // same 404 as a genuine miss — a 403 would be an existence oracle for
+    // proposal ids, the thing ADR-0011's owner-scoped 404 exists to prevent.
     state.store().cancel(id, signer).map_err(|e| match e {
-        crate::domain::proposal::StoreError::NotFound(_) => Error::from(Kind::ProposalNotFound),
-        crate::domain::proposal::StoreError::NotOwner(_, _) => Error::from(Kind::NotProposalOwner),
+        crate::domain::proposal::StoreError::NotFound(_)
+        | crate::domain::proposal::StoreError::NotOwner(_, _) => {
+            Error::from(Kind::ProposalNotFound)
+        }
         crate::domain::proposal::StoreError::StaleTransition { .. } => {
             Error::from(Kind::ProposalNotCancellable)
         }

@@ -32,7 +32,7 @@ This repo holds the off-chain half of that design: the **BYOS service** (`crates
 ## Components (RFP scope)
 
 1. **Solver engine** (`crates/byos`) — answers the standard CoW driver's `/solve` from the proposal store; internal `surplus + fee - gas` pre-ranking; single best proposal per order UID; fat-Trampoline settlement crafting ([ADR-0002](docs/adr/0002-solver-engine.md)).
-2. **Proposal API** (`crates/byos`) — public HTTP, EIP-712-signed, **permissionless but collateral-gated**; `POST`/`GET`(metadata only)/`DELETE`; two-layer rate limiting ([ADR-0001](docs/adr/0001-proposal-api.md)).
+2. **Proposal API** (`crates/byos`) — public HTTP, EIP-712-signed, **permissionless but collateral-gated**; `POST`/`GET`(metadata only)/`DELETE`; two-layer rate limiting ([ADR-0001](docs/adr/0001-proposal-api.md)). Specified in [`crates/byos/openapi.yml`](crates/byos/openapi.yml).
 3. **Background workers** (`crates/byos`) — continuous simulation, settlement watcher + Track A debits, escrow-balance cache refresh, off-chain Track-B reserve tracking.
 4. **Reference sub-solver** (`crates/subsolver`) — example client and e2e-test counterpart.
 5. Plus: operational runbook + monitoring ([ADR-0008](docs/adr/0008-observability.md)).
