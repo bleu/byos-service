@@ -410,6 +410,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_price_converts_to_reference_semantics() {
+        // The endpoint answers native atoms per token atom; the client
+        // returns wei per 10^18 atoms (auction reference price).
+        let server = MockServer::start().await;
+        let token = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/token/{token:#x}/native_price")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"price": 0.5})),
+            )
+            .mount(&server)
+            .await;
+
+        let price = client_with(&server)
+            .await
+            .native_price(token)
+            .await
+            .expect("price should fetch");
+        assert_eq!(price, U256::from(500_000_000_000_000_000_u64));
+    }
+
+    #[tokio::test]
+    async fn unknown_token_price_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = client_with(&server)
+            .await
+            .native_price(Address::ZERO)
+            .await
+            .expect_err("404 should error");
+        assert!(matches!(err, OrderbookError::NotFound));
+    }
+
+    #[tokio::test]
     async fn unknown_order_is_not_found() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

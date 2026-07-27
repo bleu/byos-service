@@ -321,21 +321,22 @@ mod tests {
             .unwrap()
     }
 
-    struct RejectAll;
+    struct RejectAll(crate::domain::validator::RejectionReason);
 
     impl crate::domain::validator::ValidateProposal for RejectAll {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
         ) -> Option<crate::domain::validator::Verdict> {
-            Some(crate::domain::validator::Verdict::Reject(
-                crate::domain::validator::RejectionReason::InsufficientEscrow,
-            ))
+            Some(crate::domain::validator::Verdict::Reject(self.0))
         }
     }
 
-    #[tokio::test]
-    async fn rejected_proposal_exposes_reason_on_the_wire() {
+    /// POSTs a proposal, rejects it with `reason`, and returns the owner's
+    /// `GET /proposal/{id}` body.
+    async fn rejected_proposal_body(
+        reason: crate::domain::validator::RejectionReason,
+    ) -> serde_json::Value {
         let state = test_state();
         let app = public_router(state.clone());
         let signer = PrivateKeySigner::random();
@@ -344,13 +345,29 @@ mod tests {
         let response = post_proposal(&app, &body).await;
         let id = json_body(response).await["id"].as_u64().expect("id");
 
-        crate::infra::validation::run_tick(state.store(), &RejectAll, 0).await;
+        crate::infra::validation::run_tick(state.store(), &RejectAll(reason), 0).await;
 
         let header = read_auth_header(&signer, &state).await;
         let (status, body) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
         assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn rejected_proposal_exposes_reason_on_the_wire() {
+        let body =
+            rejected_proposal_body(crate::domain::validator::RejectionReason::InsufficientEscrow)
+                .await;
         assert_eq!(body["status"], "rejected");
         assert_eq!(body["rejectionReason"], "InsufficientEscrow");
+    }
+
+    #[tokio::test]
+    async fn unprofitable_rejection_exposes_reason_on_the_wire() {
+        let body =
+            rejected_proposal_body(crate::domain::validator::RejectionReason::Unprofitable).await;
+        assert_eq!(body["status"], "rejected");
+        assert_eq!(body["rejectionReason"], "Unprofitable");
     }
 
     #[tokio::test]

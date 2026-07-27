@@ -115,6 +115,12 @@ pub(crate) struct Args {
     /// simulation cost per proposal.
     #[arg(long, env, default_value_t = 300)]
     max_proposal_lifetime_secs: u64,
+
+    /// Profitability floor in wei (ADR-0013): the first simulation rejects
+    /// proposals whose score (`surplus + fee - gas`, ADR-0002) does not
+    /// exceed this. The default 0 mirrors /solve's own score > 0 rule.
+    #[arg(long, env, default_value_t = 0)]
+    min_proposal_score: u128,
 }
 
 /// Connection-string wrapper whose `Debug` hides the value, so the startup
@@ -274,7 +280,7 @@ async fn run_with(
             escrow_address,
             args.trampoline_factory,
             gas_price,
-            U256::ZERO,
+            U256::from(args.min_proposal_score),
         );
         let validator = ProposalValidator::new(escrow, simulation);
         crate::infra::validation::spawn(store, validator, period)
