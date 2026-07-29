@@ -93,11 +93,24 @@ pub async fn notify(
             // The submission was abandoned before any tx landed: the
             // proposal re-enters competition. If it actually settled (lost
             // notification), the next re-simulation kills it (ADR-0013).
+            // Winning and not settling is charged 0.1 × c_l (ADR-0003) —
+            // queue it once the transition commits, so a duplicate
+            // notification (stale CAS) cannot double-charge. A crash between
+            // the two under-penalizes; the reverse order could over-charge.
             "cancelled" | "expired" | "fail" if proposal.status == ProposalStatus::Executing => {
-                state
+                let result = state
                     .store()
                     .transition(proposal, ProposalStatus::Active)
-                    .await
+                    .await;
+                if result.is_ok()
+                    && let Err(e) = state.store().queue_non_settlement_penalty(proposal).await
+                {
+                    tracing::error!(
+                        id = %proposal.id, %e,
+                        "non-settlement penalty not queued; sub-solver goes uncharged"
+                    );
+                }
+                result
             }
             // An outcome kind whose proposal is not in the expected state:
             // the snapshot raced another transition (or a notification was
@@ -365,6 +378,62 @@ mod tests {
                 "{kind} must release the proposal back into competition"
             );
         }
+    }
+
+    /// Acceptance (COW-1205): a driver-confirmed abandonment ("won but never
+    /// settled", ADR-0003) queues the 0.1 × c_l non-settlement debit — the
+    /// proposal itself re-enters competition, so the pending charge lives in
+    /// the `penalties` queue, not in proposal state.
+    #[ignore]
+    #[tokio::test]
+    async fn abandoned_submission_queues_a_non_settlement_penalty() {
+        for kind in ["cancelled", "expired", "fail"] {
+            let state = test_state().await;
+            let app = internal_router(state.clone(), None);
+            let id = bid_proposal(&state, ProposalStatus::Executing).await;
+
+            assert_eq!(post_notify(&app, &notification(kind)).await, StatusCode::OK);
+
+            let pending = state
+                .store()
+                .pending_penalties()
+                .await
+                .expect("pending penalties");
+            assert_eq!(
+                pending.len(),
+                1,
+                "{kind} must queue exactly one non-settlement penalty"
+            );
+            assert_eq!(pending[0].proposal_id, id);
+            assert_eq!(pending[0].sub_solver, Address::repeat_byte(0x01));
+        }
+    }
+
+    /// A duplicate abandonment notification finds the proposal already
+    /// `Active` — the stale-outcome guard drops it, so the sub-solver is
+    /// not charged twice for one lost settlement.
+    #[ignore]
+    #[tokio::test]
+    async fn duplicate_abandonment_does_not_queue_a_second_penalty() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        let _id = bid_proposal(&state, ProposalStatus::Executing).await;
+
+        assert_eq!(
+            post_notify(&app, &notification("fail")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_notify(&app, &notification("fail")).await,
+            StatusCode::OK
+        );
+
+        let pending = state
+            .store()
+            .pending_penalties()
+            .await
+            .expect("pending penalties");
+        assert_eq!(pending.len(), 1, "one lost settlement, one charge");
     }
 
     /// The wire format is whatever `cowprotocol/services` sends — including

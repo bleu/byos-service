@@ -84,6 +84,10 @@ pub struct GetProposalResponse {
     /// the reverted tx for `settleFailed` (ADR-0013).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settlement_tx_hash: Option<String>,
+    /// Only present when `status` is `penalized`: the Track A escrow debit
+    /// tx that closed the `settleFailed` story (ADR-0003, COW-1205).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub penalty_tx_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

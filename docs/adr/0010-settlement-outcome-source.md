@@ -44,5 +44,5 @@ Get the outcome from the stock driver's `/notify` notifications. No fork, no cha
 - Missed-deadline detection is free, from the driver's `Expired`/`Cancelled` notifications.
 - Private submissions are covered, because the driver is the source.
 - Lost notifications are survivable for liveness: ADR-0013's executing-timeout returns the proposal to `Active`, and re-simulation reconciles reality. A lost `Revert` does cost the Track A debit for that settlement unless recovered by hand from the audit trail and chain — acceptable at expected volumes, revisit if it ever happens.
-- The "won the auction but chose not to settle" Track A case is out of scope here. It has no tx and comes from our own auction records (the `solutions` table now provides them).
+- The "won the auction and never settled" Track A case is notification-driven too: `Cancelled`/`Expired`/`Fail` on an `Executing` proposal confirms the abandonment (detection semantics pinned in [ADR-0003](0003-slash-attribution-flow.md)). No tx means no receipt read — the debit is a flat `0.1 × c_l`.
 - We are not using Shepherd for this. Written down so we do not revisit it.
