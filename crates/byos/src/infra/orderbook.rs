@@ -1,8 +1,8 @@
 //! Client for `GET /api/v1/orders/{uid}` on the CoW orderbook — the source
 //! of truth for the order a proposal settles (ADR-0012).
 //!
-//! Orders are immutable once placed, so successful fetches are cached for
-//! the process lifetime. Off-chain soft-cancellation is invisible to this
+//! Orders are immutable once placed, so successful fetches are cached, capped
+//! at [`CACHE_CAPACITY`]. Off-chain soft-cancellation is invisible to this
 //! client by design: the proposal's own expiry bounds the staleness window
 //! and the driver re-validates orders at settlement time.
 
@@ -48,20 +48,71 @@ pub trait FetchOrder: Send + Sync {
     ) -> impl Future<Output = Result<U256, OrderbookError>> + Send;
 }
 
-/// Client for one CoW orderbook instance, with a forever cache keyed by uid.
+/// Ceiling on cached orders.
+///
+/// Reaching it takes a collateralized signer: the escrow check runs before
+/// simulation and short-circuits, so only a sub-solver with a deposit gets far
+/// enough to populate this. But the deposit is refundable and ADR-0001's
+/// per-signer rate limit is not implemented yet, so one deposit currently buys
+/// unlimited distinct uids. Live orders number in the hundreds, so normal
+/// operation never comes near this.
+///
+/// Memory is the cheap half of that abuse — roughly 500 bytes an entry, so
+/// ~5 MB here — while each of those proposals also costs one `eth_estimateGas`
+/// per tick for up to `--max-proposal-lifetime`. This caps the footprint, not
+/// the RPC spend; the rate limiter is what would close that.
+const CACHE_CAPACITY: usize = 10_000;
+
+/// Client for one CoW orderbook instance, with a bounded cache keyed by uid.
 pub struct OrderbookClient {
     http: reqwest::Client,
     base_url: Url,
     cache: Mutex<HashMap<OrderUid, OrderRecord>>,
+    cache_capacity: usize,
 }
 
 impl OrderbookClient {
     pub fn new(base_url: Url) -> Self {
+        Self::with_cache_capacity(base_url, CACHE_CAPACITY)
+    }
+
+    fn with_cache_capacity(base_url: Url, cache_capacity: usize) -> Self {
         Self {
             http: reqwest::Client::new(),
             base_url,
             cache: Mutex::new(HashMap::new()),
+            cache_capacity,
         }
+    }
+
+    /// Cache an order, dropping everything first if the ceiling is reached.
+    ///
+    /// Clears rather than evicting the least-recently-used entry: orders are
+    /// immutable, so an eviction costs exactly one refetch, and recency
+    /// bookkeeping (plus the dependency to do it properly) is more machinery
+    /// than that buys. Skipping the insert instead would be worse — a one-shot
+    /// fill would wedge the cache permanently, where clearing re-caches the
+    /// legitimate working set within a tick.
+    ///
+    /// The cost being accepted: a signer sitting at capacity controls when the
+    /// clears happen, and a cleared cache means every live proposal refetches.
+    /// While the orderbook is healthy that is a few hundred requests spread
+    /// across a tick at the validator's concurrency bound. While it is
+    /// degraded, a fetch failure defers the proposal, so a well-timed clear
+    /// stalls activation until the orderbook recovers. A small LRU or a TTL
+    /// would blunt that; it needs the rate limiter more.
+    fn remember(&self, uid: &OrderUid, record: &OrderRecord) {
+        let mut cache = self.cache.lock();
+        // Refreshing an entry that is already present cannot grow the map, so
+        // it must not trigger a clear.
+        if cache.len() >= self.cache_capacity && !cache.contains_key(uid) {
+            tracing::warn!(
+                entries = cache.len(),
+                "orderbook cache at capacity; clearing"
+            );
+            cache.clear();
+        }
+        cache.insert(uid.clone(), record.clone());
     }
 }
 
@@ -103,7 +154,7 @@ impl FetchOrder for OrderbookClient {
             .map_err(|e| OrderbookError::Transient(e.to_string()))?;
         let record = dto.into_record();
 
-        self.cache.lock().insert(uid.clone(), record.clone());
+        self.remember(uid, &record);
         Ok(record)
     }
 
@@ -391,7 +442,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caches_orders_forever() {
+    async fn cache_clears_instead_of_growing_past_its_ceiling() {
+        let server = MockServer::start().await;
+        // Any uid answers with the same order body; only cache size matters.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(real_order_json()))
+            .mount(&server)
+            .await;
+        // Driven through `order()` rather than the private helper, so a change
+        // that caches without consulting the ceiling fails here.
+        let client = OrderbookClient::with_cache_capacity(server.uri().parse().unwrap(), 2);
+
+        let uid = |n: u8| {
+            let mut bytes = [0u8; 56];
+            bytes[0] = n;
+            OrderUid(bytes)
+        };
+
+        client.order(&uid(1)).await.expect("first");
+        client.order(&uid(2)).await.expect("second");
+        assert_eq!(
+            client.cache.lock().len(),
+            2,
+            "distinct uids cache up to the ceiling"
+        );
+
+        // Re-fetching a cached uid is a hit and must not trip the clear.
+        client.order(&uid(1)).await.expect("cached");
+        assert_eq!(
+            client.cache.lock().len(),
+            2,
+            "a cache hit must not clear the map"
+        );
+
+        // The uid that trips the ceiling drops the rest and is kept itself, so
+        // the caller that just paid for a fetch still gets a hit.
+        client.order(&uid(3)).await.expect("third");
+        let cache = client.cache.lock();
+        assert_eq!(cache.len(), 1, "reaching the ceiling clears the cache");
+        assert!(
+            cache.contains_key(&uid(3)),
+            "the order that tripped the ceiling must survive the clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn caches_orders_to_avoid_a_second_fetch() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(real_order_json()))

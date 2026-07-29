@@ -66,6 +66,10 @@ pub struct SimulationValidator<P, O> {
     min_score: U256,
     /// Cached trampoline addresses: sub_solver → trampoline. Persistent across
     /// ticks (trampoline addresses are deterministic and never change).
+    ///
+    /// Also unbounded, and keyed by a value the submitter chooses. Left as is:
+    /// entries are two addresses, so the same abuse that fills the order cache
+    /// costs 40 bytes here against ~500 there.
     trampoline_cache: Mutex<HashMap<Address, Address>>,
     /// Cached `settlement.authenticator()`, resolved on first use.
     authenticator: Mutex<Option<Address>>,
@@ -190,8 +194,8 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
 
 impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationValidator<P, O> {
     async fn validate(&self, proposal: &Proposal) -> Option<Verdict> {
-        // 1. Fetch the order (cheap after first fetch — forever cache) and check the
-        //    envelope before spending any RPC calls.
+        // 1. Fetch the order (cheap after the first fetch — bounded cache) and check
+        //    the envelope before spending any RPC calls.
         let record = match self.orderbook.order(&proposal.order_uid).await {
             Ok(record) => record,
             Err(OrderbookError::NotFound) => {
