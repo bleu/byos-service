@@ -91,13 +91,17 @@ pub async fn create_proposal(
     tracing::info!(%sub_solver, "proposal signature verified");
 
     // 6. Reject proposals that are already expired — no point accepting,
-    // storing, and auditing a DOA proposal (ADR-0001).
+    // storing, and auditing a DOA proposal (ADR-0001) — or that outlive the
+    // lifetime cap, which bounds simulation cost per proposal (ADR-0013).
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_secs();
     if valid_until < U256::from(now) {
         return Err(Error::from(Kind::ProposalExpired));
+    }
+    if valid_until > U256::from(now.saturating_add(state.max_proposal_lifetime_secs())) {
+        return Err(Error::from(Kind::ProposalLifetimeExceeded));
     }
 
     // 7. Store as Submitted. The background validator picks it up and flips
@@ -232,15 +236,18 @@ pub async fn cancel_proposal(
     let signer = eip712::recover_canceller(&signature, state.domain(), U256::from(id.0))
         .map_err(|_| Error::from(Kind::SignatureRecoveryFailed))?;
 
-    // 3. Cancel the proposal (store checks ownership).
+    // 3. Cancel the proposal (store checks ownership). Non-owners get the
+    // same 404 as a genuine miss — a 403 would be an existence oracle for
+    // proposal ids, the thing ADR-0011's owner-scoped 404 exists to prevent.
     use crate::infra::storage::StoreError;
     state
         .store()
         .cancel(id, signer)
         .await
         .map_err(|e| match e {
-            StoreError::NotFound(_) => Error::from(Kind::ProposalNotFound),
-            StoreError::NotOwner(_, _) => Error::from(Kind::NotProposalOwner),
+            StoreError::NotFound(_) | StoreError::NotOwner(_, _) => {
+                Error::from(Kind::ProposalNotFound)
+            }
             StoreError::StaleTransition { .. } => Error::from(Kind::ProposalNotCancellable),
             e => internal(e),
         })?;

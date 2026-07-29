@@ -120,6 +120,18 @@ pub(crate) struct Args {
     /// window, not of a block.
     #[arg(long, env, default_value_t = 300)]
     retention_sweep_interval_secs: u64,
+
+    /// Maximum proposal lifetime in seconds (ADR-0013): `POST /proposals`
+    /// rejects any `validUntil` further out than this. Bounds the worst-case
+    /// simulation cost per proposal.
+    #[arg(long, env, default_value_t = 300)]
+    max_proposal_lifetime_secs: u64,
+
+    /// Profitability floor in wei (ADR-0013): the first simulation rejects
+    /// proposals whose score (`surplus + fee - gas`, ADR-0002) does not
+    /// exceed this. The default 0 mirrors /solve's own score > 0 rule.
+    #[arg(long, env, default_value_t = 0)]
+    min_proposal_score: u128,
 }
 
 /// Connection-string wrapper whose `Debug` hides the value, so the startup
@@ -230,7 +242,12 @@ async fn run_with(
 
     let default_gas_price = args.default_gas_price.unwrap_or(0);
     let gas_price = Arc::new(AtomicU64::new(default_gas_price));
-    let state = AppState::new(store.clone(), domain, gas_price.clone());
+    let state = AppState::new(
+        store.clone(),
+        domain,
+        gas_price.clone(),
+        args.max_proposal_lifetime_secs,
+    );
 
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
 
@@ -268,7 +285,7 @@ async fn run_with(
             provider.clone(),
             escrow_address,
             U256::from(min_collateral),
-            gas_price,
+            gas_price.clone(),
         );
         let orderbook = crate::infra::orderbook::OrderbookClient::new(
             args.orderbook_url.expect("clap requires_all guarantees it"),
@@ -279,6 +296,8 @@ async fn run_with(
             settlement_address,
             escrow_address,
             args.trampoline_factory,
+            gas_price,
+            U256::from(args.min_proposal_score),
         );
         let validator = ProposalValidator::new(escrow, simulation);
         crate::infra::validation::spawn(store, validator, period)

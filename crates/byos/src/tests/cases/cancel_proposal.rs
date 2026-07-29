@@ -42,7 +42,7 @@ async fn owner_cancel_round_trip() {
 
 #[ignore]
 #[tokio::test]
-async fn non_owner_cancel_is_forbidden() {
+async fn non_owner_cancel_is_masked_as_not_found() {
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;
     let owner = PrivateKeySigner::random();
@@ -51,10 +51,12 @@ async fn non_owner_cancel_is_forbidden() {
     let (_, created) = app.post_json("/proposals", &body).await;
     let id = created["id"].as_u64().expect("response must carry an id");
 
+    // Same 404 as a genuine miss — a 403 would let anyone with a valid
+    // CancelProposal signature probe which ids exist (ADR-0011).
     let sig = setup::cancel_signature(&intruder, id).await;
     let (status, err) = app.delete(&format!("/proposal/{id}"), Some(&sig)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["kind"], "NotProposalOwner");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(err["kind"], "ProposalNotFound");
 
     // The proposal is untouched (still awaiting the parked validator).
     let auth = setup::read_auth_signature(&owner).await;

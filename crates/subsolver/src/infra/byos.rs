@@ -178,7 +178,6 @@ pub enum Kind {
     InsufficientEscrow,
     ProposalExpired,
     ProposalNotFound,
-    NotProposalOwner,
     ProposalNotCancellable,
     BadRequest,
     Internal,

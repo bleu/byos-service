@@ -37,6 +37,15 @@ pub trait FetchOrder: Send + Sync {
         &self,
         uid: &OrderUid,
     ) -> impl Future<Output = Result<OrderRecord, OrderbookError>> + Send;
+
+    /// Fetches the token's native price with auction reference-price
+    /// semantics: how much wei buys 10^18 atoms of the token
+    /// (`ScoreInput::native_price`). `NotFound` means the orderbook cannot
+    /// price the token.
+    fn native_price(
+        &self,
+        token: Address,
+    ) -> impl Future<Output = Result<U256, OrderbookError>> + Send;
 }
 
 /// Client for one CoW orderbook instance, with a forever cache keyed by uid.
@@ -96,6 +105,51 @@ impl FetchOrder for OrderbookClient {
 
         self.cache.lock().insert(uid.clone(), record.clone());
         Ok(record)
+    }
+
+    /// Fetches `GET /api/v1/token/{token}/native_price`. The endpoint answers
+    /// `{"price": <f64>}` in native atoms per token atom; the auction
+    /// reference price is that times 10^18. Not cached — prices move, and the
+    /// profitability gate only calls this once per proposal (first
+    /// simulation).
+    async fn native_price(&self, token: Address) -> Result<U256, OrderbookError> {
+        let url = format!(
+            "{}/api/v1/token/{token:#x}/native_price",
+            self.base_url.as_str().trim_end_matches('/'),
+        );
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| OrderbookError::Transient(e.to_string()))?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(OrderbookError::NotFound);
+        }
+        if !response.status().is_success() {
+            return Err(OrderbookError::Transient(format!(
+                "unexpected status {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct PriceDto {
+            price: f64,
+        }
+        let dto: PriceDto = response
+            .json()
+            .await
+            .map_err(|e| OrderbookError::Transient(e.to_string()))?;
+        if !dto.price.is_finite() || dto.price < 0.0 {
+            return Err(OrderbookError::Transient(format!(
+                "unusable native price {}",
+                dto.price
+            )));
+        }
+        // f64→u128 `as` saturates, so absurd prices clamp instead of wrapping.
+        Ok(U256::from((dto.price * 1e18) as u128))
     }
 }
 
@@ -353,6 +407,44 @@ mod tests {
             cached.order.sell_amount,
             U256::from(20_000_002_675_677_095_795_u128)
         );
+    }
+
+    #[tokio::test]
+    async fn native_price_converts_to_reference_semantics() {
+        // The endpoint answers native atoms per token atom; the client
+        // returns wei per 10^18 atoms (auction reference price).
+        let server = MockServer::start().await;
+        let token = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/token/{token:#x}/native_price")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"price": 0.5})),
+            )
+            .mount(&server)
+            .await;
+
+        let price = client_with(&server)
+            .await
+            .native_price(token)
+            .await
+            .expect("price should fetch");
+        assert_eq!(price, U256::from(500_000_000_000_000_000_u64));
+    }
+
+    #[tokio::test]
+    async fn unknown_token_price_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = client_with(&server)
+            .await
+            .native_price(Address::ZERO)
+            .await
+            .expect_err("404 should error");
+        assert!(matches!(err, OrderbookError::NotFound));
     }
 
     #[tokio::test]
