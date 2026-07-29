@@ -69,8 +69,8 @@ impl ProposalStore {
             "INSERT INTO proposals (sub_solver, order_uid, order_uid_hash, sell_amount, \
              buy_amount, sell_token, buy_token, interactions, interactions_hash, valid_until, \
              nonce, signature, status, rejection_reason, gas_used, trampoline, \
-             settlement_tx_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
-             $14, $15, $16, $17) RETURNING id",
+             settlement_tx_hash, penalty_tx_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, \
+             $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id",
         )
         .bind(format!("{:#x}", proposal.sub_solver))
         .bind(proposal.order_uid.to_string())
@@ -93,6 +93,7 @@ impl ProposalStore {
         )
         .bind(proposal.trampoline.map(|t| format!("{t:#x}")))
         .bind(proposal.settlement_tx_hash.map(|t| format!("{t:#x}")))
+        .bind(proposal.penalty_tx_hash.map(|t| format!("{t:#x}")))
         .fetch_one(&self.pool)
         .await?;
 
@@ -187,6 +188,46 @@ impl ProposalStore {
                 to,
                 rejection_reason: None,
                 settlement_tx_hash: Some(settlement_tx_hash),
+            },
+        });
+        Ok(())
+    }
+
+    /// Record a landed Track A escrow debit (ADR-0003, COW-1205):
+    /// `SettleFailed` → `Penalized`, citing the debit transaction and its
+    /// amount as evidence. Same compare-and-swap semantics as
+    /// [`Self::transition`].
+    pub async fn record_penalty(
+        &self,
+        proposal: &Proposal,
+        amount: U256,
+        penalty_tx_hash: B256,
+    ) -> Result<(), StoreError> {
+        let from = proposal.status;
+        let result = sqlx::query(
+            "UPDATE proposals SET status = $3, penalty_tx_hash = $4, status_changed_at = now() \
+             WHERE id = $1 AND status = $2",
+        )
+        .bind(as_db_id(proposal.id))
+        .bind(from.to_string())
+        .bind(ProposalStatus::Penalized.to_string())
+        .bind(format!("{penalty_tx_hash:#x}"))
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(self.stale_or_missing(proposal.id, from.to_string()).await);
+        }
+
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::Penalized {
+                proposal_id: proposal.id,
+                sub_solver: proposal.sub_solver,
+                order_uid: proposal.order_uid.clone(),
+                amount,
+                settlement_tx_hash: proposal.settlement_tx_hash,
+                penalty_tx_hash,
             },
         });
         Ok(())
@@ -405,10 +446,10 @@ impl ProposalStore {
 
     /// Delete dropped-tier proposals (`Rejected`/`SimFailed`/`Expired`/
     /// `Cancelled`) that reached their terminal state more than `older_than`
-    /// ago; returns how many were deleted. The money states (`Settled`, and
-    /// later `SettleFailed`/`Penalized`) are never swept, and `audit_events`
-    /// is never touched — the proposal's history outlives its row
-    /// (ADR-0013).
+    /// ago; returns how many were deleted. The money states
+    /// (`Settled`/`SettleFailed`/`Penalized`) are never swept, and
+    /// `audit_events` is never touched — the proposal's history outlives
+    /// its row (ADR-0013).
     pub async fn sweep_dropped(&self, older_than: Duration) -> Result<u64, StoreError> {
         const DROPPED: [ProposalStatus; 4] = [
             ProposalStatus::Rejected,
@@ -525,6 +566,79 @@ impl ProposalStore {
         rows.into_iter().map(Proposal::try_from).collect()
     }
 
+    /// Queue the 0.1 × c_l non-settlement charge for a proposal whose won
+    /// settlement was abandoned (ADR-0003, COW-1205). Called by `/notify`
+    /// after the `Executing` → `Active` transition commits — the CAS there
+    /// is what makes one lost settlement queue exactly one charge.
+    pub async fn queue_non_settlement_penalty(
+        &self,
+        proposal: &Proposal,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO penalties (proposal_id, sub_solver, order_uid) VALUES ($1, $2, $3)",
+        )
+        .bind(as_db_id(proposal.id))
+        .bind(format!("{:#x}", proposal.sub_solver))
+        .bind(proposal.order_uid.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every queued non-settlement charge not yet debited — the penalty
+    /// loop's per-tick working set.
+    pub async fn pending_penalties(
+        &self,
+    ) -> Result<Vec<crate::domain::penalty::PendingPenalty>, StoreError> {
+        let rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
+            "SELECT id, proposal_id, sub_solver, order_uid FROM penalties WHERE penalty_tx_hash \
+             IS NULL ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(id, proposal_id, sub_solver, order_uid)| {
+                Ok(crate::domain::penalty::PendingPenalty {
+                    id,
+                    proposal_id: ProposalId(
+                        u64::try_from(proposal_id).map_err(|e| corrupt("proposal_id", e))?,
+                    ),
+                    sub_solver: sub_solver.parse().map_err(|e| corrupt("sub_solver", e))?,
+                    order_uid: order_uid.parse().map_err(|e| corrupt("order_uid", e))?,
+                })
+            })
+            .collect()
+    }
+
+    /// Record a landed non-settlement debit: fills the `penalties` row's
+    /// `penalty_tx_hash` (leaving the pending queue) and emits the charge as
+    /// evidence. The proposal row is untouched — it is `Active` again and
+    /// still competing.
+    pub async fn record_non_settlement_debit(
+        &self,
+        penalty: &crate::domain::penalty::PendingPenalty,
+        amount: U256,
+        penalty_tx_hash: B256,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE penalties SET penalty_tx_hash = $2 WHERE id = $1")
+            .bind(penalty.id)
+            .bind(format!("{penalty_tx_hash:#x}"))
+            .execute(&self.pool)
+            .await?;
+
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::NonSettlementDebited {
+                proposal_id: penalty.proposal_id,
+                sub_solver: penalty.sub_solver,
+                order_uid: penalty.order_uid.clone(),
+                amount,
+                penalty_tx_hash,
+            },
+        });
+        Ok(())
+    }
+
     /// Record which proposal a returned solution was built on — the join key
     /// for driver `/notify` attribution (ADR-0013). `/solve` calls this
     /// before returning the solution: if we can't record it, we don't bid
@@ -601,10 +715,10 @@ fn status_names(statuses: &[ProposalStatus]) -> Vec<String> {
 // Row codec
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_COLUMNS: &str = "id, sub_solver, order_uid, order_uid_hash, sell_amount, \
-                                buy_amount, sell_token, buy_token, interactions, \
-                                interactions_hash, valid_until, nonce, signature, status, \
-                                rejection_reason, gas_used, trampoline, settlement_tx_hash";
+const PROPOSAL_COLUMNS: &str =
+    "id, sub_solver, order_uid, order_uid_hash, sell_amount, buy_amount, sell_token, buy_token, \
+     interactions, interactions_hash, valid_until, nonce, signature, status, rejection_reason, \
+     gas_used, trampoline, settlement_tx_hash, penalty_tx_hash";
 
 /// The raw column values; [`Proposal::try_from`] parses them back into
 /// domain types. A parse failure means a corrupt row (we wrote these
@@ -629,6 +743,7 @@ struct ProposalRow {
     gas_used: Option<i64>,
     trampoline: Option<String>,
     settlement_tx_hash: Option<String>,
+    penalty_tx_hash: Option<String>,
 }
 
 /// Wrap a column parse failure as a database error.
@@ -689,6 +804,11 @@ impl TryFrom<ProposalRow> for Proposal {
                 .map(|t| t.parse::<B256>())
                 .transpose()
                 .map_err(|e| corrupt("settlement_tx_hash", e))?,
+            penalty_tx_hash: row
+                .penalty_tx_hash
+                .map(|t| t.parse::<B256>())
+                .transpose()
+                .map_err(|e| corrupt("penalty_tx_hash", e))?,
         })
     }
 }
@@ -891,6 +1011,89 @@ mod tests {
         let event = audit.try_recv().expect("transition should emit an event");
         assert_eq!(event.proposal_id(), id);
         assert_eq!(event.event_type(), "expired");
+    }
+
+    /// Acceptance (COW-1205): the audit trail records the debit with its
+    /// amount and both transaction hashes — the dispute evidence for a
+    /// Track A charge.
+    #[ignore]
+    #[tokio::test]
+    async fn record_penalty_emits_the_debit_evidence() {
+        let (store, mut audit) = test_store().await;
+        let settlement_tx = alloy::primitives::b256!(
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        );
+        let penalty_tx = alloy::primitives::b256!(
+            "7777777777777777777777777777777777777777777777777777777777777777"
+        );
+        let mut proposal = test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::SettleFailed);
+        proposal.settlement_tx_hash = Some(settlement_tx);
+        let id = store.insert(proposal).await.expect("insert");
+        let _received = audit.try_recv().expect("insert event");
+
+        let stored = store.get(id).await.expect("get").expect("exists");
+        store
+            .record_penalty(
+                &stored,
+                alloy::primitives::U256::from(16_000_000_000_000_000u64),
+                penalty_tx,
+            )
+            .await
+            .expect("debit landed");
+
+        let event = audit.try_recv().expect("penalty should emit an event");
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.sub_solver(), SOLVER_A);
+        assert_eq!(event.event_type(), "penalized");
+        assert_eq!(
+            event.settlement_tx_hash(),
+            Some(settlement_tx),
+            "the indexed evidence column cites the reverted settlement (Track B attribution)"
+        );
+        let payload = event.payload();
+        assert_eq!(payload["amount"], "16000000000000000");
+        assert_eq!(payload["penaltyTxHash"], format!("{penalty_tx:#x}"));
+        assert_eq!(payload["settlementTxHash"], format!("{settlement_tx:#x}"));
+    }
+
+    /// Acceptance (COW-1205): the non-settlement charge is audited with its
+    /// amount and debit tx, attributed to the proposal and sub-solver.
+    #[ignore]
+    #[tokio::test]
+    async fn record_non_settlement_debit_emits_the_charge_evidence() {
+        let (store, mut audit) = test_store().await;
+        let penalty_tx = alloy::primitives::b256!(
+            "7777777777777777777777777777777777777777777777777777777777777777"
+        );
+        let id = store
+            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .await
+            .expect("insert");
+        let _received = audit.try_recv().expect("insert event");
+        let stored = store.get(id).await.expect("get").expect("exists");
+        store
+            .queue_non_settlement_penalty(&stored)
+            .await
+            .expect("queue");
+        let pending = store.pending_penalties().await.expect("pending");
+
+        store
+            .record_non_settlement_debit(
+                &pending[0],
+                alloy::primitives::U256::from(1_000_000_000_000_000u64),
+                penalty_tx,
+            )
+            .await
+            .expect("debit landed");
+
+        let event = audit.try_recv().expect("debit should emit an event");
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.sub_solver(), SOLVER_A);
+        assert_eq!(*event.order_uid(), test_order_uid());
+        assert_eq!(event.event_type(), "non_settlement_debited");
+        let payload = event.payload();
+        assert_eq!(payload["amount"], "1000000000000000");
+        assert_eq!(payload["penaltyTxHash"], format!("{penalty_tx:#x}"));
     }
 
     #[ignore]

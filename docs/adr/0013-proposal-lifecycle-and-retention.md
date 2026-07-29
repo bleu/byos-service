@@ -92,7 +92,7 @@ BYOS implements the solver-engine `/notify` endpoint and maps notifications to t
 | `SettlementStarted` | `Active → Executing` |
 | `Success { transaction }` | `Executing → Settled` (tx hash recorded) |
 | `Revert { transaction }` | `Executing → SettleFailed` (tx hash recorded; Track A follows, ADR-0010) |
-| `Cancelled`, `Expired`, `Fail` | `Executing → Active` — the tx never landed; the proposal re-enters competition |
+| `Cancelled`, `Expired`, `Fail` | `Executing → Active` — the tx never landed; the proposal re-enters competition. Queues the `0.1 × c_l` non-settlement debit ([ADR-0003](0003-slash-attribution-flow.md)) |
 | pre-submission kinds (`SimulationFailed`, `EmptySolution`, ...) | no transition; recorded as audit events |
 
 `Executing` is entered on `SettlementStarted`, not at `/solve` time — at `/solve` time we don't yet know we won. The window between the autopilot picking our solution and `SettlementStarted` arriving is accepted: it is sub-second-to-seconds, and inventing a "won but not yet submitting" state isn't worth it.

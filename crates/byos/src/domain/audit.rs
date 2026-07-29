@@ -54,6 +54,34 @@ pub enum AuditKind {
         /// (ADR-0010).
         settlement_tx_hash: Option<B256>,
     },
+    /// The Track A escrow debit landed (ADR-0003, COW-1205): `SettleFailed`
+    /// → `Penalized`. Richer than a plain [`AuditKind::StatusChanged`]
+    /// because the charge itself is the evidence — the amount and the debit
+    /// tx must survive any dispute.
+    Penalized {
+        proposal_id: ProposalId,
+        sub_solver: Address,
+        order_uid: OrderUid,
+        /// The debit in wei: settlement gas cost + `c_l`.
+        amount: alloy::primitives::U256,
+        /// The reverted settlement the debit charges for — also the
+        /// on-chain `reason` of the `Escrow.debit` call.
+        settlement_tx_hash: Option<B256>,
+        /// The landed debit transaction.
+        penalty_tx_hash: B256,
+    },
+    /// A landed non-settlement debit (ADR-0003, COW-1205): the sub-solver
+    /// won an auction and the settlement was abandoned. No transition — the
+    /// proposal is `Active` again — so the charge is its own event.
+    NonSettlementDebited {
+        proposal_id: ProposalId,
+        sub_solver: Address,
+        order_uid: OrderUid,
+        /// The debit in wei: 0.1 × `c_l`.
+        amount: alloy::primitives::U256,
+        /// The landed debit transaction.
+        penalty_tx_hash: B256,
+    },
     /// A driver notification that carries no transition (pre-submission
     /// kinds like `emptySolution`), attributed to the proposal it was about
     /// — evidence of the driver's view of our solution (ADR-0013).
@@ -74,6 +102,8 @@ impl AuditEvent {
             AuditKind::Received { proposal } => proposal.id,
             AuditKind::Cancelled { proposal_id, .. }
             | AuditKind::StatusChanged { proposal_id, .. }
+            | AuditKind::Penalized { proposal_id, .. }
+            | AuditKind::NonSettlementDebited { proposal_id, .. }
             | AuditKind::DriverNotified { proposal_id, .. } => *proposal_id,
         }
     }
@@ -83,6 +113,8 @@ impl AuditEvent {
             AuditKind::Received { proposal } => proposal.sub_solver,
             AuditKind::Cancelled { sub_solver, .. }
             | AuditKind::StatusChanged { sub_solver, .. }
+            | AuditKind::Penalized { sub_solver, .. }
+            | AuditKind::NonSettlementDebited { sub_solver, .. }
             | AuditKind::DriverNotified { sub_solver, .. } => *sub_solver,
         }
     }
@@ -92,6 +124,9 @@ impl AuditEvent {
     pub fn settlement_tx_hash(&self) -> Option<B256> {
         match &self.kind {
             AuditKind::StatusChanged {
+                settlement_tx_hash, ..
+            }
+            | AuditKind::Penalized {
                 settlement_tx_hash, ..
             } => *settlement_tx_hash,
             _ => None,
@@ -103,6 +138,8 @@ impl AuditEvent {
             AuditKind::Received { proposal } => &proposal.order_uid,
             AuditKind::Cancelled { order_uid, .. }
             | AuditKind::StatusChanged { order_uid, .. }
+            | AuditKind::Penalized { order_uid, .. }
+            | AuditKind::NonSettlementDebited { order_uid, .. }
             | AuditKind::DriverNotified { order_uid, .. } => order_uid,
         }
     }
@@ -114,6 +151,8 @@ impl AuditEvent {
         match self.kind {
             AuditKind::Received { .. } => "received",
             AuditKind::Cancelled { .. } => "cancelled",
+            AuditKind::Penalized { .. } => "penalized",
+            AuditKind::NonSettlementDebited { .. } => "non_settlement_debited",
             AuditKind::DriverNotified { .. } => "driver_notified",
             // Named for the transition's meaning, not the raw status, so a
             // dispute query reads as a verb history.
@@ -145,6 +184,31 @@ impl AuditEvent {
             AuditKind::Received { proposal } => received_payload(proposal),
             AuditKind::Cancelled { .. } => serde_json::json!({}),
             AuditKind::DriverNotified { kind, .. } => serde_json::json!({ "kind": kind }),
+            AuditKind::NonSettlementDebited {
+                amount,
+                penalty_tx_hash,
+                ..
+            } => serde_json::json!({
+                "amount": amount.to_string(),
+                "penaltyTxHash": penalty_tx_hash,
+            }),
+            AuditKind::Penalized {
+                amount,
+                settlement_tx_hash,
+                penalty_tx_hash,
+                ..
+            } => {
+                let mut payload = serde_json::json!({
+                    "from": ProposalStatus::SettleFailed,
+                    "to": ProposalStatus::Penalized,
+                    "amount": amount.to_string(),
+                    "penaltyTxHash": penalty_tx_hash,
+                });
+                if let Some(tx) = settlement_tx_hash {
+                    payload["settlementTxHash"] = serde_json::json!(tx);
+                }
+                payload
+            }
             AuditKind::StatusChanged {
                 from,
                 to,
@@ -225,6 +289,7 @@ mod tests {
             gas_used: None,
             trampoline: None,
             settlement_tx_hash: None,
+            penalty_tx_hash: None,
         };
         AuditEvent {
             occurred_at: SystemTime::now(),

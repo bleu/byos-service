@@ -139,8 +139,9 @@ paths:
       summary: Get one of the caller's proposals.
       description: |
         Returns the proposal's amounts, status, and, depending on `status`,
-        the machine-readable `rejectionReason` (`rejected`) or the
-        `settlementTxHash` (`settled`/`settleFailed`/`penalized`). The
+        the machine-readable `rejectionReason` (`rejected`), the
+        `settlementTxHash` (`settled`/`settleFailed`/`penalized`), or the
+        `penaltyTxHash` (`penalized`). The
         submitted `interactions`, `nonce`, and `signature` are not echoed
         back.
         Owner-scoped: the proposal is only returned if the `X-Signature`
@@ -341,7 +342,7 @@ components:
           `settlementTxHash`.
         - `settleFailed` — the settlement reverted on-chain (see
           `settlementTxHash`); the Track A escrow debit follows.
-        - `penalized` — the Track A debit landed.
+        - `penalized` — the Track A debit landed; see `penaltyTxHash`.
         - `simFailed` — the settlement simulation reverted.
         - `cancelled` — cancelled by a signed `DELETE`.
 
@@ -497,6 +498,14 @@ components:
           type: string
           pattern: "^0x[0-9a-f]{64}$"
           example: "0x2d6cea6413a3b2e37a1a5c1780e17dee056bd63c2fd0fd60d75bfa9ea38e2e28"
+        penaltyTxHash:
+          description: |
+            Only present when `status` is `penalized`: the Track A escrow
+            debit transaction that charged the sub-solver `gas + c_l` for
+            the reverted settlement (ADR-0003).
+          type: string
+          pattern: "^0x[0-9a-f]{64}$"
+          example: "0x7b1f3a9c5d8e2f4a6b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a"
     ProposalMetadata:
       description: |
         Metadata only — no amounts, no interactions. List views never expose

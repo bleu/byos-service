@@ -139,6 +139,14 @@ pub(crate) struct Args {
     /// exceed this. The default 0 mirrors /solve's own score > 0 rule.
     #[arg(long, env, default_value_t = 0)]
     min_proposal_score: u128,
+
+    /// Private key of the escrow operator account (`OPERATOR_ROLE` on the
+    /// Escrow contract), enabling the Track A penalty loop (ADR-0003,
+    /// COW-1205). When omitted, debits are disabled and `SettleFailed`
+    /// proposals wait. Prefer the OPERATOR_PRIVATE_KEY env var — CLI
+    /// arguments are visible to other users via `ps`.
+    #[arg(long, env, requires = "rpc_url")]
+    operator_private_key: Option<OperatorPrivateKey>,
 }
 
 /// Connection-string wrapper whose `Debug` hides the value, so the startup
@@ -155,6 +163,26 @@ struct RpcUrl(String);
 /// redact themselves).
 #[derive(Clone)]
 struct SolveBearerToken(String);
+
+/// Operator-key wrapper whose `Debug` hides the value (ADR-0006: secrets
+/// redact themselves). Parses at arg time so a malformed key fails startup,
+/// not the first debit.
+#[derive(Clone)]
+struct OperatorPrivateKey(alloy::signers::local::PrivateKeySigner);
+
+impl std::str::FromStr for OperatorPrivateKey {
+    type Err = alloy::signers::local::LocalSignerError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.parse()?))
+    }
+}
+
+impl std::fmt::Debug for OperatorPrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
 
 impl std::str::FromStr for SolveBearerToken {
     type Err = std::convert::Infallible;
@@ -266,6 +294,8 @@ async fn run_with(
         args.dropped_retention,
     );
 
+    let mut penalty_loop = None;
+
     // Background validator (ADR-0001, async ingestion). When --rpc-url is
     // set, the composite ProposalValidator gates proposals via on-chain escrow
     // balance checks and settlement simulation. Without an RPC endpoint the
@@ -279,7 +309,30 @@ async fn run_with(
         let settlement_address = args.settlement_address.unwrap();
 
         let url: reqwest::Url = rpc_url.0.parse().context("invalid --rpc-url")?;
-        let provider = alloy::providers::ProviderBuilder::new().connect_http(url);
+        let provider = alloy::providers::ProviderBuilder::new().connect_http(url.clone());
+
+        // Track A penalty loop (ADR-0003, COW-1205): debits SettleFailed
+        // reverts and queued non-settlement charges from escrow. Without the
+        // operator key the service still observes outcomes; the debits just
+        // wait for an operator-enabled instance.
+        penalty_loop = if let Some(operator_key) = args.operator_private_key {
+            let operator_provider = alloy::providers::ProviderBuilder::new()
+                .wallet(operator_key.0)
+                .connect_http(url);
+            let operator = crate::infra::blockchain::operator::EscrowOperator::new(
+                operator_provider,
+                escrow_address,
+            );
+            Some(crate::infra::penalty::spawn(
+                store.clone(),
+                operator,
+                period,
+                U256::from(min_collateral),
+            ))
+        } else {
+            tracing::warn!("no --operator-private-key provided, Track A debits disabled");
+            None
+        };
 
         // Fail-fast: verify the RPC endpoint is reachable before accepting
         // any proposals that would need escrow checks.
@@ -329,13 +382,17 @@ async fn run_with(
     .await
     .context("API server exited with error")?;
 
-    // The validation and retention loops hold the store — and with it an
-    // audit sender — so stop them first, or the writer's channel never
-    // closes and the drain below hangs. A verdict lost mid-tick to the
-    // abort is redone by the first tick after the next boot — proposals are
-    // durable now. Then awaiting the writer flushes everything still queued.
+    // The validation, retention, and penalty loops hold the store — and
+    // with it an audit sender — so stop them first, or the writer's channel
+    // never closes and the drain below hangs. A verdict or debit lost
+    // mid-tick to the abort is redone by the first tick after the next boot
+    // — proposals and pending penalties are durable. Then awaiting the
+    // writer flushes everything still queued.
     validation_loop.abort();
     retention_loop.abort();
+    if let Some(penalty_loop) = penalty_loop {
+        penalty_loop.abort();
+    }
     writer.await.context("audit writer task panicked")
 }
 

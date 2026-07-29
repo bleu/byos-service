@@ -128,6 +128,9 @@ pub struct Proposal {
     /// (ADR-0013): the landed tx for `Settled`, the reverted tx for
     /// `SettleFailed`.
     pub settlement_tx_hash: Option<B256>,
+    /// The Track A escrow debit that closed a `SettleFailed` story
+    /// (ADR-0003): set on the `SettleFailed` → `Penalized` transition.
+    pub penalty_tx_hash: Option<B256>,
 }
 
 /// Test fixture: a minimal proposal in the given status.
@@ -157,5 +160,6 @@ pub(crate) fn test_proposal(
         gas_used: None,
         trampoline: None,
         settlement_tx_hash: None,
+        penalty_tx_hash: None,
     }
 }

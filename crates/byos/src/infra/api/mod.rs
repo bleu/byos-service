@@ -639,6 +639,46 @@ mod tests {
         assert_eq!(json["buyAmount"], "990000");
     }
 
+    /// Acceptance (COW-1205): once the Track A debit lands, the owner's GET
+    /// shows `penalized` and cites the debit tx.
+    #[ignore]
+    #[tokio::test]
+    async fn penalized_proposal_exposes_the_penalty_tx_on_owner_get() {
+        let state = test_state().await;
+        let owner = alloy::signers::local::PrivateKeySigner::random();
+        let mut proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            owner.address(),
+            ProposalStatus::SettleFailed,
+        );
+        let settlement_tx = format!("0x{}", "22".repeat(32));
+        proposal.settlement_tx_hash = Some(settlement_tx.parse().unwrap());
+        let id = state.store().insert(proposal).await.expect("insert");
+
+        let penalty_tx = format!("0x{}", "77".repeat(32));
+        let stored = state.store().get(id).await.expect("get").expect("exists");
+        state
+            .store()
+            .record_penalty(
+                &stored,
+                alloy::primitives::U256::from(16_000_000_000_000_000u64),
+                penalty_tx.parse().unwrap(),
+            )
+            .await
+            .expect("debit landed");
+
+        let header = read_auth_header(&owner, &state).await;
+        let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "penalized");
+        assert_eq!(json["penaltyTxHash"], penalty_tx);
+        assert_eq!(
+            json["settlementTxHash"], settlement_tx,
+            "the reverted settlement stays cited alongside the debit"
+        );
+    }
+
     #[ignore]
     #[tokio::test]
     async fn get_proposal_non_owner_gets_404() {
