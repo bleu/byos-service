@@ -1,3 +1,6 @@
 [submodule "byos-contracts"]
 	path = byos-contracts
 	url = https://github.com/bleu/byos-contracts.git
+[submodule "offline-mode"]
+	path = offline-mode
+	url = https://github.com/cowdao-grants/offline-mode.git
