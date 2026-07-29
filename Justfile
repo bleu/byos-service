@@ -38,7 +38,14 @@ build:
 sync-abis:
     #!/usr/bin/env bash
     set -euo pipefail
-    git submodule update --init --recursive byos-contracts
+    # Populate the submodule when it is empty (fresh clone, or a new worktree —
+    # worktrees do not inherit submodule contents). Never run it otherwise:
+    # `git submodule update` checks out the commit recorded in the index, so on
+    # an in-progress pin bump it would silently rewind the submodule and
+    # regenerate the ABIs from the old contracts, leaving a clean diff.
+    if [ ! -e byos-contracts/foundry.toml ]; then
+        git submodule update --init --recursive byos-contracts
+    fi
     (cd byos-contracts && forge build -q)
     for contract in Trampoline TrampolineFactory Escrow; do
         jq '.abi' "byos-contracts/out/$contract.sol/$contract.json" \
