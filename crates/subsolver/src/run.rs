@@ -266,7 +266,7 @@ pub async fn start(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     };
 
     let provider = alloy::providers::ProviderBuilder::new()
-        .connect_http(args.rpc_url)
+        .connect_http(args.rpc_url.0)
         .erased();
     let mut subsolver = Subsolver::new(config, provider).await?;
 
