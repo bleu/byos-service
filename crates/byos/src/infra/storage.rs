@@ -104,37 +104,38 @@ impl ProposalStore {
         Ok(id)
     }
 
-    /// Transition a proposal from `from` to `to`, only if it is still in
-    /// `from` — one compare-and-swap `UPDATE`. Zero rows affected means
-    /// someone else (e.g. a cancellation) won the race: the caller's write
-    /// is stale and must be dropped. A successful transition emits a
-    /// status-changed audit event.
+    /// Transition a proposal from its snapshot status to `to`, only if the
+    /// row is still in that status — one compare-and-swap `UPDATE`. Zero
+    /// rows affected means someone else (e.g. a cancellation) won the race:
+    /// the caller's write is stale and must be dropped. The audit event is
+    /// built from the snapshot's identity fields (immutable after insert),
+    /// so a committed transition can never fail to produce its evidence.
     pub async fn transition(
         &self,
-        id: ProposalId,
-        from: ProposalStatus,
+        proposal: &Proposal,
         to: ProposalStatus,
     ) -> Result<(), StoreError> {
-        let row: Option<(String, String)> = sqlx::query_as(
+        let from = proposal.status;
+        let result = sqlx::query(
             "UPDATE proposals SET status = $3, status_changed_at = now() WHERE id = $1 AND status \
-             = $2 RETURNING sub_solver, order_uid",
+             = $2",
         )
-        .bind(as_db_id(id))
+        .bind(as_db_id(proposal.id))
         .bind(from.to_string())
         .bind(to.to_string())
-        .fetch_optional(&self.pool)
+        .execute(&self.pool)
         .await?;
 
-        let Some((sub_solver, order_uid)) = row else {
-            return Err(self.stale_or_missing(id, from.to_string()).await);
-        };
+        if result.rows_affected() == 0 {
+            return Err(self.stale_or_missing(proposal.id, from.to_string()).await);
+        }
 
         self.emit(audit::AuditEvent {
             occurred_at: SystemTime::now(),
             kind: audit::AuditKind::StatusChanged {
-                proposal_id: id,
-                sub_solver: sub_solver.parse().map_err(|e| corrupt("sub_solver", e))?,
-                order_uid: order_uid.parse().map_err(|e| corrupt("order_uid", e))?,
+                proposal_id: proposal.id,
+                sub_solver: proposal.sub_solver,
+                order_uid: proposal.order_uid.clone(),
                 from,
                 to,
                 rejection_reason: None,
@@ -176,7 +177,12 @@ impl ProposalStore {
         let Some((status, sub_solver, order_uid)) = row else {
             return Err(StoreError::NotFound(id));
         };
+        // Parse everything the audit event needs before writing: a corrupt
+        // row must fail here, not after the commit — a committed mutation
+        // without its evidence is the one state the audit design forbids.
         let from: ProposalStatus = status.parse().map_err(|e| corrupt("status", e))?;
+        let sub_solver: Address = sub_solver.parse().map_err(|e| corrupt("sub_solver", e))?;
+        let order_uid: OrderUid = order_uid.parse().map_err(|e| corrupt("order_uid", e))?;
         if !matches!(from, ProposalStatus::Submitted | ProposalStatus::Active) {
             return Err(StoreError::StaleTransition {
                 id,
@@ -217,8 +223,8 @@ impl ProposalStore {
                 occurred_at: SystemTime::now(),
                 kind: audit::AuditKind::StatusChanged {
                     proposal_id: id,
-                    sub_solver: sub_solver.parse().map_err(|e| corrupt("sub_solver", e))?,
-                    order_uid: order_uid.parse().map_err(|e| corrupt("order_uid", e))?,
+                    sub_solver,
+                    order_uid,
                     from,
                     to,
                     rejection_reason,
@@ -243,7 +249,12 @@ impl ProposalStore {
         let Some((status, owner, order_uid)) = row else {
             return Err(StoreError::NotFound(id));
         };
-        if owner != format!("{sub_solver:#x}") {
+        // Parse before writing (see resolve_verdict); comparing owners as
+        // `Address` values also avoids coupling the check to the exact hex
+        // formatting the insert used.
+        let owner: Address = owner.parse().map_err(|e| corrupt("sub_solver", e))?;
+        let order_uid: OrderUid = order_uid.parse().map_err(|e| corrupt("order_uid", e))?;
+        if owner != sub_solver {
             return Err(StoreError::NotOwner(id, sub_solver));
         }
         let from: ProposalStatus = status.parse().map_err(|e| corrupt("status", e))?;
@@ -267,7 +278,7 @@ impl ProposalStore {
             kind: audit::AuditKind::Cancelled {
                 proposal_id: id,
                 sub_solver,
-                order_uid: order_uid.parse().map_err(|e| corrupt("order_uid", e))?,
+                order_uid,
             },
         });
         Ok(())
@@ -672,8 +683,9 @@ mod tests {
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
 
+        let proposal = store.get(id).await.expect("get").expect("exists");
         store
-            .transition(id, ProposalStatus::Active, ProposalStatus::Expired)
+            .transition(&proposal, ProposalStatus::Expired)
             .await
             .expect("transition lands");
 
@@ -695,9 +707,11 @@ mod tests {
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
 
-        // The proposal is Active; a transition expecting Submitted is stale.
+        // The row is Active; a snapshot claiming Submitted is stale.
+        let mut proposal = store.get(id).await.expect("get").expect("exists");
+        proposal.status = ProposalStatus::Submitted;
         let err = store
-            .transition(id, ProposalStatus::Submitted, ProposalStatus::Expired)
+            .transition(&proposal, ProposalStatus::Expired)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::StaleTransition { .. }));
@@ -858,12 +872,10 @@ mod tests {
     #[tokio::test]
     async fn transition_nonexistent_fails_with_not_found() {
         let (store, _audit) = test_store().await;
+        let mut proposal = make_proposal(test_order_uid(), SOLVER_A);
+        proposal.id = ProposalId(999);
         let err = store
-            .transition(
-                ProposalId(999),
-                ProposalStatus::Active,
-                ProposalStatus::Expired,
-            )
+            .transition(&proposal, ProposalStatus::Expired)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
