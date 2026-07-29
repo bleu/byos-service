@@ -90,9 +90,26 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         // Build the solution using solvers-dto types.
         let id = solutions.len() as u64 + 1;
-        if let Some(sol) = build_solution(id, order, proposal, gas_used) {
-            solutions.push(sol);
+        let Some(sol) = build_solution(id, order, proposal, gas_used) else {
+            continue;
+        };
+
+        // Record notification attribution before bidding (ADR-0013): if we
+        // can't record it, we don't bid it. Auctions without an id (quote
+        // requests) are never settled, so there is nothing to attribute.
+        if let Some(auction_id) = auction.id
+            && let Err(e) = state
+                .store()
+                .record_solution(auction_id, id, proposal.id)
+                .await
+        {
+            tracing::error!(
+                %e, proposal_id = %proposal.id,
+                "solve: solution not recorded, dropping the bid"
+            );
+            continue;
         }
+        solutions.push(sol);
     }
 
     tracing::debug!(count = solutions.len(), "solve: returning solutions");

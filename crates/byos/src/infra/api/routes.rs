@@ -127,6 +127,7 @@ pub async fn create_proposal(
         rejection_reason: None,
         gas_used: None,
         trampoline: None,
+        settlement_tx_hash: None,
     };
 
     let id = state.store().insert(stored).await.map_err(internal)?;
@@ -166,6 +167,7 @@ pub async fn get_proposal(
         valid_until: proposal.valid_until.to_string(),
         status: proposal.status.to_string(),
         rejection_reason: proposal.rejection_reason,
+        settlement_tx_hash: proposal.settlement_tx_hash.map(|t| format!("{t:#x}")),
     }))
 }
 

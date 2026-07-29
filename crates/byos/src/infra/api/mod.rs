@@ -4,6 +4,7 @@
 
 pub mod dto;
 pub mod error;
+pub mod notify;
 pub mod routes;
 pub mod solve;
 
@@ -97,13 +98,16 @@ fn public_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Driver-facing router: `/solve` + health check, served on an internal bind
-/// address that only the co-deployed driver reaches (COW-1174). When
-/// `solve_bearer_token` is set, `/solve` additionally requires
-/// `Authorization: Bearer <token>` — the driver sends it via its
-/// `[solver.request-headers]` config. `/healthz` stays open for probes.
+/// Driver-facing router: `/solve` + `/notify` + health check, served on an
+/// internal bind address that only the co-deployed driver reaches
+/// (COW-1174). When `solve_bearer_token` is set, both endpoints require
+/// `Authorization: Bearer <token>` — the driver sends its configured
+/// `[solver.request-headers]` on every request, notifications included.
+/// `/healthz` stays open for probes.
 fn internal_router(state: AppState, solve_bearer_token: Option<&str>) -> Router {
-    let mut solve = Router::new().route("/solve", post(solve::solve));
+    let mut solve = Router::new()
+        .route("/solve", post(solve::solve))
+        .route("/notify", post(notify::notify));
     if let Some(token) = solve_bearer_token {
         let expected = token.to_owned();
         solve = solve.route_layer(axum::middleware::from_fn(
@@ -250,8 +254,9 @@ mod tests {
 
     /// Router tests are `#[ignore]`d db-tier tests (`just test-db`): the
     /// proposal store is Postgres (ADR-0013), so each test gets a fresh
-    /// database via the service-test harness.
-    async fn test_state() -> AppState {
+    /// database via the service-test harness. `pub(super)` so sibling route
+    /// modules (`notify`) reuse the same harness.
+    pub(super) async fn test_state() -> AppState {
         // These router tests assert on HTTP behaviour, not audit evidence.
         // Leaking the receiver keeps the channel open so emits stay silent.
         let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -352,7 +357,13 @@ mod tests {
         let response = post_proposal(&app, &body).await;
         let id = json_body(response).await["id"].as_u64().expect("id");
 
-        crate::infra::validation::run_tick(state.store(), &RejectAll(reason), 0).await;
+        crate::infra::validation::run_tick(
+            state.store(),
+            &RejectAll(reason),
+            0,
+            std::time::Duration::from_secs(3600),
+        )
+        .await;
 
         let header = read_auth_header(&signer, &state).await;
         let (status, body) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
@@ -424,6 +435,63 @@ mod tests {
         // …cancelling it again conflicts with its terminal state.
         let second = delete(app.clone()).await;
         assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    /// Acceptance (COW-1204): a settlement is in flight — the owner cannot
+    /// pull the proposal out from under it. `DELETE` conflicts.
+    #[ignore]
+    #[tokio::test]
+    async fn cancel_of_an_executing_proposal_returns_conflict() {
+        use alloy::sol_types::SolStruct;
+
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+        let state = test_state().await;
+        let owner = PrivateKeySigner::random();
+        let id = state
+            .store()
+            .insert(test_proposal(
+                OrderUid([0xaa; 56]),
+                owner.address(),
+                ProposalStatus::Executing,
+            ))
+            .await
+            .expect("insert");
+
+        let cancel = eip712::CancelProposal {
+            proposalId: U256::from(id.0),
+        };
+        let signature =
+            alloy::signers::Signer::sign_hash(&owner, &cancel.eip712_signing_hash(&domain))
+                .await
+                .expect("signing must succeed");
+
+        let response = public_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/proposal/{id}"))
+                    .header(
+                        "X-Signature",
+                        format!("0x{}", alloy::hex::encode(signature.as_bytes())),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state
+                .store()
+                .get(id)
+                .await
+                .expect("get")
+                .expect("exists")
+                .status,
+            ProposalStatus::Executing,
+            "the in-flight settlement keeps its proposal"
+        );
     }
 
     #[ignore]
@@ -525,7 +593,7 @@ mod tests {
     }
 
     /// Signs the `ReadAuth` bearer message and formats it for `X-Signature`.
-    async fn read_auth_header(signer: &PrivateKeySigner, state: &AppState) -> String {
+    pub(super) async fn read_auth_header(signer: &PrivateKeySigner, state: &AppState) -> String {
         let sig = byos_common::eip712::sign_read_auth(signer, state.domain())
             .await
             .expect("signing should succeed");
@@ -534,7 +602,7 @@ mod tests {
 
     /// Fires a GET at the router, optionally with an `X-Signature` header.
     /// Returns the status and parsed JSON body.
-    async fn get(
+    pub(super) async fn get(
         state: AppState,
         uri: &str,
         signature: Option<&str>,
@@ -967,6 +1035,54 @@ mod tests {
         assert_eq!(solutions.len(), 1);
         // Best proposal has buy_amount=950, which becomes the sell_token price.
         assert_eq!(solutions[0]["prices"][SELL_TOKEN.to_string()], "950");
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn solve_records_the_winning_solution_for_notify_attribution() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
+
+        let mut auction = auction_json("sell", "1000", "900");
+        auction["id"] = serde_json::json!("77");
+        let result = post_solve(&app, &auction).await;
+        assert_eq!(result["solutions"].as_array().unwrap().len(), 1);
+
+        let attributed = state
+            .store()
+            .solution_proposals(77, &[1])
+            .await
+            .expect("solutions lookup");
+        assert_eq!(
+            attributed.len(),
+            1,
+            "a returned solution must be attributable via the solutions table"
+        );
+        assert_eq!(attributed[0].order_uid, OrderUid(ORDER_UID));
+    }
+
+    /// Acceptance (COW-1204): an `Executing` proposal is frozen out of
+    /// `/solve` — its balances are about to be consumed by the in-flight
+    /// settlement.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_never_offers_an_executing_proposal() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        let mut proposal = test_proposal(
+            OrderUid(ORDER_UID),
+            Address::ZERO,
+            ProposalStatus::Executing,
+        );
+        proposal.gas_used = Some(200_000);
+        proposal.trampoline = Some(Address::ZERO);
+        state.store().insert(proposal).await.expect("insert");
+
+        let auction = auction_json("sell", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
     }
 
     #[ignore]

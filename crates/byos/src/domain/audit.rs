@@ -8,7 +8,7 @@ use {
         proposal::{OrderUid, Proposal, ProposalId, ProposalStatus},
         validator::RejectionReason,
     },
-    alloy::primitives::Address,
+    alloy::primitives::{Address, B256},
     std::{sync::Arc, time::SystemTime},
 };
 
@@ -39,8 +39,8 @@ pub enum AuditKind {
         sub_solver: Address,
         order_uid: OrderUid,
     },
-    /// Background lifecycle transition (expiry sweep, validator verdict).
-    /// Body-less like `Cancelled` for the same reason.
+    /// Background lifecycle transition (expiry sweep, validator verdict,
+    /// driver notification). Body-less like `Cancelled` for the same reason.
     StatusChanged {
         proposal_id: ProposalId,
         sub_solver: Address,
@@ -49,6 +49,20 @@ pub enum AuditKind {
         to: ProposalStatus,
         /// Set only when the validator rejected the proposal.
         rejection_reason: Option<RejectionReason>,
+        /// Set only on driver-reported outcomes (`Settled`/`SettleFailed`):
+        /// the cited settlement tx, indexed for Track B attribution
+        /// (ADR-0010).
+        settlement_tx_hash: Option<B256>,
+    },
+    /// A driver notification that carries no transition (pre-submission
+    /// kinds like `emptySolution`), attributed to the proposal it was about
+    /// — evidence of the driver's view of our solution (ADR-0013).
+    DriverNotified {
+        proposal_id: ProposalId,
+        sub_solver: Address,
+        order_uid: OrderUid,
+        /// The wire kind, verbatim — unknown future kinds record as-is.
+        kind: String,
     },
 }
 
@@ -59,7 +73,8 @@ impl AuditEvent {
         match &self.kind {
             AuditKind::Received { proposal } => proposal.id,
             AuditKind::Cancelled { proposal_id, .. }
-            | AuditKind::StatusChanged { proposal_id, .. } => *proposal_id,
+            | AuditKind::StatusChanged { proposal_id, .. }
+            | AuditKind::DriverNotified { proposal_id, .. } => *proposal_id,
         }
     }
 
@@ -67,16 +82,28 @@ impl AuditEvent {
         match &self.kind {
             AuditKind::Received { proposal } => proposal.sub_solver,
             AuditKind::Cancelled { sub_solver, .. }
-            | AuditKind::StatusChanged { sub_solver, .. } => *sub_solver,
+            | AuditKind::StatusChanged { sub_solver, .. }
+            | AuditKind::DriverNotified { sub_solver, .. } => *sub_solver,
+        }
+    }
+
+    /// The cited settlement tx for the dedicated evidence column; `None`
+    /// for every event that is not a driver-reported outcome.
+    pub fn settlement_tx_hash(&self) -> Option<B256> {
+        match &self.kind {
+            AuditKind::StatusChanged {
+                settlement_tx_hash, ..
+            } => *settlement_tx_hash,
+            _ => None,
         }
     }
 
     pub fn order_uid(&self) -> &OrderUid {
         match &self.kind {
             AuditKind::Received { proposal } => &proposal.order_uid,
-            AuditKind::Cancelled { order_uid, .. } | AuditKind::StatusChanged { order_uid, .. } => {
-                order_uid
-            }
+            AuditKind::Cancelled { order_uid, .. }
+            | AuditKind::StatusChanged { order_uid, .. }
+            | AuditKind::DriverNotified { order_uid, .. } => order_uid,
         }
     }
 
@@ -87,16 +114,23 @@ impl AuditEvent {
         match self.kind {
             AuditKind::Received { .. } => "received",
             AuditKind::Cancelled { .. } => "cancelled",
+            AuditKind::DriverNotified { .. } => "driver_notified",
             // Named for the transition's meaning, not the raw status, so a
             // dispute query reads as a verb history.
-            AuditKind::StatusChanged { to, .. } => match to {
-                ProposalStatus::Active => "validated",
-                ProposalStatus::Rejected => "rejected",
-                ProposalStatus::Expired => "expired",
-                ProposalStatus::SimFailed => "sim_failed",
-                ProposalStatus::Settled => "settled",
-                ProposalStatus::Cancelled => "cancelled",
-                ProposalStatus::Submitted => "resubmitted",
+            AuditKind::StatusChanged { from, to, .. } => match (from, to) {
+                // Leaving Executing without an outcome: the proposal
+                // re-enters competition, it is not being re-validated.
+                (ProposalStatus::Executing, ProposalStatus::Active) => "released",
+                (_, ProposalStatus::Active) => "validated",
+                (_, ProposalStatus::Rejected) => "rejected",
+                (_, ProposalStatus::Expired) => "expired",
+                (_, ProposalStatus::Executing) => "settlement_started",
+                (_, ProposalStatus::SimFailed) => "sim_failed",
+                (_, ProposalStatus::Settled) => "settled",
+                (_, ProposalStatus::SettleFailed) => "settle_failed",
+                (_, ProposalStatus::Penalized) => "penalized",
+                (_, ProposalStatus::Cancelled) => "cancelled",
+                (_, ProposalStatus::Submitted) => "resubmitted",
             },
         }
     }
@@ -110,16 +144,26 @@ impl AuditEvent {
         match &self.kind {
             AuditKind::Received { proposal } => received_payload(proposal),
             AuditKind::Cancelled { .. } => serde_json::json!({}),
+            AuditKind::DriverNotified { kind, .. } => serde_json::json!({ "kind": kind }),
             AuditKind::StatusChanged {
                 from,
                 to,
                 rejection_reason,
+                settlement_tx_hash,
                 ..
-            } => serde_json::json!({
-                "from": from,
-                "to": to,
-                "rejectionReason": rejection_reason,
-            }),
+            } => {
+                let mut payload = serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "rejectionReason": rejection_reason,
+                });
+                // Only outcomes cite a tx; a null key on every other
+                // transition would just be noise in the evidence.
+                if let Some(tx) = settlement_tx_hash {
+                    payload["settlementTxHash"] = serde_json::json!(tx);
+                }
+                payload
+            }
         }
     }
 }
@@ -180,6 +224,7 @@ mod tests {
             rejection_reason: None,
             gas_used: None,
             trampoline: None,
+            settlement_tx_hash: None,
         };
         AuditEvent {
             occurred_at: SystemTime::now(),
@@ -199,6 +244,7 @@ mod tests {
                     },
                     rejection_reason: (kind_of == "rejected")
                         .then_some(RejectionReason::InsufficientEscrow),
+                    settlement_tx_hash: None,
                 },
                 _ => AuditKind::Cancelled {
                     proposal_id: proposal.id,

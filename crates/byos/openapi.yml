@@ -45,8 +45,19 @@ info:
     proposal is stored as `submitted`; a background validator then runs the
     escrow check and settlement simulation and flips it to `active`,
     `rejected`, or `simFailed`. Sub-solvers poll `GET /proposal/{id}` for
-    the verdict. `rejected`, `simFailed`, `expired`, `cancelled`, and
-    `settled` are terminal — resubmission is a new `POST`.
+    the verdict.
+
+    When a proposal wins an auction and the driver starts submitting the
+    settlement, it becomes `executing` (ADR-0013): frozen — not offered to
+    further auctions, not re-simulated, not expired, not cancellable
+    (`DELETE` answers `409`). The driver's outcome resolves it: `settled`
+    (tx landed) or `settleFailed` (tx reverted), each recording
+    `settlementTxHash`; an abandoned submission returns it to `active`. A
+    `settleFailed` proposal later becomes `penalized` when the Track A
+    escrow debit lands (ADR-0003/ADR-0010).
+
+    `rejected`, `simFailed`, `expired`, `cancelled`, `settled`, and
+    `penalized` are terminal — resubmission is a new `POST`.
 
     The driver-facing `/solve` endpoint is not part of this spec: it is
     served on a separate internal listener and implements the CoW Protocol
@@ -127,9 +138,11 @@ paths:
       operationId: getProposal
       summary: Get one of the caller's proposals.
       description: |
-        Returns the proposal's amounts, status, and, when `status` is
-        `rejected`, the machine-readable `rejectionReason`. The submitted
-        `interactions`, `nonce`, and `signature` are not echoed back.
+        Returns the proposal's amounts, status, and, depending on `status`,
+        the machine-readable `rejectionReason` (`rejected`) or the
+        `settlementTxHash` (`settled`/`settleFailed`/`penalized`). The
+        submitted `interactions`, `nonce`, and `signature` are not echoed
+        back.
         Owner-scoped: the proposal is only returned if the `X-Signature`
         signer is its sub-solver.
       security:
@@ -184,7 +197,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The proposal is already in a terminal state.
+          description: |
+            The proposal is not cancellable: `executing` (a settlement
+            built on it is in flight, ADR-0013) or already terminal.
           content:
             application/json:
               schema:
@@ -314,24 +329,34 @@ components:
       example: 42
     ProposalStatus:
       description: |
-        Lifecycle state of a proposal (ADR-0001):
+        Lifecycle state of a proposal (ADR-0013):
 
         - `submitted` — signature verified, awaiting background validation.
         - `active` — passed gatekeeping; eligible for `/solve` selection.
         - `rejected` — failed a gatekeeping rule; see `rejectionReason`.
         - `expired` — `validUntil` passed.
-        - `settled` — the order was filled by this proposal.
+        - `executing` — won an auction; the settlement is being submitted.
+          Exits via the driver's outcome or a timeout back to `active`.
+        - `settled` — the settlement landed on-chain; see
+          `settlementTxHash`.
+        - `settleFailed` — the settlement reverted on-chain (see
+          `settlementTxHash`); the Track A escrow debit follows.
+        - `penalized` — the Track A debit landed.
         - `simFailed` — the settlement simulation reverted.
         - `cancelled` — cancelled by a signed `DELETE`.
 
-        All states except `submitted` and `active` are terminal.
+        All states except `submitted`, `active`, `executing`, and
+        `settleFailed` are terminal.
       type: string
       enum:
         - submitted
         - active
         - rejected
         - expired
+        - executing
         - settled
+        - settleFailed
+        - penalized
         - simFailed
         - cancelled
     RejectionReason:
@@ -464,6 +489,14 @@ components:
           description: Only present when `status` is `rejected`.
           allOf:
             - $ref: "#/components/schemas/RejectionReason"
+        settlementTxHash:
+          description: |
+            Only present on settlement outcomes: the landed transaction for
+            `settled`, the reverted one for `settleFailed`/`penalized`
+            (ADR-0013).
+          type: string
+          pattern: "^0x[0-9a-f]{64}$"
+          example: "0x2d6cea6413a3b2e37a1a5c1780e17dee056bd63c2fd0fd60d75bfa9ea38e2e28"
     ProposalMetadata:
       description: |
         Metadata only — no amounts, no interactions. List views never expose
