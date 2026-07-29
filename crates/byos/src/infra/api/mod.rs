@@ -33,6 +33,9 @@ struct AppStateInner {
     /// `/solve`, read by the background escrow validator). Seeded with
     /// `--default-gas-price` at startup.
     gas_price: Arc<AtomicU64>,
+    /// Lifetime cap (ADR-0013): `POST` rejects `validUntil` further out than
+    /// now + this many seconds.
+    max_proposal_lifetime_secs: u64,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -45,11 +48,13 @@ impl AppState {
         store: Arc<InMemoryProposalStore>,
         domain: Eip712Domain,
         gas_price: Arc<AtomicU64>,
+        max_proposal_lifetime_secs: u64,
     ) -> Self {
         Self(Arc::new(AppStateInner {
             store,
             domain,
             gas_price,
+            max_proposal_lifetime_secs,
         }))
     }
 
@@ -63,6 +68,10 @@ impl AppState {
 
     pub fn gas_price(&self) -> &Arc<AtomicU64> {
         &self.0.gas_price
+    }
+
+    pub fn max_proposal_lifetime_secs(&self) -> u64 {
+        self.0.max_proposal_lifetime_secs
     }
 }
 
@@ -250,6 +259,7 @@ mod tests {
             Arc::new(InMemoryProposalStore::new(audit_tx)),
             domain,
             gas_price,
+            300,
         )
     }
 
@@ -258,12 +268,18 @@ mod tests {
     async fn signed_proposal_body_for(signer: &PrivateKeySigner) -> (serde_json::Value, Address) {
         let domain = eip712::byos_domain(CHAIN_ID, factory());
 
+        // Inside the 5-minute lifetime cap the test_state applies.
+        let valid_until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_secs()
+            + 240;
         let order_uid = [0xaa_u8; 56];
         let proposal = contracts::Proposal {
             orderUidHash: keccak256(order_uid),
             sellAmount: U256::from(1_000_000_u64),
             buyAmount: U256::from(990_000_u64),
-            validUntil: U256::from(99_999_999_999_u64),
+            validUntil: U256::from(valid_until),
             nonce: U256::from(1_u64),
         };
         let interactions: Vec<contracts::Interaction> = vec![];
@@ -277,7 +293,7 @@ mod tests {
             "sellAmount": "1000000",
             "buyAmount": "990000",
             "interactions": [],
-            "validUntil": "99999999999",
+            "validUntil": valid_until.to_string(),
             "nonce": "1",
             "signature": format!("0x{}", alloy::hex::encode(signature.as_bytes())),
         });
@@ -305,21 +321,22 @@ mod tests {
             .unwrap()
     }
 
-    struct RejectAll;
+    struct RejectAll(crate::domain::validator::RejectionReason);
 
     impl crate::domain::validator::ValidateProposal for RejectAll {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
         ) -> Option<crate::domain::validator::Verdict> {
-            Some(crate::domain::validator::Verdict::Reject(
-                crate::domain::validator::RejectionReason::InsufficientEscrow,
-            ))
+            Some(crate::domain::validator::Verdict::Reject(self.0))
         }
     }
 
-    #[tokio::test]
-    async fn rejected_proposal_exposes_reason_on_the_wire() {
+    /// POSTs a proposal, rejects it with `reason`, and returns the owner's
+    /// `GET /proposal/{id}` body.
+    async fn rejected_proposal_body(
+        reason: crate::domain::validator::RejectionReason,
+    ) -> serde_json::Value {
         let state = test_state();
         let app = public_router(state.clone());
         let signer = PrivateKeySigner::random();
@@ -328,13 +345,29 @@ mod tests {
         let response = post_proposal(&app, &body).await;
         let id = json_body(response).await["id"].as_u64().expect("id");
 
-        crate::infra::validation::run_tick(state.store(), &RejectAll, 0).await;
+        crate::infra::validation::run_tick(state.store(), &RejectAll(reason), 0).await;
 
         let header = read_auth_header(&signer, &state).await;
         let (status, body) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
         assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn rejected_proposal_exposes_reason_on_the_wire() {
+        let body =
+            rejected_proposal_body(crate::domain::validator::RejectionReason::InsufficientEscrow)
+                .await;
         assert_eq!(body["status"], "rejected");
         assert_eq!(body["rejectionReason"], "InsufficientEscrow");
+    }
+
+    #[tokio::test]
+    async fn unprofitable_rejection_exposes_reason_on_the_wire() {
+        let body =
+            rejected_proposal_body(crate::domain::validator::RejectionReason::Unprofitable).await;
+        assert_eq!(body["status"], "rejected");
+        assert_eq!(body["rejectionReason"], "Unprofitable");
     }
 
     #[tokio::test]

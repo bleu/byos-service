@@ -5,7 +5,7 @@ use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::{ScoreInput, effective_gas, score_proposal},
+        scoring::{ScoreInput, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -46,16 +46,9 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
 
-        // The surplus token is the buy token for sell orders, sell token for buy
-        // orders.
-        let surplus_token = if is_sell {
-            order.buy_token
-        } else {
-            order.sell_token
-        };
         let native_price = auction
             .tokens
-            .get(&surplus_token)
+            .get(&surplus_token(is_sell, order.sell_token, order.buy_token))
             .and_then(|t| t.reference_price)
             .unwrap_or(U256::ZERO);
 

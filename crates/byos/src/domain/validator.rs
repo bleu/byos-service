@@ -19,6 +19,10 @@ pub enum RejectionReason {
     AmountMismatch,
     /// The orderbook does not know the proposal's order uid.
     OrderNotFound,
+    /// The first simulation scored the proposal at or below the minimum
+    /// (`score = surplus + fee - gas`, ADR-0002) — it could never win an
+    /// auction, so it is rejected at the gate (ADR-0013).
+    Unprofitable,
 }
 
 /// Results of a successful simulation, stored on the proposal by the
