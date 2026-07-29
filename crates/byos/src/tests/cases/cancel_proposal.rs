@@ -42,6 +42,26 @@ async fn owner_cancel_round_trip() {
 
 #[ignore]
 #[tokio::test]
+async fn cancelling_an_id_above_i64_max_is_a_miss_not_a_crash() {
+    let db = TestDb::create().await;
+    let app = TestApp::spawn(&db.url).await;
+    let signer = PrivateKeySigner::random();
+
+    // `ProposalId` is a bare u64 off the URL but the `id` column is a BIGINT.
+    // DELETE reaches that conversion by its own route: `cancel` returns
+    // NotFound, which the handler masks as the owner-scoped 404 (ADR-0011).
+    let sig = setup::cancel_signature(&signer, u64::MAX).await;
+    let (status, err) = app
+        .delete(&format!("/proposal/{}", u64::MAX), Some(&sig))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(err["kind"], "ProposalNotFound");
+
+    app.stop().await;
+}
+
+#[ignore]
+#[tokio::test]
 async fn non_owner_cancel_is_masked_as_not_found() {
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;

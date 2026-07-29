@@ -299,9 +299,15 @@ async fn run_with(
     // --min-collateral, --default-gas-price, and --settlement-address are
     // present when --rpc-url is set — the unwraps below cannot fail.
     let validation_loop = if let Some(rpc_url) = args.rpc_url {
-        let escrow_address = args.escrow_address.unwrap();
-        let min_collateral = args.min_collateral.unwrap();
-        let settlement_address = args.settlement_address.unwrap();
+        let escrow_address = args
+            .escrow_address
+            .expect("clap requires_all guarantees it");
+        let min_collateral = args
+            .min_collateral
+            .expect("clap requires_all guarantees it");
+        let settlement_address = args
+            .settlement_address
+            .expect("clap requires_all guarantees it");
 
         let url: reqwest::Url = rpc_url.0.parse().context("invalid --rpc-url")?;
         let provider = alloy::providers::ProviderBuilder::new().connect_http(url.clone());

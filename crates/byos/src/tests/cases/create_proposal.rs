@@ -130,6 +130,38 @@ async fn non_owner_get_is_not_found() {
 
 #[ignore]
 #[tokio::test]
+async fn a_proposal_id_above_i64_max_is_a_miss_not_a_crash() {
+    let db = TestDb::create().await;
+    let app = TestApp::spawn(&db.url).await;
+    let reader = PrivateKeySigner::random();
+
+    // `ProposalId` is a bare u64 parsed straight off the URL, but the `id`
+    // column is a BIGINT. An id in the gap used to panic inside the handler
+    // rather than answer; it names no row, so it is a 404 like any other miss.
+    let auth = setup::read_auth_signature(&reader).await;
+    let (status, err) = app
+        .get_json(&format!("/proposal/{}", u64::MAX), Some(&auth))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(err["kind"], "ProposalNotFound");
+
+    // An in-range id still round-trips, so the out-of-range request took the
+    // early return rather than poisoning anything shared.
+    let owner = PrivateKeySigner::random();
+    let body = ProposalFixture::default().signed_body(&owner).await;
+    let (_, created) = app.post_json("/proposals", &body).await;
+    let id = created["id"].as_u64().expect("response must carry an id");
+    let owner_auth = setup::read_auth_signature(&owner).await;
+    let (status, _) = app
+        .get_json(&format!("/proposal/{id}"), Some(&owner_auth))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    app.stop().await;
+}
+
+#[ignore]
+#[tokio::test]
 async fn rejects_malformed_order_uid_hex() {
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;

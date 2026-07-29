@@ -25,9 +25,17 @@ use {
 /// POST /solve — the driver-facing solver engine endpoint.
 pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) -> Json<Solutions> {
     // Publish the auction's gas price so the background escrow validator uses
-    // a fresh value instead of the startup fallback.
-    let gp: u64 = auction.effective_gas_price.try_into().unwrap_or(u64::MAX);
-    state.gas_price().store(gp, Ordering::Relaxed);
+    // a fresh value instead of the startup fallback. A price that does not fit
+    // leaves the previous value in place: saturating to u64::MAX would push
+    // every sub-solver under the escrow threshold and reject the entire live
+    // book on the next tick, and Rejected is terminal (ADR-0013).
+    match u64::try_from(auction.effective_gas_price) {
+        Ok(gp) => state.gas_price().store(gp, Ordering::Relaxed),
+        Err(_) => tracing::warn!(
+            effective_gas_price = %auction.effective_gas_price,
+            "auction gas price does not fit u64; keeping the previous value"
+        ),
+    }
 
     let mut solutions = Vec::new();
     let now = U256::from(
