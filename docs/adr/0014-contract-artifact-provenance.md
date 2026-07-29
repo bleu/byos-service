@@ -22,7 +22,7 @@ A third-hand problem: `settlement.rs` cited `c9b317e`, the tip of a contracts fe
 - **The ABIs stay vendored** under `crates/byos-common/abis/`. `cargo build`, `cargo test` and every contributor workflow keep working with no foundry installed and no submodule checked out.
 - **`just sync-abis` regenerates them** from the submodule via `forge build` and `jq '.abi'`. The vendored files are generated artifacts and are never hand-edited.
 - **CI proves the vendored files match the pin.** A separate `abis` job checks out submodules recursively, installs foundry, runs `just sync-abis`, and fails on a dirty tree. It is separate so the lint and test jobs stay free of both dependencies.
-- **Dependabot watches the pin.** The `gitsubmodule` ecosystem opens a PR when contracts `main` moves, so a pin falling behind is an inbox item rather than something discovered later by a failing settlement.
+- **Dependabot watches the pin.** The `gitsubmodule` ecosystem opens a PR when contracts `main` moves, so a pin falling behind is an inbox item rather than something discovered later by a failing settlement. Dependabot bumps the submodule and nothing else, so any bump that changes an interface arrives with a failing `abis` job. That is the intended shape: the red check is the request to regenerate. Finish the PR by running `just sync-abis` on its branch and pushing the result.
 - **E2e deploy artifacts come from the same submodule.** This supersedes [ADR-0009](0009-testing-strategy.md)'s statement that they are regenerated from byos-contracts *releases*, and closes its open question about the regeneration procedure. Releases are a reasonable future refinement; the contracts repo does not cut them today.
 
 Bumping the pin is one deliberate act: move the submodule, run `just sync-abis`, and let the check confirm the bindings followed.
@@ -37,7 +37,9 @@ Bumping the pin is one deliberate act: move the submodule, run `just sync-abis`,
 
 ## Consequences
 
-- Working on the ABIs or the e2e fixture needs `git submodule update --init --recursive`. An ordinary build or test run does not, and CI only pays the cost in one job.
+- Working on the ABIs or the e2e fixture needs the submodule checked out; `just sync-abis` populates it when it is empty. An ordinary build or test run does not need it at all, and CI only pays the cost in one job.
+- A new `git worktree` starts with an empty `byos-contracts/` — worktrees do not inherit submodule contents. Build, test, clippy and fmt are unaffected, so this only surfaces when doing ABI or e2e work, where `just sync-abis` fills it in.
+- Dependabot bumps land red until someone regenerates on the branch (see above). Budget for a two-step flow rather than a one-click merge.
 - CI gains a foundry dependency in the `abis` job, and that job is the gate on ABI freshness.
 - Dependabot will open a PR whenever contracts `main` moves, including for changes that do not touch interfaces. Closing one is cheap; the signal is worth the noise while the contracts churn pre-audit.
 - The pin is only as good as the review that bumps it. The sync check proves the bindings match the pin; it says nothing about whether the service still encodes the right calls. Interface changes still need reading.
