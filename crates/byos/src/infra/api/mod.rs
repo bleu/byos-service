@@ -4,11 +4,12 @@
 
 pub mod dto;
 pub mod error;
+pub mod notify;
 pub mod routes;
 pub mod solve;
 
 use {
-    crate::domain::proposal::InMemoryProposalStore,
+    crate::infra::storage::ProposalStore,
     alloy::sol_types::Eip712Domain,
     axum::{
         Router,
@@ -27,12 +28,15 @@ use {
 // ---------------------------------------------------------------------------
 
 struct AppStateInner {
-    store: Arc<InMemoryProposalStore>,
+    store: Arc<ProposalStore>,
     domain: Eip712Domain,
     /// Last-seen `effective_gas_price` from the auction payload (written by
     /// `/solve`, read by the background escrow validator). Seeded with
     /// `--default-gas-price` at startup.
     gas_price: Arc<AtomicU64>,
+    /// Lifetime cap (ADR-0013): `POST` rejects `validUntil` further out than
+    /// now + this many seconds.
+    max_proposal_lifetime_secs: u64,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -42,18 +46,20 @@ pub struct AppState(Arc<AppStateInner>);
 
 impl AppState {
     pub fn new(
-        store: Arc<InMemoryProposalStore>,
+        store: Arc<ProposalStore>,
         domain: Eip712Domain,
         gas_price: Arc<AtomicU64>,
+        max_proposal_lifetime_secs: u64,
     ) -> Self {
         Self(Arc::new(AppStateInner {
             store,
             domain,
             gas_price,
+            max_proposal_lifetime_secs,
         }))
     }
 
-    pub fn store(&self) -> &InMemoryProposalStore {
+    pub fn store(&self) -> &ProposalStore {
         &self.0.store
     }
 
@@ -63,6 +69,10 @@ impl AppState {
 
     pub fn gas_price(&self) -> &Arc<AtomicU64> {
         &self.0.gas_price
+    }
+
+    pub fn max_proposal_lifetime_secs(&self) -> u64 {
+        self.0.max_proposal_lifetime_secs
     }
 }
 
@@ -88,13 +98,16 @@ fn public_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Driver-facing router: `/solve` + health check, served on an internal bind
-/// address that only the co-deployed driver reaches (COW-1174). When
-/// `solve_bearer_token` is set, `/solve` additionally requires
-/// `Authorization: Bearer <token>` — the driver sends it via its
-/// `[solver.request-headers]` config. `/healthz` stays open for probes.
+/// Driver-facing router: `/solve` + `/notify` + health check, served on an
+/// internal bind address that only the co-deployed driver reaches
+/// (COW-1174). When `solve_bearer_token` is set, both endpoints require
+/// `Authorization: Bearer <token>` — the driver sends its configured
+/// `[solver.request-headers]` on every request, notifications included.
+/// `/healthz` stays open for probes.
 fn internal_router(state: AppState, solve_bearer_token: Option<&str>) -> Router {
-    let mut solve = Router::new().route("/solve", post(solve::solve));
+    let mut solve = Router::new()
+        .route("/solve", post(solve::solve))
+        .route("/notify", post(notify::notify));
     if let Some(token) = solve_bearer_token {
         let expected = token.to_owned();
         solve = solve.route_layer(axum::middleware::from_fn(
@@ -239,17 +252,26 @@ mod tests {
         Address::repeat_byte(0x42)
     }
 
-    fn test_state() -> AppState {
+    /// Router tests are `#[ignore]`d db-tier tests (`just test-db`): the
+    /// proposal store is Postgres (ADR-0013), so each test gets a fresh
+    /// database via the service-test harness. `pub(super)` so sibling route
+    /// modules (`notify`) reuse the same harness.
+    pub(super) async fn test_state() -> AppState {
         // These router tests assert on HTTP behaviour, not audit evidence.
         // Leaking the receiver keeps the channel open so emits stay silent.
         let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
         std::mem::forget(audit_rx);
+        let db = crate::tests::setup::TestDb::create().await;
+        let pool = crate::infra::audit::connect_and_migrate(&db.url)
+            .await
+            .expect("migrations run");
         let domain = eip712::byos_domain(CHAIN_ID, factory());
         let gas_price = Arc::new(AtomicU64::new(0));
         AppState::new(
-            Arc::new(InMemoryProposalStore::new(audit_tx)),
+            Arc::new(ProposalStore::new(pool, audit_tx)),
             domain,
             gas_price,
+            300,
         )
     }
 
@@ -258,12 +280,18 @@ mod tests {
     async fn signed_proposal_body_for(signer: &PrivateKeySigner) -> (serde_json::Value, Address) {
         let domain = eip712::byos_domain(CHAIN_ID, factory());
 
+        // Inside the 5-minute lifetime cap the test_state applies.
+        let valid_until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_secs()
+            + 240;
         let order_uid = [0xaa_u8; 56];
         let proposal = contracts::Proposal {
             orderUidHash: keccak256(order_uid),
             sellAmount: U256::from(1_000_000_u64),
             buyAmount: U256::from(990_000_u64),
-            validUntil: U256::from(99_999_999_999_u64),
+            validUntil: U256::from(valid_until),
             nonce: U256::from(1_u64),
         };
         let interactions: Vec<contracts::Interaction> = vec![];
@@ -277,7 +305,7 @@ mod tests {
             "sellAmount": "1000000",
             "buyAmount": "990000",
             "interactions": [],
-            "validUntil": "99999999999",
+            "validUntil": valid_until.to_string(),
             "nonce": "1",
             "signature": format!("0x{}", alloy::hex::encode(signature.as_bytes())),
         });
@@ -305,22 +333,23 @@ mod tests {
             .unwrap()
     }
 
-    struct RejectAll;
+    struct RejectAll(crate::domain::validator::RejectionReason);
 
     impl crate::domain::validator::ValidateProposal for RejectAll {
         async fn validate(
             &self,
             _proposal: &crate::domain::proposal::Proposal,
         ) -> Option<crate::domain::validator::Verdict> {
-            Some(crate::domain::validator::Verdict::Reject(
-                crate::domain::validator::RejectionReason::InsufficientEscrow,
-            ))
+            Some(crate::domain::validator::Verdict::Reject(self.0))
         }
     }
 
-    #[tokio::test]
-    async fn rejected_proposal_exposes_reason_on_the_wire() {
-        let state = test_state();
+    /// POSTs a proposal, rejects it with `reason`, and returns the owner's
+    /// `GET /proposal/{id}` body.
+    async fn rejected_proposal_body(
+        reason: crate::domain::validator::RejectionReason,
+    ) -> serde_json::Value {
+        let state = test_state().await;
         let app = public_router(state.clone());
         let signer = PrivateKeySigner::random();
         let (body, _) = signed_proposal_body_for(&signer).await;
@@ -328,21 +357,46 @@ mod tests {
         let response = post_proposal(&app, &body).await;
         let id = json_body(response).await["id"].as_u64().expect("id");
 
-        crate::infra::validation::run_tick(state.store(), &RejectAll, 0).await;
+        crate::infra::validation::run_tick(
+            state.store(),
+            &RejectAll(reason),
+            0,
+            std::time::Duration::from_secs(3600),
+        )
+        .await;
 
         let header = read_auth_header(&signer, &state).await;
         let (status, body) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
         assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn rejected_proposal_exposes_reason_on_the_wire() {
+        let body =
+            rejected_proposal_body(crate::domain::validator::RejectionReason::InsufficientEscrow)
+                .await;
         assert_eq!(body["status"], "rejected");
         assert_eq!(body["rejectionReason"], "InsufficientEscrow");
     }
 
+    #[ignore]
+    #[tokio::test]
+    async fn unprofitable_rejection_exposes_reason_on_the_wire() {
+        let body =
+            rejected_proposal_body(crate::domain::validator::RejectionReason::Unprofitable).await;
+        assert_eq!(body["status"], "rejected");
+        assert_eq!(body["rejectionReason"], "Unprofitable");
+    }
+
+    #[ignore]
     #[tokio::test]
     async fn double_cancel_returns_conflict() {
         use alloy::sol_types::SolStruct;
 
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        let state = test_state();
+        let state = test_state().await;
         let app = public_router(state);
 
         let signer = PrivateKeySigner::random();
@@ -383,14 +437,72 @@ mod tests {
         assert_eq!(second.status(), StatusCode::CONFLICT);
     }
 
+    /// Acceptance (COW-1204): a settlement is in flight — the owner cannot
+    /// pull the proposal out from under it. `DELETE` conflicts.
+    #[ignore]
+    #[tokio::test]
+    async fn cancel_of_an_executing_proposal_returns_conflict() {
+        use alloy::sol_types::SolStruct;
+
+        let domain = eip712::byos_domain(CHAIN_ID, factory());
+        let state = test_state().await;
+        let owner = PrivateKeySigner::random();
+        let id = state
+            .store()
+            .insert(test_proposal(
+                OrderUid([0xaa; 56]),
+                owner.address(),
+                ProposalStatus::Executing,
+            ))
+            .await
+            .expect("insert");
+
+        let cancel = eip712::CancelProposal {
+            proposalId: U256::from(id.0),
+        };
+        let signature =
+            alloy::signers::Signer::sign_hash(&owner, &cancel.eip712_signing_hash(&domain))
+                .await
+                .expect("signing must succeed");
+
+        let response = public_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/proposal/{id}"))
+                    .header(
+                        "X-Signature",
+                        format!("0x{}", alloy::hex::encode(signature.as_bytes())),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state
+                .store()
+                .get(id)
+                .await
+                .expect("get")
+                .expect("exists")
+                .status,
+            ProposalStatus::Executing,
+            "the in-flight settlement keeps its proposal"
+        );
+    }
+
+    #[ignore]
     #[tokio::test]
     async fn cancel_by_non_owner_is_masked_as_not_found() {
         use alloy::sol_types::SolStruct;
 
         let domain = eip712::byos_domain(CHAIN_ID, factory());
-        let state = test_state();
+        let state = test_state().await;
         let owner = address!("0000000000000000000000000000000000000001");
-        let id = insert_proposal(&state, owner);
+        let id = insert_proposal(&state, owner).await;
 
         let intruder = PrivateKeySigner::random();
         let cancel = eip712::CancelProposal {
@@ -422,15 +534,21 @@ mod tests {
         assert_eq!(json_body(response).await["kind"], "ProposalNotFound");
 
         // The proposal is untouched.
-        let proposal = state.store().get(id).expect("proposal must still exist");
+        let proposal = state
+            .store()
+            .get(id)
+            .await
+            .expect("get succeeds")
+            .expect("proposal must still exist");
         assert_eq!(proposal.status, ProposalStatus::Active);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn post_without_token_fields_is_accepted() {
         // Token addresses come from the orderbook (ADR-0012), not the
         // sub-solver; the API contract must not require them.
-        let state = test_state();
+        let state = test_state().await;
         let app = public_router(state);
         let signer = PrivateKeySigner::random();
         let (mut body, _) = signed_proposal_body_for(&signer).await;
@@ -441,9 +559,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn post_returns_202_and_proposal_is_submitted() {
-        let state = test_state();
+        let state = test_state().await;
         let app = public_router(state.clone());
         let signer = PrivateKeySigner::random();
         let (body, _) = signed_proposal_body_for(&signer).await;
@@ -458,19 +577,23 @@ mod tests {
         assert_eq!(json["status"], "submitted");
     }
 
-    fn insert_proposal(
+    async fn insert_proposal(
         state: &AppState,
         sub_solver: Address,
     ) -> crate::domain::proposal::ProposalId {
-        state.store().insert(test_proposal(
-            OrderUid([0xaa; 56]),
-            sub_solver,
-            ProposalStatus::Active,
-        ))
+        state
+            .store()
+            .insert(test_proposal(
+                OrderUid([0xaa; 56]),
+                sub_solver,
+                ProposalStatus::Active,
+            ))
+            .await
+            .expect("insert succeeds")
     }
 
     /// Signs the `ReadAuth` bearer message and formats it for `X-Signature`.
-    async fn read_auth_header(signer: &PrivateKeySigner, state: &AppState) -> String {
+    pub(super) async fn read_auth_header(signer: &PrivateKeySigner, state: &AppState) -> String {
         let sig = byos_common::eip712::sign_read_auth(signer, state.domain())
             .await
             .expect("signing should succeed");
@@ -479,7 +602,7 @@ mod tests {
 
     /// Fires a GET at the router, optionally with an `X-Signature` header.
     /// Returns the status and parsed JSON body.
-    async fn get(
+    pub(super) async fn get(
         state: AppState,
         uri: &str,
         signature: Option<&str>,
@@ -500,11 +623,12 @@ mod tests {
         (status, json)
     }
 
+    #[ignore]
     #[tokio::test]
     async fn get_proposal_owner_reads_own() {
-        let state = test_state();
+        let state = test_state().await;
         let owner = alloy::signers::local::PrivateKeySigner::random();
-        let id = insert_proposal(&state, owner.address());
+        let id = insert_proposal(&state, owner.address()).await;
         let header = read_auth_header(&owner, &state).await;
 
         let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
@@ -515,11 +639,52 @@ mod tests {
         assert_eq!(json["buyAmount"], "990000");
     }
 
+    /// Acceptance (COW-1205): once the Track A debit lands, the owner's GET
+    /// shows `penalized` and cites the debit tx.
+    #[ignore]
+    #[tokio::test]
+    async fn penalized_proposal_exposes_the_penalty_tx_on_owner_get() {
+        let state = test_state().await;
+        let owner = alloy::signers::local::PrivateKeySigner::random();
+        let mut proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            owner.address(),
+            ProposalStatus::SettleFailed,
+        );
+        let settlement_tx = format!("0x{}", "22".repeat(32));
+        proposal.settlement_tx_hash = Some(settlement_tx.parse().unwrap());
+        let id = state.store().insert(proposal).await.expect("insert");
+
+        let penalty_tx = format!("0x{}", "77".repeat(32));
+        let stored = state.store().get(id).await.expect("get").expect("exists");
+        state
+            .store()
+            .record_penalty(
+                &stored,
+                alloy::primitives::U256::from(16_000_000_000_000_000u64),
+                penalty_tx.parse().unwrap(),
+            )
+            .await
+            .expect("debit landed");
+
+        let header = read_auth_header(&owner, &state).await;
+        let (status, json) = get(state, &format!("/proposal/{id}"), Some(&header)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "penalized");
+        assert_eq!(json["penaltyTxHash"], penalty_tx);
+        assert_eq!(
+            json["settlementTxHash"], settlement_tx,
+            "the reverted settlement stays cited alongside the debit"
+        );
+    }
+
+    #[ignore]
     #[tokio::test]
     async fn get_proposal_non_owner_gets_404() {
-        let state = test_state();
+        let state = test_state().await;
         let owner = address!("0000000000000000000000000000000000000001");
-        let id = insert_proposal(&state, owner);
+        let id = insert_proposal(&state, owner).await;
 
         let other = alloy::signers::local::PrivateKeySigner::random();
         let header = read_auth_header(&other, &state).await;
@@ -529,15 +694,16 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn list_by_order_uid_scoped_to_caller() {
-        let state = test_state();
+        let state = test_state().await;
         let caller = alloy::signers::local::PrivateKeySigner::random();
         let competitor = address!("0000000000000000000000000000000000000002");
 
         // Two proposals on the same order UID, different sub-solvers.
-        insert_proposal(&state, caller.address());
-        insert_proposal(&state, competitor);
+        insert_proposal(&state, caller.address()).await;
+        insert_proposal(&state, competitor).await;
 
         let header = read_auth_header(&caller, &state).await;
         let uid_hex = format!("0x{}", alloy::hex::encode([0xaa; 56]));
@@ -551,14 +717,15 @@ mod tests {
         assert_eq!(returned, caller.address());
     }
 
+    #[ignore]
     #[tokio::test]
     async fn list_by_solver_uses_signer_identity() {
-        let state = test_state();
+        let state = test_state().await;
         let caller = alloy::signers::local::PrivateKeySigner::random();
         let competitor = address!("0000000000000000000000000000000000000002");
 
-        insert_proposal(&state, caller.address());
-        insert_proposal(&state, competitor);
+        insert_proposal(&state, caller.address()).await;
+        insert_proposal(&state, competitor).await;
 
         let header = read_auth_header(&caller, &state).await;
 
@@ -571,11 +738,12 @@ mod tests {
         assert_eq!(returned, caller.address());
     }
 
+    #[ignore]
     #[tokio::test]
     async fn get_proposal_without_signature_is_rejected() {
-        let state = test_state();
+        let state = test_state().await;
         let solver = address!("0000000000000000000000000000000000000001");
-        let id = insert_proposal(&state, solver);
+        let id = insert_proposal(&state, solver).await;
 
         let (status, _) = get(state, &format!("/proposal/{id}"), None).await;
 
@@ -633,7 +801,7 @@ mod tests {
         })
     }
 
-    fn insert_active_proposal(
+    async fn insert_active_proposal(
         state: &AppState,
         sub_solver: Address,
         sell_amount: u64,
@@ -644,7 +812,11 @@ mod tests {
         proposal.buy_amount = U256::from(buy_amount);
         proposal.gas_used = Some(200_000);
         proposal.trampoline = Some(Address::ZERO);
-        state.store().insert(proposal);
+        state
+            .store()
+            .insert(proposal)
+            .await
+            .expect("insert succeeds");
     }
 
     async fn raw_post_solve(app: &Router, auction: &serde_json::Value) -> axum::response::Response {
@@ -667,10 +839,11 @@ mod tests {
         json_body(response).await
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_is_not_reachable_on_the_public_router() {
-        let state = test_state();
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let state = test_state().await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
         let auction = auction_json("sell", "1000", "900");
         let response = raw_post_solve(&public_router(state), &auction).await;
@@ -678,9 +851,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn proposal_endpoints_are_not_reachable_on_the_internal_router() {
-        let state = test_state();
+        let state = test_state().await;
         let signer = PrivateKeySigner::random();
         let (body, _) = signed_proposal_body_for(&signer).await;
 
@@ -719,10 +893,11 @@ mod tests {
             .unwrap()
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_without_bearer_token_is_rejected_when_one_is_configured() {
-        let state = test_state();
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let state = test_state().await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
@@ -736,10 +911,11 @@ mod tests {
         );
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_with_the_configured_bearer_token_succeeds() {
-        let state = test_state();
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let state = test_state().await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
@@ -750,10 +926,11 @@ mod tests {
         assert_eq!(solutions.as_array().unwrap().len(), 1);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_bearer_scheme_is_case_insensitive() {
-        let state = test_state();
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let state = test_state().await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
@@ -762,10 +939,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_with_a_wrong_bearer_token_is_rejected() {
-        let state = test_state();
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let state = test_state().await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
@@ -778,10 +956,11 @@ mod tests {
         );
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_with_a_case_changed_token_is_rejected() {
-        let state = test_state();
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        let state = test_state().await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
         let auction = auction_json("sell", "1000", "900");
@@ -790,9 +969,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn healthz_stays_open_when_a_bearer_token_is_configured() {
-        let response = internal_router(test_state(), Some("driver-secret"))
+        let response = internal_router(test_state().await, Some("driver-secret"))
             .oneshot(
                 Request::builder()
                     .uri("/healthz")
@@ -805,6 +985,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn healthz_responds_on_both_routers() {
         let healthz = |app: Router| async move {
@@ -819,18 +1000,22 @@ mod tests {
             .status()
         };
 
-        assert_eq!(healthz(public_router(test_state())).await, StatusCode::OK);
         assert_eq!(
-            healthz(internal_router(test_state(), None)).await,
+            healthz(public_router(test_state().await)).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            healthz(internal_router(test_state().await, None)).await,
             StatusCode::OK
         );
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_sell_order_prices_are_cross_multiplied() {
-        let state = test_state();
+        let state = test_state().await;
         let app = internal_router(state.clone(), None);
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
         let auction = auction_json("sell", "1000", "900");
         let result = post_solve(&app, &auction).await;
@@ -845,11 +1030,12 @@ mod tests {
         assert_eq!(prices[BUY_TOKEN.to_string()], "1000");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_sell_order_executed_amount_is_sell() {
-        let state = test_state();
+        let state = test_state().await;
         let app = internal_router(state.clone(), None);
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
         let auction = auction_json("sell", "1000", "900");
         let result = post_solve(&app, &auction).await;
@@ -858,11 +1044,12 @@ mod tests {
         assert_eq!(trade["executedAmount"], "1000");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_buy_order_executed_amount_is_buy() {
-        let state = test_state();
+        let state = test_state().await;
         let app = internal_router(state.clone(), None);
-        insert_active_proposal(&state, Address::ZERO, 950, 900);
+        insert_active_proposal(&state, Address::ZERO, 950, 900).await;
 
         let auction = auction_json("buy", "1000", "900");
         let result = post_solve(&app, &auction).await;
@@ -871,14 +1058,15 @@ mod tests {
         assert_eq!(trade["executedAmount"], "900");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn solve_selects_best_of_n_proposals() {
-        let state = test_state();
+        let state = test_state().await;
         let app = internal_router(state.clone(), None);
 
         // Two proposals for the same order; second has more surplus.
-        insert_active_proposal(&state, Address::ZERO, 1_000, 920);
-        insert_active_proposal(&state, Address::ZERO, 1_000, 950);
+        insert_active_proposal(&state, Address::ZERO, 1_000, 920).await;
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
         let auction = auction_json("sell", "1000", "900");
         let result = post_solve(&app, &auction).await;
@@ -889,9 +1077,58 @@ mod tests {
         assert_eq!(solutions[0]["prices"][SELL_TOKEN.to_string()], "950");
     }
 
+    #[ignore]
+    #[tokio::test]
+    async fn solve_records_the_winning_solution_for_notify_attribution() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
+
+        let mut auction = auction_json("sell", "1000", "900");
+        auction["id"] = serde_json::json!("77");
+        let result = post_solve(&app, &auction).await;
+        assert_eq!(result["solutions"].as_array().unwrap().len(), 1);
+
+        let attributed = state
+            .store()
+            .solution_proposals(77, &[1])
+            .await
+            .expect("solutions lookup");
+        assert_eq!(
+            attributed.len(),
+            1,
+            "a returned solution must be attributable via the solutions table"
+        );
+        assert_eq!(attributed[0].order_uid, OrderUid(ORDER_UID));
+    }
+
+    /// Acceptance (COW-1204): an `Executing` proposal is frozen out of
+    /// `/solve` — its balances are about to be consumed by the in-flight
+    /// settlement.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_never_offers_an_executing_proposal() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        let mut proposal = test_proposal(
+            OrderUid(ORDER_UID),
+            Address::ZERO,
+            ProposalStatus::Executing,
+        );
+        proposal.gas_used = Some(200_000);
+        proposal.trampoline = Some(Address::ZERO);
+        state.store().insert(proposal).await.expect("insert");
+
+        let auction = auction_json("sell", "1000", "900");
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
+    }
+
+    #[ignore]
     #[tokio::test]
     async fn solve_no_proposals_returns_empty() {
-        let state = test_state();
+        let state = test_state().await;
         let app = internal_router(state.clone(), None);
         // No proposals inserted.
 
@@ -906,9 +1143,10 @@ mod tests {
     // Ingestion-time expiry check
     // -----------------------------------------------------------------------
 
+    #[ignore]
     #[tokio::test]
     async fn post_rejects_already_expired_proposal() {
-        let state = test_state();
+        let state = test_state().await;
         let app = public_router(state);
         let signer = PrivateKeySigner::random();
         let domain = eip712::byos_domain(CHAIN_ID, factory());

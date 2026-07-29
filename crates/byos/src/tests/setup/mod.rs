@@ -39,6 +39,14 @@ fn domain() -> Eip712Domain {
     eip712::byos_domain(CHAIN_ID, TRAMPOLINE_FACTORY)
 }
 
+/// Current unix timestamp in seconds.
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs()
+}
+
 // ---------------------------------------------------------------------------
 // TestDb
 // ---------------------------------------------------------------------------
@@ -119,6 +127,26 @@ impl TestApp {
     /// driver-auth path end to end.
     pub async fn spawn_with_solve_bearer_token(database_url: &str, token: &str) -> Self {
         Self::spawn_with(database_url, 3600, &["--solve-bearer-token", token]).await
+    }
+
+    /// Spawn with a custom retention window and sweep cadence (validation
+    /// stays parked), so tests can watch the sweep delete dropped proposals.
+    pub async fn spawn_with_retention(
+        database_url: &str,
+        dropped_retention: &str,
+        sweep_interval_secs: u64,
+    ) -> Self {
+        Self::spawn_with(
+            database_url,
+            3600,
+            &[
+                "--dropped-retention",
+                dropped_retention,
+                "--retention-sweep-interval-secs",
+                &sweep_interval_secs.to_string(),
+            ],
+        )
+        .await
     }
 
     async fn spawn_with(
@@ -242,9 +270,10 @@ impl Default for ProposalFixture {
             order_uid: [0xab; 56],
             sell_amount: U256::from(1_000_000u64),
             buy_amount: U256::from(990_000u64),
-            // Far future: the background expiry sweep must never reap a
+            // Inside the default 5-minute lifetime cap (ADR-0013), yet far
+            // enough out that the background expiry sweep never reaps a
             // fixture mid-test.
-            valid_until: U256::from(u32::MAX),
+            valid_until: U256::from(unix_now() + 240),
             nonce: U256::from(1u64),
             interactions: vec![Interaction {
                 target: alloy::primitives::address!("00000000000000000000000000000000000000dd"),

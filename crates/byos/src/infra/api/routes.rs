@@ -26,7 +26,7 @@ use {
         contracts::{Interaction, Proposal},
         eip712,
     },
-    std::time::{Instant, SystemTime, UNIX_EPOCH},
+    std::time::{SystemTime, UNIX_EPOCH},
 };
 
 // ---------------------------------------------------------------------------
@@ -91,13 +91,17 @@ pub async fn create_proposal(
     tracing::info!(%sub_solver, "proposal signature verified");
 
     // 6. Reject proposals that are already expired — no point accepting,
-    // storing, and auditing a DOA proposal (ADR-0001).
+    // storing, and auditing a DOA proposal (ADR-0001) — or that outlive the
+    // lifetime cap, which bounds simulation cost per proposal (ADR-0013).
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_secs();
     if valid_until < U256::from(now) {
         return Err(Error::from(Kind::ProposalExpired));
+    }
+    if valid_until > U256::from(now.saturating_add(state.max_proposal_lifetime_secs())) {
+        return Err(Error::from(Kind::ProposalLifetimeExceeded));
     }
 
     // 7. Store as Submitted. The background validator picks it up and flips
@@ -123,10 +127,11 @@ pub async fn create_proposal(
         rejection_reason: None,
         gas_used: None,
         trampoline: None,
-        created_at: Instant::now(),
+        settlement_tx_hash: None,
+        penalty_tx_hash: None,
     };
 
-    let id = state.store().insert(stored);
+    let id = state.store().insert(stored).await.map_err(internal)?;
 
     tracing::info!(%id, %sub_solver, "proposal accepted for validation");
 
@@ -147,6 +152,8 @@ pub async fn get_proposal(
     let proposal = state
         .store()
         .get(id)
+        .await
+        .map_err(internal)?
         // Non-owners get the same 404 as a genuine miss so proposal IDs
         // cannot be probed for existence (ADR-0011).
         .filter(|p| p.sub_solver == reader)
@@ -161,6 +168,8 @@ pub async fn get_proposal(
         valid_until: proposal.valid_until.to_string(),
         status: proposal.status.to_string(),
         rejection_reason: proposal.rejection_reason,
+        settlement_tx_hash: proposal.settlement_tx_hash.map(|t| format!("{t:#x}")),
+        penalty_tx_hash: proposal.penalty_tx_hash.map(|t| format!("{t:#x}")),
     }))
 }
 
@@ -178,16 +187,16 @@ pub async fn list_proposals(
     let order_uid = OrderUid::from_hex(&order_uid_hex)
         .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
-    let proposals = state.store().list_by_order_uid(&order_uid);
+    // Owner-scoped reads (ADR-0011): the store query only returns the
+    // caller's own proposals on this order.
+    let proposals = state
+        .store()
+        .list_by_order_uid_for_owner(&order_uid, reader)
+        .await
+        .map_err(internal)?;
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals
-            .iter()
-            // Owner-scoped reads (ADR-0011): competitors' proposals on the
-            // same order are invisible to the caller.
-            .filter(|p| p.sub_solver == reader)
-            .map(|p| ProposalMetadata::from(p.as_ref()))
-            .collect(),
+        proposals: proposals.iter().map(ProposalMetadata::from).collect(),
     }))
 }
 
@@ -204,13 +213,14 @@ pub async fn list_proposals_by_solver(
 ) -> Result<Json<ListProposalsResponse>, Error> {
     let reader = authenticate_reader(&headers, state.domain())?;
 
-    let proposals = state.store().list_by_sub_solver(reader);
+    let proposals = state
+        .store()
+        .list_by_sub_solver(reader)
+        .await
+        .map_err(internal)?;
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals
-            .iter()
-            .map(|p| ProposalMetadata::from(p.as_ref()))
-            .collect(),
+        proposals: proposals.iter().map(ProposalMetadata::from).collect(),
     }))
 }
 
@@ -233,15 +243,18 @@ pub async fn cancel_proposal(
     // 3. Cancel the proposal (store checks ownership). Non-owners get the
     // same 404 as a genuine miss — a 403 would be an existence oracle for
     // proposal ids, the thing ADR-0011's owner-scoped 404 exists to prevent.
-    state.store().cancel(id, signer).map_err(|e| match e {
-        crate::domain::proposal::StoreError::NotFound(_)
-        | crate::domain::proposal::StoreError::NotOwner(_, _) => {
-            Error::from(Kind::ProposalNotFound)
-        }
-        crate::domain::proposal::StoreError::StaleTransition { .. } => {
-            Error::from(Kind::ProposalNotCancellable)
-        }
-    })?;
+    use crate::infra::storage::StoreError;
+    state
+        .store()
+        .cancel(id, signer)
+        .await
+        .map_err(|e| match e {
+            StoreError::NotFound(_) | StoreError::NotOwner(_, _) => {
+                Error::from(Kind::ProposalNotFound)
+            }
+            StoreError::StaleTransition { .. } => Error::from(Kind::ProposalNotCancellable),
+            e => internal(e),
+        })?;
 
     tracing::info!(%id, %signer, "proposal cancelled");
 
@@ -251,6 +264,12 @@ pub async fn cancel_proposal(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// A store failure the caller can do nothing about: log it, answer 500.
+fn internal(e: crate::infra::storage::StoreError) -> Error {
+    tracing::error!(%e, "proposal store error");
+    Error::from(Kind::Internal)
+}
 
 /// Authenticates a GET request: extracts the `X-Signature` bearer token and
 /// recovers the reader's address from the `ReadAuth` EIP-712 message

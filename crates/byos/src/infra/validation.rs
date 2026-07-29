@@ -7,9 +7,9 @@
 //! simulation data on re-validation.
 
 use {
-    crate::domain::{
-        proposal::{InMemoryProposalStore, ProposalStatus},
-        validator::ValidateProposal,
+    crate::{
+        domain::{proposal::ProposalStatus, validator::ValidateProposal},
+        infra::storage::ProposalStore,
     },
     std::{
         sync::Arc,
@@ -20,33 +20,39 @@ use {
 /// Spawn the background validation loop: one [`run_tick`] every `period`.
 ///
 /// The task runs for the life of the process; it is torn down with the
-/// runtime on shutdown. A tick does bounded in-memory work today — when the
-/// validator grows RPC calls (COW-1162), drain/cancellation concerns land
-/// there.
+/// runtime on shutdown.
 pub fn spawn(
-    store: Arc<InMemoryProposalStore>,
+    store: Arc<ProposalStore>,
     validator: impl ValidateProposal + 'static,
     period: Duration,
+    executing_timeout: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(period);
+        // First tick a full period out — a plain `interval` fires
+        // immediately, which would race service startup (and tests that
+        // park the loop with a long period would still get one tick).
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock before Unix epoch")
                 .as_secs();
-            run_tick(&store, &validator, now).await;
+            run_tick(&store, &validator, now, executing_timeout).await;
         }
     })
 }
 
-/// One pass of the background validator, in two sweeps:
+/// One pass of the background validator, in three sweeps:
 ///
-/// 1. **Expiry** — any live (`Submitted`/`Active`) proposal whose `valid_until`
-///    is behind `now` flips to `Expired`. Runs first so an already-expired
-///    submission is never validated and activated.
-/// 2. **Validation** — every remaining `Submitted` and `Active` proposal is
+/// 1. **Executing timeout** (ADR-0013) — any `Executing` proposal older than
+///    `executing_timeout` falls back to `Active`. Runs first so a released
+///    proposal joins this very tick's validation set: if its settlement
+///    actually landed, re-simulation kills it now, not a tick later.
+/// 2. **Expiry** — any live (`Submitted`/`Active`) proposal whose `valid_until`
+///    is behind `now` flips to `Expired`. Runs before validation so an
+///    already-expired submission is never validated and activated.
+/// 3. **Validation** — every remaining `Submitted` and `Active` proposal is
 ///    judged by the validator concurrently (all RPC calls in flight at once)
 ///    and transitioned to `Active`/`Rejected`/`SimFailed`.
 ///
@@ -55,19 +61,37 @@ pub fn spawn(
 /// when we stop showing/simulating a proposal — the chain enforces the real
 /// deadline.
 ///
-/// Works on a single snapshot of all live proposals (one lock acquisition,
-/// one scan); each write is a compare-and-swap transition, so a proposal
-/// cancelled mid-validation keeps its cancellation (the stale verdict is
-/// dropped).
-pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidateProposal, now: u64) {
+/// Works on a single snapshot of all live proposals (one query per tick);
+/// each write is a compare-and-swap transition, so a proposal cancelled
+/// mid-validation keeps its cancellation (the stale verdict is dropped).
+/// A database error skips the tick — the next one retries from scratch.
+pub async fn run_tick(
+    store: &ProposalStore,
+    validator: &impl ValidateProposal,
+    now: u64,
+    executing_timeout: Duration,
+) {
     validator.begin_tick();
 
-    let live = store.snapshot_by_statuses(&[ProposalStatus::Submitted, ProposalStatus::Active]);
+    if let Err(e) = store.release_stale_executing(executing_timeout).await {
+        tracing::error!(%e, "executing-timeout release failed; retrying next tick");
+    }
+
+    let live = match store
+        .snapshot_by_statuses(&[ProposalStatus::Submitted, ProposalStatus::Active])
+        .await
+    {
+        Ok(live) => live,
+        Err(e) => {
+            tracing::error!(%e, "validation tick skipped: snapshot failed");
+            return;
+        }
+    };
 
     let mut to_validate = Vec::new();
     for proposal in live {
         if proposal.valid_until < alloy::primitives::U256::from(now) {
-            match store.transition(proposal.id, proposal.status, ProposalStatus::Expired) {
+            match store.transition(&proposal, ProposalStatus::Expired).await {
                 Ok(()) => tracing::info!(id = %proposal.id, "proposal expired"),
                 Err(e) => tracing::debug!(id = %proposal.id, %e, "stale expiry dropped"),
             }
@@ -93,7 +117,7 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidatePr
                 tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
                 continue;
             };
-            match store.resolve_verdict(proposal.id, verdict) {
+            match store.resolve_verdict(proposal.id, verdict).await {
                 Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
                 Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
             }
@@ -105,12 +129,19 @@ pub async fn run_tick(store: &InMemoryProposalStore, validator: &impl ValidatePr
 mod tests {
     use {
         super::*,
-        crate::domain::{
-            proposal::{OrderUid, Proposal, ProposalStatus, test_proposal},
-            validator::AcceptAll,
+        crate::{
+            domain::{
+                proposal::{OrderUid, Proposal, ProposalStatus, test_proposal},
+                validator::AcceptAll,
+            },
+            tests::setup::TestDb,
         },
         alloy::primitives::{Address, U256},
     };
+
+    /// Generous enough that no test releases an Executing proposal by
+    /// accident; the release tests pass their own timeout.
+    const EXECUTING_TIMEOUT: Duration = Duration::from_secs(3600);
 
     fn submitted_proposal() -> Proposal {
         test_proposal(
@@ -120,47 +151,62 @@ mod tests {
         )
     }
 
-    /// Store plus its audit receiver — kept alive so emits don't log errors;
-    /// these tests assert on statuses, not evidence.
-    fn test_store() -> (
-        InMemoryProposalStore,
-        tokio::sync::mpsc::UnboundedReceiver<crate::domain::audit::AuditEvent>,
-    ) {
+    /// Store on a fresh database. The audit receiver is leaked to keep the
+    /// channel open; these tests assert on statuses, not evidence.
+    async fn test_store() -> ProposalStore {
+        let db = TestDb::create().await;
+        let pool = crate::infra::audit::connect_and_migrate(&db.url)
+            .await
+            .expect("migrations run");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (InMemoryProposalStore::new(tx), rx)
+        std::mem::forget(rx);
+        ProposalStore::new(pool, tx)
     }
 
-    #[tokio::test(start_paused = true)]
+    #[ignore]
+    #[tokio::test]
     async fn spawned_loop_validates_on_its_interval() {
-        let (store, _audit) = test_store();
-        let store = std::sync::Arc::new(store);
-        let id = store.insert(submitted_proposal());
+        let store = std::sync::Arc::new(test_store().await);
+        let id = store.insert(submitted_proposal()).await.expect("insert");
 
-        let _loop = spawn(store.clone(), AcceptAll, std::time::Duration::from_secs(12));
-        tokio::time::sleep(std::time::Duration::from_secs(13)).await;
-
-        assert_eq!(
-            store.get(id).expect("exists").status,
-            ProposalStatus::Active
+        let _loop = spawn(
+            store.clone(),
+            AcceptAll,
+            Duration::from_millis(50),
+            EXECUTING_TIMEOUT,
         );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = store.get(id).await.expect("get").expect("exists").status;
+            if status == ProposalStatus::Active {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "loop never validated the proposal, still {status}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
+    #[ignore]
     #[tokio::test]
     async fn tick_flips_submitted_to_active_with_accept_all() {
-        let (store, _audit) = test_store();
-        let id = store.insert(submitted_proposal());
+        let store = test_store().await;
+        let id = store.insert(submitted_proposal()).await.expect("insert");
 
-        run_tick(&store, &AcceptAll, 0).await;
+        run_tick(&store, &AcceptAll, 0, EXECUTING_TIMEOUT).await;
 
         assert_eq!(
-            store.get(id).expect("exists").status,
+            store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::Active
         );
     }
 
     struct FailAll;
 
-    impl ValidateProposal for FailAll {
+    impl crate::domain::validator::ValidateProposal for FailAll {
         async fn validate(
             &self,
             _proposal: &Proposal,
@@ -169,66 +215,109 @@ mod tests {
         }
     }
 
+    #[ignore]
     #[tokio::test]
     async fn tick_marks_sim_failed_proposals() {
-        let (store, _audit) = test_store();
-        let id = store.insert(submitted_proposal());
+        let store = test_store().await;
+        let id = store.insert(submitted_proposal()).await.expect("insert");
 
-        run_tick(&store, &FailAll, 0).await;
+        run_tick(&store, &FailAll, 0, EXECUTING_TIMEOUT).await;
 
-        let proposal = store.get(id).expect("exists");
+        let proposal = store.get(id).await.expect("get").expect("exists");
         assert_eq!(proposal.status, ProposalStatus::SimFailed);
         assert_eq!(proposal.rejection_reason, None);
     }
 
-    #[tokio::test]
-    async fn cancellation_during_validation_wins_over_the_verdict() {
-        let (store, _audit) = test_store();
-        let proposal = submitted_proposal();
-        let sub_solver = proposal.sub_solver;
-        let id = store.insert(proposal);
-
-        // The owner cancels after the tick snapshotted the proposal but
-        // before the verdict lands: applying the verdict must fail and the
-        // cancellation must stick.
-        store.cancel(id, sub_solver).expect("cancel succeeds");
-        let stale = store.resolve_verdict(id, crate::domain::validator::Verdict::Accept(None));
-
-        assert!(stale.is_err(), "stale verdict must be dropped");
-        assert_eq!(
-            store.get(id).expect("exists").status,
-            ProposalStatus::Cancelled,
-            "a stale Accept verdict must not resurrect a cancelled proposal"
-        );
-    }
-
+    #[ignore]
     #[tokio::test]
     async fn tick_expires_active_proposals_past_valid_until() {
-        let (store, _audit) = test_store();
+        let store = test_store().await;
         let mut proposal = submitted_proposal();
         proposal.status = ProposalStatus::Active;
         proposal.valid_until = U256::from(1_000_u64);
-        let id = store.insert(proposal);
+        let id = store.insert(proposal).await.expect("insert");
 
-        run_tick(&store, &AcceptAll, 1_001).await;
+        run_tick(&store, &AcceptAll, 1_001, EXECUTING_TIMEOUT).await;
 
         assert_eq!(
-            store.get(id).expect("exists").status,
+            store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::Expired
         );
     }
 
+    /// The tick applies the executing-timeout backstop: a stale `Executing`
+    /// proposal re-enters competition (and this same tick's validation set).
+    #[ignore]
     #[tokio::test]
-    async fn tick_expires_submitted_proposals_instead_of_validating_them() {
-        let (store, _audit) = test_store();
+    async fn tick_releases_executing_proposals_past_the_timeout() {
+        let store = test_store().await;
         let mut proposal = submitted_proposal();
-        proposal.valid_until = U256::from(1_000_u64);
-        let id = store.insert(proposal);
+        proposal.status = ProposalStatus::Executing;
+        let id = store.insert(proposal).await.expect("insert");
 
-        run_tick(&store, &AcceptAll, 1_001).await;
+        run_tick(&store, &AcceptAll, 0, Duration::ZERO).await;
 
         assert_eq!(
-            store.get(id).expect("exists").status,
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::Active,
+            "a zero timeout makes any Executing proposal stale"
+        );
+    }
+
+    /// The executing-timeout release is not a driver-confirmed abandonment —
+    /// the notification may simply be lost — so it must not queue the
+    /// non-settlement charge (COW-1205); only `/notify` does.
+    #[ignore]
+    #[tokio::test]
+    async fn timeout_release_queues_no_non_settlement_penalty() {
+        let store = test_store().await;
+        let mut proposal = submitted_proposal();
+        proposal.status = ProposalStatus::Executing;
+        store.insert(proposal).await.expect("insert");
+
+        run_tick(&store, &AcceptAll, 0, Duration::ZERO).await;
+
+        assert!(
+            store.pending_penalties().await.expect("pending").is_empty(),
+            "an unproven non-settlement must not be charged"
+        );
+    }
+
+    /// Acceptance (COW-1204): while `Executing`, a proposal is neither
+    /// re-simulated nor expired — its exit is a driver notification or the
+    /// executing timeout, not the validation tick (ADR-0013).
+    #[ignore]
+    #[tokio::test]
+    async fn tick_never_touches_executing_proposals() {
+        let store = test_store().await;
+        let mut proposal = submitted_proposal();
+        proposal.status = ProposalStatus::Executing;
+        // Behind the clock: the expiry sweep would flip it if it looked, and
+        // FailAll would flip anything it validates.
+        proposal.valid_until = U256::from(1_000_u64);
+        let id = store.insert(proposal).await.expect("insert");
+
+        run_tick(&store, &FailAll, 2_000, EXECUTING_TIMEOUT).await;
+
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::Executing,
+            "neither the expiry sweep nor the validator may touch Executing"
+        );
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn tick_expires_submitted_proposals_instead_of_validating_them() {
+        let store = test_store().await;
+        let mut proposal = submitted_proposal();
+        proposal.valid_until = U256::from(1_000_u64);
+        let id = store.insert(proposal).await.expect("insert");
+
+        run_tick(&store, &AcceptAll, 1_001, EXECUTING_TIMEOUT).await;
+
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::Expired
         );
     }

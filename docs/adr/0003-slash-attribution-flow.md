@@ -47,6 +47,8 @@ Sub-solvers are responsible for including pre/post hooks from order app data in 
 
 Track A is BYOS-unilateral. For reverts and deadline misses, everything is on-chain-verifiable (tx receipt, gas cost, Trampoline CREATE2 address → sub-solver attribution per [contracts ADR-0001](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0001-trampoline-topology.md)). The non-settlement sub-category is based on BYOS's internal auction records and is not independently verifiable by the sub-solver — this is an accepted trust assumption.
 
+**Non-settlement detection** (decided with COW-1205): a driver `Cancelled`/`Expired`/`Fail` notification for an `Executing` proposal is the trigger — the driver confirmed it began submitting (`SettlementStarted`, [ADR-0010](0010-settlement-outcome-source.md)) and then abandoned the settlement with no tx landing, which covers both submission failures and the driver's own block deadline (a few blocks per chain). The executing-*timeout* release ([ADR-0013](0013-proposal-lifecycle-and-retention.md)) is **not** charged: a lost notification is not proof of non-settlement.
+
 ### Track B — EBBO / fairness passthrough (rare, slow, CIP-52 mirror)
 
 ```
@@ -100,7 +102,7 @@ Passing gatekeeping does not absolve the sub-solver of liability if CoW later de
 
 ### Transparency
 
-The escrow's on-chain events are the public record of every penalty action ([contracts ADR-0002](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0002-escrow-contract.md) defines the event set). No additional public reporting or dashboard. BYOS notifies the affected sub-solver privately with full evidence for any penalty. The `_reason` convention on `debit`: the settlement tx hash for Track A, the claim ID for Track B.
+The escrow's on-chain events are the public record of every penalty action ([contracts ADR-0002](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0002-escrow-contract.md) defines the event set). No additional public reporting or dashboard. BYOS notifies the affected sub-solver privately with full evidence for any penalty. The `_reason` convention on `debit`: the settlement tx hash for Track A reverts, the order UID hash for non-settlement (no tx exists), the claim ID for Track B.
 
 ### Policy lifecycle
 

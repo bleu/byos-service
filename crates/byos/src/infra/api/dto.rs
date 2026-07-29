@@ -80,6 +80,14 @@ pub struct GetProposalResponse {
     /// Only present when `status` is `rejected`. PascalCase enum (ADR-0007).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<crate::domain::validator::RejectionReason>,
+    /// Only present on settlement outcomes: the landed tx for `settled`,
+    /// the reverted tx for `settleFailed` (ADR-0013).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement_tx_hash: Option<String>,
+    /// Only present when `status` is `penalized`: the Track A escrow debit
+    /// tx that closed the `settleFailed` story (ADR-0003, COW-1205).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub penalty_tx_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

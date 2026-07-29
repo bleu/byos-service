@@ -6,8 +6,10 @@
 use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
 
 /// Why the background validator rejected a proposal. PascalCase on the wire
-/// (ADR-0007), exposed to sub-solvers via `GET /proposal/{id}`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// (ADR-0007), exposed to sub-solvers via `GET /proposal/{id}`; the strum
+/// derives use the same PascalCase strings for the
+/// `proposals.rejection_reason` column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, strum::Display, strum::EnumString)]
 #[non_exhaustive]
 pub enum RejectionReason {
     InsufficientEscrow,
@@ -19,6 +21,10 @@ pub enum RejectionReason {
     AmountMismatch,
     /// The orderbook does not know the proposal's order uid.
     OrderNotFound,
+    /// The first simulation scored the proposal at or below the minimum
+    /// (`score = surplus + fee - gas`, ADR-0002) — it could never win an
+    /// auction, so it is rejected at the gate (ADR-0013).
+    Unprofitable,
 }
 
 /// Results of a successful simulation, stored on the proposal by the

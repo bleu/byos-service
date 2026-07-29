@@ -45,8 +45,19 @@ info:
     proposal is stored as `submitted`; a background validator then runs the
     escrow check and settlement simulation and flips it to `active`,
     `rejected`, or `simFailed`. Sub-solvers poll `GET /proposal/{id}` for
-    the verdict. `rejected`, `simFailed`, `expired`, `cancelled`, and
-    `settled` are terminal — resubmission is a new `POST`.
+    the verdict.
+
+    When a proposal wins an auction and the driver starts submitting the
+    settlement, it becomes `executing` (ADR-0013): frozen — not offered to
+    further auctions, not re-simulated, not expired, not cancellable
+    (`DELETE` answers `409`). The driver's outcome resolves it: `settled`
+    (tx landed) or `settleFailed` (tx reverted), each recording
+    `settlementTxHash`; an abandoned submission returns it to `active`. A
+    `settleFailed` proposal later becomes `penalized` when the Track A
+    escrow debit lands (ADR-0003/ADR-0010).
+
+    `rejected`, `simFailed`, `expired`, `cancelled`, `settled`, and
+    `penalized` are terminal — resubmission is a new `POST`.
 
     The driver-facing `/solve` endpoint is not part of this spec: it is
     served on a separate internal listener and implements the CoW Protocol
@@ -81,10 +92,11 @@ paths:
       summary: Submit a signed settlement proposal.
       description: |
         Parses the request, recovers the sub-solver address from the EIP-712
-        `ProposalData` signature, and rejects proposals whose `validUntil`
-        is already in the past. On success the proposal is stored as
-        `submitted` and validated in the background; poll
-        `GET /proposal/{id}` for the verdict.
+        `ProposalData` signature, and checks the expiry window: `validUntil`
+        must be in the future but no further out than the maximum proposal
+        lifetime (ADR-0013; deployment-configurable, default 5 minutes). On
+        success the proposal is stored as `submitted` and validated in the
+        background; poll `GET /proposal/{id}` for the verdict.
 
         Token addresses are not part of the request: they come from the
         orderbook order during background validation (ADR-0012).
@@ -110,8 +122,10 @@ paths:
         "400":
           description: |
             Malformed request (`BadRequest`), invalid or unrecoverable
-            signature (`InvalidSignature`, `SignatureRecoveryFailed`), or a
-            proposal that is already expired (`ProposalExpired`).
+            signature (`InvalidSignature`, `SignatureRecoveryFailed`), a
+            proposal that is already expired (`ProposalExpired`), or a
+            `validUntil` beyond the maximum proposal lifetime
+            (`ProposalLifetimeExceeded`).
           content:
             application/json:
               schema:
@@ -124,9 +138,12 @@ paths:
       operationId: getProposal
       summary: Get one of the caller's proposals.
       description: |
-        Returns the proposal's amounts, status, and, when `status` is
-        `rejected`, the machine-readable `rejectionReason`. The submitted
-        `interactions`, `nonce`, and `signature` are not echoed back.
+        Returns the proposal's amounts, status, and, depending on `status`,
+        the machine-readable `rejectionReason` (`rejected`), the
+        `settlementTxHash` (`settled`/`settleFailed`/`penalized`), or the
+        `penaltyTxHash` (`penalized`). The
+        submitted `interactions`, `nonce`, and `signature` are not echoed
+        back.
         Owner-scoped: the proposal is only returned if the `X-Signature`
         signer is its sub-solver.
       security:
@@ -181,7 +198,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The proposal is already in a terminal state.
+          description: |
+            The proposal is not cancellable: `executing` (a settlement
+            built on it is in flight, ADR-0013) or already terminal.
           content:
             application/json:
               schema:
@@ -311,24 +330,34 @@ components:
       example: 42
     ProposalStatus:
       description: |
-        Lifecycle state of a proposal (ADR-0001):
+        Lifecycle state of a proposal (ADR-0013):
 
         - `submitted` — signature verified, awaiting background validation.
         - `active` — passed gatekeeping; eligible for `/solve` selection.
         - `rejected` — failed a gatekeeping rule; see `rejectionReason`.
         - `expired` — `validUntil` passed.
-        - `settled` — the order was filled by this proposal.
+        - `executing` — won an auction; the settlement is being submitted.
+          Exits via the driver's outcome or a timeout back to `active`.
+        - `settled` — the settlement landed on-chain; see
+          `settlementTxHash`.
+        - `settleFailed` — the settlement reverted on-chain (see
+          `settlementTxHash`); the Track A escrow debit follows.
+        - `penalized` — the Track A debit landed; see `penaltyTxHash`.
         - `simFailed` — the settlement simulation reverted.
         - `cancelled` — cancelled by a signed `DELETE`.
 
-        All states except `submitted` and `active` are terminal.
+        All states except `submitted`, `active`, `executing`, and
+        `settleFailed` are terminal.
       type: string
       enum:
         - submitted
         - active
         - rejected
         - expired
+        - executing
         - settled
+        - settleFailed
+        - penalized
         - simFailed
         - cancelled
     RejectionReason:
@@ -344,12 +373,17 @@ components:
           orders).
         - `OrderNotFound` — the orderbook does not know the proposal's
           order UID.
+        - `Unprofitable` — the first simulation scored the proposal at or
+          below the minimum (`score = surplus + fee - gas`, ADR-0002), so it
+          could never win an auction (ADR-0013). Fix: improve the price or
+          resubmit when gas is cheaper.
       type: string
       enum:
         - InsufficientEscrow
         - UnsupportedOrder
         - AmountMismatch
         - OrderNotFound
+        - Unprofitable
     Interaction:
       description: |
         One arbitrary call executed inside the sub-solver's Trampoline at
@@ -396,7 +430,12 @@ components:
           items:
             $ref: "#/components/schemas/Interaction"
         validUntil:
-          description: Unix timestamp after which the proposal expires.
+          description: |
+            Unix timestamp after which the proposal expires. Must be in the
+            future, and at most the maximum proposal lifetime from now
+            (ADR-0013; deployment-configurable, default 5 minutes) —
+            otherwise the request is rejected with
+            `ProposalLifetimeExceeded`.
           allOf:
             - $ref: "#/components/schemas/UnixTimestamp"
         nonce:
@@ -451,6 +490,22 @@ components:
           description: Only present when `status` is `rejected`.
           allOf:
             - $ref: "#/components/schemas/RejectionReason"
+        settlementTxHash:
+          description: |
+            Only present on settlement outcomes: the landed transaction for
+            `settled`, the reverted one for `settleFailed`/`penalized`
+            (ADR-0013).
+          type: string
+          pattern: "^0x[0-9a-f]{64}$"
+          example: "0x2d6cea6413a3b2e37a1a5c1780e17dee056bd63c2fd0fd60d75bfa9ea38e2e28"
+        penaltyTxHash:
+          description: |
+            Only present when `status` is `penalized`: the Track A escrow
+            debit transaction that charged the sub-solver `gas + c_l` for
+            the reverted settlement (ADR-0003).
+          type: string
+          pattern: "^0x[0-9a-f]{64}$"
+          example: "0x7b1f3a9c5d8e2f4a6b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a"
     ProposalMetadata:
       description: |
         Metadata only — no amounts, no interactions. List views never expose
@@ -496,6 +551,7 @@ components:
             - SignatureRecoveryFailed
             - InsufficientEscrow
             - ProposalExpired
+            - ProposalLifetimeExceeded
             - ProposalNotFound
             - ProposalNotCancellable
             - BadRequest

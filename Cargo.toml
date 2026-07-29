@@ -39,6 +39,7 @@ axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
+humantime = "2"
 humantime-serde = "1"
 parking_lot = "0.12"
 reqwest = { version = "0.12", features = ["json"] }

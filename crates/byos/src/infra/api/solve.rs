@@ -1,11 +1,12 @@
-//! `/solve` hot path: served entirely from the in-memory proposal cache.
-//! Zero simulation, zero RPC, zero DB on this path (ADR-0002).
+//! `/solve` hot path: one indexed read over the live proposal rows per
+//! auction order (ADR-0013 — no cache layer until latency data says
+//! otherwise). Zero simulation, zero RPC on this path (ADR-0002).
 
 use {
     super::AppState,
     crate::domain::{
         proposal::{OrderUid, Proposal},
-        scoring::{ScoreInput, effective_gas, score_proposal},
+        scoring::{ScoreInput, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -39,23 +40,24 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
     for order in &auction.orders {
         let order_uid = OrderUid(order.uid);
 
-        let proposals = state.store().list_by_order_uid(&order_uid);
+        let proposals = match state.store().list_by_order_uid(&order_uid).await {
+            Ok(proposals) => proposals,
+            Err(e) => {
+                // Skip this order rather than fail the whole auction — a
+                // missing bid loses one round, a 500 loses them all.
+                tracing::error!(%e, order_uid = %order_uid, "solve: proposal lookup failed");
+                continue;
+            }
+        };
         if proposals.is_empty() {
             continue;
         }
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
 
-        // The surplus token is the buy token for sell orders, sell token for buy
-        // orders.
-        let surplus_token = if is_sell {
-            order.buy_token
-        } else {
-            order.sell_token
-        };
         let native_price = auction
             .tokens
-            .get(&surplus_token)
+            .get(&surplus_token(is_sell, order.sell_token, order.buy_token))
             .and_then(|t| t.reference_price)
             .unwrap_or(U256::ZERO);
 
@@ -88,9 +90,27 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         // Build the solution using solvers-dto types.
         let id = solutions.len() as u64 + 1;
-        if let Some(sol) = build_solution(id, order, proposal, gas_used) {
-            solutions.push(sol);
+        let Some(sol) = build_solution(id, order, proposal, gas_used) else {
+            continue;
+        };
+
+        // Record notification attribution before bidding (ADR-0013): if we
+        // can't record it, we don't bid it. Auctions without an id (quote
+        // requests) are never settled, so there is nothing to attribute.
+        let solution_id = i64::try_from(id).expect("bounded by the auction's order count");
+        if let Some(auction_id) = auction.id
+            && let Err(e) = state
+                .store()
+                .record_solution(auction_id, solution_id, proposal.id)
+                .await
+        {
+            tracing::error!(
+                %e, proposal_id = %proposal.id,
+                "solve: solution not recorded, dropping the bid"
+            );
+            continue;
         }
+        solutions.push(sol);
     }
 
     tracing::debug!(count = solutions.len(), "solve: returning solutions");

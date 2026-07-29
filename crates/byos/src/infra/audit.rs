@@ -11,30 +11,20 @@ use {
 };
 
 /// Connect and run migrations. Called at boot; an unreachable database is
-/// fatal — the service must never run without its evidence trail.
+/// fatal — the service must never run without its evidence trail or its
+/// proposal store (the pool is shared with
+/// [`crate::infra::storage::ProposalStore`]).
 pub async fn connect_and_migrate(database_url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
         .await
-        .context("connecting to audit database")?;
+        .context("connecting to database")?;
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
-        .context("running audit database migrations")?;
+        .context("running database migrations")?;
     Ok(pool)
-}
-
-/// Highest proposal ID ever recorded, or 0 on a fresh trail. The audit trail
-/// is the ID authority: the in-memory counter reseeds from here at boot so
-/// IDs stay unique across restarts and evidence rows stay unambiguous.
-pub async fn max_proposal_id(pool: &PgPool) -> anyhow::Result<crate::domain::proposal::ProposalId> {
-    let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(proposal_id), 0) FROM audit_events")
-        .fetch_one(pool)
-        .await
-        .context("reading max proposal id from audit trail")?;
-    let id = u64::try_from(max).context("negative proposal id in audit trail")?;
-    Ok(crate::domain::proposal::ProposalId(id))
 }
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -85,8 +75,7 @@ async fn insert(pool: &PgPool, event: &AuditEvent) -> Result<(), sqlx::Error> {
     .bind(event.event_type())
     .bind(format!("{:#x}", event.sub_solver()))
     .bind(event.order_uid().to_string())
-    // No settling event types exist yet; reserved for ADR-0010 outcomes.
-    .bind(Option::<String>::None)
+    .bind(event.settlement_tx_hash().map(|t| format!("{t:#x}")))
     .bind(event.payload())
     .bind(chrono::DateTime::<chrono::Utc>::from(event.occurred_at))
     .execute(pool)
