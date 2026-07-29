@@ -36,7 +36,7 @@ pub enum StoreError {
         expected: String,
         actual: ProposalStatus,
     },
-    #[error("database error")]
+    #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
 
