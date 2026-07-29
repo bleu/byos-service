@@ -53,8 +53,8 @@ pub fn spawn(
 ///    is behind `now` flips to `Expired`. Runs before validation so an
 ///    already-expired submission is never validated and activated.
 /// 3. **Validation** — every remaining `Submitted` and `Active` proposal is
-///    judged by the validator concurrently (all RPC calls in flight at once)
-///    and transitioned to `Active`/`Rejected`/`SimFailed`.
+///    judged by the validator concurrently (semaphore-bounded RPC calls) and
+///    transitioned to `Active`/`Rejected`/`SimFailed`.
 ///
 /// `now` is a unix timestamp from the wall clock; `valid_until` is signed
 /// against block timestamps. The drift is seconds at most and only affects
@@ -101,28 +101,29 @@ pub async fn run_tick(
         }
     }
 
-    // Dispatch validations in batches of 8 to avoid bursting paid-RPC rate
-    // limits while still parallelizing network calls within each batch.
+    // A semaphore keeps at most 8 validations in flight, to avoid bursting
+    // paid-RPC rate limits while still parallelizing network calls. Each
+    // verdict is resolved as soon as its validation finishes.
     const MAX_CONCURRENT: usize = 8;
-    for chunk in to_validate.chunks(MAX_CONCURRENT) {
-        let results = futures::future::join_all(
-            chunk
-                .iter()
-                .map(|proposal| async move { (proposal, validator.validate(proposal).await) }),
-        )
-        .await;
-
-        for (proposal, verdict) in results {
-            let Some(verdict) = verdict else {
+    let semaphore = tokio::sync::Semaphore::new(MAX_CONCURRENT);
+    futures::future::join_all(to_validate.iter().map(|proposal| {
+        let semaphore = &semaphore;
+        async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("semaphore is never closed");
+            let Some(verdict) = validator.validate(proposal).await else {
                 tracing::debug!(id = %proposal.id, "validator deferred judgment, will retry next tick");
-                continue;
+                return;
             };
             match store.resolve_verdict(proposal.id, verdict).await {
                 Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
                 Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
             }
         }
-    }
+    }))
+    .await;
 }
 
 #[cfg(test)]

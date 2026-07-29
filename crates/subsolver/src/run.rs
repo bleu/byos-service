@@ -380,7 +380,17 @@ mod tests {
     /// Mocks `GET /proposal/{id}` answering with `status` (and, for
     /// rejections, a reason), requiring read auth (ADR-0011).
     async fn mock_verdict(byos: &MockServer, id: u64, status: &str) {
-        let mut body = json!({ "id": id, "status": status });
+        // The full GET /proposal/{id} body: the shared GetProposalResponse
+        // requires every field the real server serves.
+        let mut body = json!({
+            "id": id,
+            "subSolver": Address::ZERO,
+            "orderUid": format!("0x{}", "11".repeat(56)),
+            "sellAmount": "1000",
+            "buyAmount": "906",
+            "validUntil": "1750000000",
+            "status": status,
+        });
         if status == "rejected" {
             body["rejectionReason"] = json!("InsufficientEscrow");
         }

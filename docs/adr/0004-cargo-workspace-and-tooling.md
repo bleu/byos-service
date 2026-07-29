@@ -14,7 +14,8 @@ Adopt the services conventions, trimmed to this repo's size:
 
 - **Single Cargo workspace**, `resolver = "3"`, members `crates/*`. The root `Cargo.toml` is workspace-only (no root package).
 - **All dependencies declared once in `[workspace.dependencies]`** — external and internal alike. Internal crates appear as path deps (`byos = { path = "crates/byos" }`) so any crate can depend on a sibling by bare name with `{ workspace = true }`. Version bumps happen in one place.
-- **Workspace lints**: `[workspace.lints]` at the root (starting with `clippy.cast_possible_wrap = "deny"`, extended as needs arise); every crate opts in with `[lints] workspace = true`. No `[workspace.package]` inheritance — each crate states its own version/edition/authors/license, matching services.
+- **Workspace lints**: `[workspace.lints]` at the root (starting with `clippy.cast_possible_wrap = "deny"`, extended as needs arise); every crate opts in with `[lints] workspace = true`.
+- **`[workspace.package]` inheritance** for version/edition/authors/license — crates inherit with `<field>.workspace = true` and state only their own name and description. This diverges from services (which repeats the metadata per crate); the divergence is cosmetic and one-directional, so it does not hinder moving code between the repos.
 - **Edition 2024, stable toolchain** (`rust-toolchain.toml`: stable channel, minimal profile, clippy + rustfmt components).
 - **Nightly-only rustfmt**: `rustfmt.toml` copies the services config verbatim (`imports_granularity = "One"`, `group_imports = "StdExternalCrate"`, `format_strings`, comment formatting, etc.). These are unstable options, so formatting runs as `cargo +nightly fmt` — never stable fmt. Format only as the final step of a change.
 - **Clippy at `-D warnings`**: `cargo clippy --locked --workspace --all-features --all-targets -- -D warnings`.
@@ -31,12 +32,12 @@ Deliberately not adopted (yet):
 ## Alternatives considered
 
 - **Per-crate dependency versions (no workspace centralization).** Rejected — version skew across crates is the default failure mode of multi-crate repos; services solved it this way and we get it for free.
-- **`[workspace.package]` inheritance.** More DRY than repeating version/edition per crate, and arguably the modern default. Rejected in favor of matching services exactly — the repetition cost across four crates is trivial, and consistency with the reference codebase wins.
+- **Per-crate package metadata (no `[workspace.package]`), matching services exactly.** How this repo started. Dropped — the repeated version/edition/authors/license lines drift as crates are added, and the consistency-with-services argument only pays off for conventions that affect how code reads, which package metadata does not.
 - **Stable rustfmt with default options.** Avoids the nightly requirement. Rejected — import granularity/grouping is where most formatting churn lives, and diverging from services' style makes cross-repo code movement noisy.
 - **Makefile or shell scripts instead of Justfile.** Rejected — services uses just; recipes double as documentation of the exact CI commands.
 
 ## Consequences
 
 - Contributors need a nightly toolchain installed for `just fmt`, and `just` itself. Both are one-line installs; the Justfile documents everything else.
-- Matching services exactly means inheriting its quirks (no workspace.package, per-crate metadata repetition). Accepted for consistency.
+- Version bumps and license changes are one-line edits at the workspace root; a new crate declares only its name and description.
 - The lint set starts minimal; tightening it later (more deny-level clippy lints, `.clippy.toml` disallowed-methods) is an additive change.

@@ -1188,6 +1188,7 @@ dependencies = [
  "futures",
  "humantime",
  "parking_lot",
+ "proposal-dto",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3496,6 +3497,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "proposal-dto"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "serde",
+]
+
+[[package]]
 name = "proptest"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4598,6 +4607,7 @@ dependencies = [
  "byos-common",
  "clap",
  "humantime-serde",
+ "proposal-dto",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

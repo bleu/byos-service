@@ -2,6 +2,14 @@
 resolver = "3"
 members = ["crates/*"]
 
+# Shared package metadata; crates inherit with `<field>.workspace = true`.
+# See docs/adr/0004-cargo-workspace-and-tooling.md.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["bleu <dev@bleu.studio>"]
+license = "GPL-3.0-or-later"
+
 # Every dependency — internal and external — is declared once here; crates pull
 # them in with `{ workspace = true }`. See docs/adr/0004-cargo-workspace-and-tooling.md.
 [workspace.dependencies]
@@ -10,6 +18,7 @@ byos = { path = "crates/byos" }
 byos-common = { path = "crates/byos-common" }
 byos-watcher = { path = "crates/byos-watcher" }
 e2e = { path = "crates/e2e" }
+proposal-dto = { path = "crates/proposal-dto" }
 subsolver = { path = "crates/subsolver" }
 
 # cowprotocol/services — pinned to the driver API revision we target (ADR-0009)
