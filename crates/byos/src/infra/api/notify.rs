@@ -204,15 +204,23 @@ mod tests {
     }
 
     async fn post_notify(app: &Router, body: &serde_json::Value) -> StatusCode {
+        post_notify_with_auth(app, body, None).await
+    }
+
+    async fn post_notify_with_auth(
+        app: &Router,
+        body: &serde_json::Value,
+        authorization: Option<&str>,
+    ) -> StatusCode {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/notify")
+            .header("content-type", "application/json");
+        if let Some(auth) = authorization {
+            request = request.header("authorization", auth);
+        }
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/notify")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap()
             .status()
@@ -224,6 +232,51 @@ mod tests {
             "solutionId": 1,
             "kind": kind,
         })
+    }
+
+    /// `/notify` mutates proposal state, so it must sit inside the same
+    /// bearer guard as `/solve` — a refactor that moved the route outside
+    /// the guarded sub-router must fail here.
+    #[ignore]
+    #[tokio::test]
+    async fn notify_sits_behind_the_bearer_guard() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), Some("driver-secret"));
+        let id = bid_proposal(&state, ProposalStatus::Active).await;
+
+        // Without the token: rejected, and no transition happened.
+        let status = post_notify(&app, &notification("settlementStarted")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            state
+                .store()
+                .get(id)
+                .await
+                .expect("get")
+                .expect("exists")
+                .status,
+            ProposalStatus::Active,
+            "an unauthorized notification must not move the proposal"
+        );
+
+        // With it: accepted, and the transition lands.
+        let status = post_notify_with_auth(
+            &app,
+            &notification("settlementStarted"),
+            Some("Bearer driver-secret"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state
+                .store()
+                .get(id)
+                .await
+                .expect("get")
+                .expect("exists")
+                .status,
+            ProposalStatus::Executing
+        );
     }
 
     /// Acceptance (COW-1204): `settlementStarted` → `success` ends with the

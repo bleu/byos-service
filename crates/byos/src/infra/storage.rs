@@ -528,11 +528,14 @@ impl ProposalStore {
     /// Record which proposal a returned solution was built on — the join key
     /// for driver `/notify` attribution (ADR-0013). `/solve` calls this
     /// before returning the solution: if we can't record it, we don't bid
-    /// it. A re-run auction (driver restart) overwrites the stale mapping.
+    /// it. The upsert covers both a re-run auction (driver restart) and a
+    /// solution id re-used after a dropped bid in the same response —
+    /// either way the stale mapping is overwritten before its solution is
+    /// ever returned.
     pub async fn record_solution(
         &self,
         auction_id: i64,
-        solution_id: u64,
+        solution_id: i64,
         proposal_id: ProposalId,
     ) -> Result<(), StoreError> {
         sqlx::query(
@@ -540,7 +543,7 @@ impl ProposalStore {
              CONFLICT (auction_id, solution_id) DO UPDATE SET proposal_id = EXCLUDED.proposal_id",
         )
         .bind(auction_id)
-        .bind(i64::try_from(solution_id).expect("solution ids are small"))
+        .bind(solution_id)
         .bind(as_db_id(proposal_id))
         .execute(&self.pool)
         .await?;

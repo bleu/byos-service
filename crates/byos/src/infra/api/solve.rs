@@ -97,10 +97,11 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
         // Record notification attribution before bidding (ADR-0013): if we
         // can't record it, we don't bid it. Auctions without an id (quote
         // requests) are never settled, so there is nothing to attribute.
+        let solution_id = i64::try_from(id).expect("bounded by the auction's order count");
         if let Some(auction_id) = auction.id
             && let Err(e) = state
                 .store()
-                .record_solution(auction_id, id, proposal.id)
+                .record_solution(auction_id, solution_id, proposal.id)
                 .await
         {
             tracing::error!(
