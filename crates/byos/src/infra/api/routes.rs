@@ -100,7 +100,7 @@ pub async fn create_proposal(
     if valid_until < U256::from(now) {
         return Err(Error::from(Kind::ProposalExpired));
     }
-    if valid_until > U256::from(now + state.max_proposal_lifetime_secs()) {
+    if valid_until > U256::from(now.saturating_add(state.max_proposal_lifetime_secs())) {
         return Err(Error::from(Kind::ProposalLifetimeExceeded));
     }
 
