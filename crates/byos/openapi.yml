@@ -421,7 +421,11 @@ components:
           allOf:
             - $ref: "#/components/schemas/U256"
         buyAmount:
-          description: Amount of the order's buy token the proposal delivers.
+          description: >-
+            Minimum amount of the order's buy token the proposal delivers. The
+            Trampoline enforces it on-chain as a floor and keeps anything above
+            it; see contracts ADR-0003 for the exact mechanism.
+            https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md
           allOf:
             - $ref: "#/components/schemas/U256"
         interactions:
