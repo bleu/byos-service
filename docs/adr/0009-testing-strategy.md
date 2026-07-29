@@ -33,9 +33,13 @@ Vehicle: offline-mode is pinned as a git submodule; this repo carries a small ov
 
 ### Chain fixture: one state file for both tiers
 
-The BYOS contracts (Escrow, TrampolineFactory) are **baked into a regenerated `anvil-state.json`**: an added deploy step in offline-mode's pipeline deploys them (via the already-present CREATE2 singleton factory, for stable addresses) and the resulting state file is committed in this repo's overlay. Regeneration needs a mainnet RPC key once (offline-mode fetches original deployment txs/bytecode); afterwards everything is offline again.
+offline-mode is pinned as a submodule and **commits its own `anvil-state.json`** — GPv2, the tokens, and Uniswap V2 at their mainnet addresses, with anvil account 0 already whitelisted in the GPv2 Authenticator. Loading it needs no mainnet RPC key.
 
-Tier 1 loads the **same state file** into a plain anvil — no docker — so both tiers see identical chain state and contract addresses, and the "where do e2e contract artifacts come from" question disappears: the state file is the artifact, regenerated when the contracts change. [ADR-0014](0014-contract-artifact-provenance.md) owns where those contracts come from — the pinned `byos-contracts` submodule, superseding this ADR's original answer of tagged releases.
+The **BYOS contracts are deployed at suite start**, not baked into that state: the harness sends the Escrow's creation code to the already-present CREATE2 singleton factory with a fixed salt, so its address is identical on every run, and reads the TrampolineFactory address back from the deployed Escrow. [ADR-0014](0014-contract-artifact-provenance.md) owns where that creation code comes from — the pinned `byos-contracts` submodule, superseding this ADR's original answer of tagged releases.
+
+Baking the contracts into a regenerated state file is the better end state (one artifact, identical fixtures for both tiers, no per-run deploy) and remains the plan once the contracts stop churning pre-audit. Until then deploy-at-setup avoids a state regeneration on every contract change, at the cost of tier 1 and tier 2 needing the same deploy step.
+
+One wrinkle: anvil's serialized *transaction* format is version-sensitive, and the committed state was produced by the foundry nightly offline-mode pins. The harness strips the transaction history into a temp copy at load time (block headers stay — anvil resolves its best-block hash from them), so the fixture runs on any recent anvil instead of a pinned nightly. Tier 1 reads current state only, never history.
 
 ### The services pin is the API anchor
 
@@ -56,14 +60,14 @@ Our `/solve` and `/notify` DTOs target the solver-engine API at offline-mode's `
 - **cowprotocol/services' own `playground/` compose stack instead of offline-mode.** Rejected — it fork-tests against live RPC and lacks offline-mode's deterministic committed state, mainnet-address contract placement, and order helpers; and bleu already maintains offline-mode.
 - **Adopting offline-mode's Jest harness for our tests.** Its helpers (quote/sign/submit/wait) are proven, but rejected — a second language and toolchain for e2e when the `e2e` crate must exist anyway for tier 1; we port the helper logic to Rust in `e2e/src/setup/`.
 - **Per-test service-restart isolation (offline-mode's model).** Genuine isolation, rejected as default — tens of seconds per test; snapshot-revert covers chain state, which is what our assertions read.
-- **Deploying Escrow/Trampoline at test-setup time instead of baking state.** No state regeneration or RPC key needed. Rejected as the default — per-run deploy cost, addresses vary across runs, and tier 1/tier 2 fixtures drift apart. Kept as the fallback while the contracts are still churning pre-audit.
+- **Deploying Escrow/Trampoline at test-setup time instead of baking state.** Originally rejected as the default over per-run deploy cost, varying addresses, and tier-1/tier-2 fixture drift, and kept as the pre-audit fallback. It is what we do today (see the fixture section): a fixed CREATE2 salt answers the varying-addresses objection, and the deploy costs one transaction per suite.
 - **Docker-compose test stack for tier 1.** Services needs it for Postgres; the chain is anvil with a preloaded state file, so in-process orchestration suffices for chain-facing tests. Partially superseded by COW-1172: the audit trail is Postgres (not SQLite/flat-file as originally assumed), so service-level tests (`just test-db`, `#[ignore]`d — the service will not boot without the database) need the repo's compose Postgres — one long-lived container with a uniquely-named database per test, not a per-test stack. Tier-1 e2e remains docker-free apart from that same Postgres dependency, which the service now requires to boot at all.
 
 ## Consequences
 
 - The full proposal loop — order on the local orderbook → `subsolver` discovers, routes against local Uniswap V2, signs, submits → ingestion → auction → driver `/solve` → settlement → watcher → (forced-revert) Track A debit — is testable on a laptop with no external dependencies.
 - e2e tests inherit offline-mode's rough edges: orders need ~3–10% surplus margin for baseline to engage, chain-time drift needs the existing re-sync helpers, and the baseline solver occasionally needs a restart. The harness wraps these (margin defaults, time re-sync) so individual tests don't repeat them.
-- The committed anvil state file must be regenerated when the BYOS contracts change — a documented, RPC-keyed procedure, acceptable while contract churn is front-loaded (pre-audit).
+- The vendored Escrow creation code must be regenerated when the BYOS contracts change — `just sync-abis`, with CI failing on a stale tree (ADR-0014). Regenerating shifts the fixture's CREATE2 addresses, which is fine as long as tests read them from the harness rather than hard-coding them.
 - The services submodule pin ages; bumping it is deliberate maintenance, and the DTO tests tell us exactly what broke.
-- CI grows in stages: lint + unit + service tests per PR now; tier 1 per PR once the state file exists; tier 2 nightly once service images are prebuilt and cached.
+- CI grows in stages: lint + unit + service tests per PR now; tier 1 per PR once the fixture exists; tier 2 nightly once service images are prebuilt and cached.
 - Single-threaded e2e keeps runs slow but deterministic; the unit/service classes carry the fast-feedback load.
