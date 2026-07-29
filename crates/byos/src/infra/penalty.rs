@@ -68,6 +68,11 @@ pub fn spawn(
         // First tick a full period out, mirroring the validation loop — a
         // plain `interval` fires immediately and would race startup.
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // Here the budget, not the load, is what needs protecting: catch-up
+        // ticks after an overrun spend `MAX_DEBIT_ATTEMPTS` with no spacing
+        // between them, parking a debit that the same attempts spread over
+        // minutes would have landed.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut attempts = DebitAttempts::default();
         loop {
             interval.tick().await;

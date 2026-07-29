@@ -24,6 +24,9 @@ pub fn spawn(
         // First sweep a full period out, mirroring the validation loop —
         // nothing can be past its retention window at boot + 0s anyway.
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // No value in replaying missed sweeps back to back: the next pass
+        // deletes whatever the skipped ones would have.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             match store.sweep_dropped(retention).await {

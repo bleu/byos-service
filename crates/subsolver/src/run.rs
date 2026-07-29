@@ -271,6 +271,11 @@ pub async fn start(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let mut subsolver = Subsolver::new(config, provider).await?;
 
     let mut interval = tokio::time::interval(subsolver.config.poll_interval);
+    // A poll that overruns the interval must not be followed by back-to-back
+    // catch-up polls: `poll_once` does an orderbook fetch, a multicall, and a
+    // POST per routable order, so Burst would replay all of that into BYOS's
+    // public API at once.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = interval.tick() => {

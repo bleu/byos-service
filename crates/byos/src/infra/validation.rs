@@ -32,6 +32,18 @@ pub fn spawn(
         // immediately, which would race service startup (and tests that
         // park the loop with a long period would still get one tick).
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // A tick that overruns the period must not be followed by back-to-back
+        // catch-up ticks: the default `Burst` would replay every missed tick
+        // with no spacing, so a node that stalls and recovers gets several
+        // full passes at once. Each pass still simulates each proposal only
+        // once; what Burst inflates is the pass *rate*, and that is what
+        // ADR-0013's per-lifetime simulation budget rests on.
+        //
+        // `Skip` would also stop the burst and would resume a little sooner.
+        // `Delay` is the deliberate choice: a period of quiet after an
+        // overrun is backoff for a node that just proved it is struggling.
+        // The cost is up to one extra period before new proposals activate.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             let now = SystemTime::now()
