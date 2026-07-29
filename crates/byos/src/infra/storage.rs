@@ -13,7 +13,7 @@ use {
         proposal::{OrderUid, Proposal, ProposalId, ProposalStatus},
         validator::RejectionReason,
     },
-    alloy::primitives::{Address, Bytes, U256},
+    alloy::primitives::{Address, B256, Bytes, U256},
     byos_common::contracts::Interaction,
     sqlx::postgres::PgPool,
     std::{
@@ -68,8 +68,9 @@ impl ProposalStore {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO proposals (sub_solver, order_uid, order_uid_hash, sell_amount, \
              buy_amount, sell_token, buy_token, interactions, interactions_hash, valid_until, \
-             nonce, signature, status, rejection_reason, gas_used, trampoline) VALUES ($1, $2, \
-             $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id",
+             nonce, signature, status, rejection_reason, gas_used, trampoline, \
+             settlement_tx_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
+             $14, $15, $16, $17) RETURNING id",
         )
         .bind(format!("{:#x}", proposal.sub_solver))
         .bind(proposal.order_uid.to_string())
@@ -91,6 +92,7 @@ impl ProposalStore {
                 .map(|g| i64::try_from(g).expect("gas exceeds i64")),
         )
         .bind(proposal.trampoline.map(|t| format!("{t:#x}")))
+        .bind(proposal.settlement_tx_hash.map(|t| format!("{t:#x}")))
         .fetch_one(&self.pool)
         .await?;
 
@@ -139,6 +141,52 @@ impl ProposalStore {
                 from,
                 to,
                 rejection_reason: None,
+                settlement_tx_hash: None,
+            },
+        });
+        Ok(())
+    }
+
+    /// Record a driver-reported settlement outcome (ADR-0013): `Executing`
+    /// → `Settled` (the tx landed) or `SettleFailed` (it reverted), citing
+    /// the transaction as evidence. Same compare-and-swap semantics as
+    /// [`Self::transition`] — zero rows means the snapshot went stale.
+    pub async fn record_outcome(
+        &self,
+        proposal: &Proposal,
+        to: ProposalStatus,
+        settlement_tx_hash: B256,
+    ) -> Result<(), StoreError> {
+        debug_assert!(
+            matches!(to, ProposalStatus::Settled | ProposalStatus::SettleFailed),
+            "only settlement outcomes carry a tx hash"
+        );
+        let from = proposal.status;
+        let result = sqlx::query(
+            "UPDATE proposals SET status = $3, settlement_tx_hash = $4, status_changed_at = now() \
+             WHERE id = $1 AND status = $2",
+        )
+        .bind(as_db_id(proposal.id))
+        .bind(from.to_string())
+        .bind(to.to_string())
+        .bind(format!("{settlement_tx_hash:#x}"))
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(self.stale_or_missing(proposal.id, from.to_string()).await);
+        }
+
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::StatusChanged {
+                proposal_id: proposal.id,
+                sub_solver: proposal.sub_solver,
+                order_uid: proposal.order_uid.clone(),
+                from,
+                to,
+                rejection_reason: None,
+                settlement_tx_hash: Some(settlement_tx_hash),
             },
         });
         Ok(())
@@ -228,6 +276,7 @@ impl ProposalStore {
                     from,
                     to,
                     rejection_reason,
+                    settlement_tx_hash: None,
                 },
             });
         }
@@ -282,6 +331,76 @@ impl ProposalStore {
             },
         });
         Ok(())
+    }
+
+    /// Keep an attributable non-outcome driver notification (a
+    /// pre-submission kind like `emptySolution`) as audit evidence — no
+    /// transition, no row mutation (ADR-0013).
+    pub fn note_driver_notification(&self, proposal: &Proposal, kind: &str) {
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::DriverNotified {
+                proposal_id: proposal.id,
+                sub_solver: proposal.sub_solver,
+                order_uid: proposal.order_uid.clone(),
+                kind: kind.to_owned(),
+            },
+        });
+    }
+
+    /// Release `Executing` proposals older than `older_than` back to
+    /// `Active` (ADR-0013's timeout backstop: lost notification, restart
+    /// mid-settlement); returns how many were released. Always safe — if
+    /// the settlement actually landed, the next re-simulation reverts and
+    /// the proposal dies as `SimFailed`.
+    pub async fn release_stale_executing(&self, older_than: Duration) -> Result<u64, StoreError> {
+        // Parse inside the transaction (see resolve_verdict): a corrupt row
+        // must abort the release, not commit a transition without evidence.
+        let mut tx = self.pool.begin().await?;
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "UPDATE proposals SET status = $1, status_changed_at = now() WHERE status = $2 AND \
+             status_changed_at < now() - make_interval(secs => $3) RETURNING id, sub_solver, \
+             order_uid",
+        )
+        .bind(ProposalStatus::Active.to_string())
+        .bind(ProposalStatus::Executing.to_string())
+        .bind(older_than.as_secs_f64())
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let released = rows
+            .into_iter()
+            .map(|(id, sub_solver, order_uid)| {
+                Ok((
+                    ProposalId(u64::try_from(id).map_err(|e| corrupt("id", e))?),
+                    sub_solver
+                        .parse::<Address>()
+                        .map_err(|e| corrupt("sub_solver", e))?,
+                    order_uid
+                        .parse::<OrderUid>()
+                        .map_err(|e| corrupt("order_uid", e))?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        tx.commit().await?;
+
+        let count = released.len() as u64;
+        for (proposal_id, sub_solver, order_uid) in released {
+            tracing::info!(id = %proposal_id, "executing timeout: proposal released to active");
+            self.emit(audit::AuditEvent {
+                occurred_at: SystemTime::now(),
+                kind: audit::AuditKind::StatusChanged {
+                    proposal_id,
+                    sub_solver,
+                    order_uid,
+                    from: ProposalStatus::Executing,
+                    to: ProposalStatus::Active,
+                    rejection_reason: None,
+                    settlement_tx_hash: None,
+                },
+            });
+        }
+        Ok(count)
     }
 
     /// Delete dropped-tier proposals (`Rejected`/`SimFailed`/`Expired`/
@@ -406,6 +525,56 @@ impl ProposalStore {
         rows.into_iter().map(Proposal::try_from).collect()
     }
 
+    /// Record which proposal a returned solution was built on — the join key
+    /// for driver `/notify` attribution (ADR-0013). `/solve` calls this
+    /// before returning the solution: if we can't record it, we don't bid
+    /// it. The upsert covers both a re-run auction (driver restart) and a
+    /// solution id re-used after a dropped bid in the same response —
+    /// either way the stale mapping is overwritten before its solution is
+    /// ever returned.
+    pub async fn record_solution(
+        &self,
+        auction_id: i64,
+        solution_id: i64,
+        proposal_id: ProposalId,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO solutions (auction_id, solution_id, proposal_id) VALUES ($1, $2, $3) ON \
+             CONFLICT (auction_id, solution_id) DO UPDATE SET proposal_id = EXCLUDED.proposal_id",
+        )
+        .bind(auction_id)
+        .bind(solution_id)
+        .bind(as_db_id(proposal_id))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The proposals a driver notification points at, joined through the
+    /// `solutions` table. Notifications carry one solution id or a merged
+    /// list; ids we never issued simply match nothing.
+    pub async fn solution_proposals(
+        &self,
+        auction_id: i64,
+        solution_ids: &[u64],
+    ) -> Result<Vec<Proposal>, StoreError> {
+        // Ids beyond i64 cannot be in the table (we issued small ones).
+        let ids: Vec<i64> = solution_ids
+            .iter()
+            .filter_map(|id| i64::try_from(*id).ok())
+            .collect();
+        let rows: Vec<ProposalRow> = sqlx::query_as(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals JOIN solutions ON solutions.proposal_id = \
+             proposals.id WHERE solutions.auction_id = $1 AND solutions.solution_id = ANY($2) \
+             ORDER BY id"
+        ))
+        .bind(auction_id)
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Proposal::try_from).collect()
+    }
+
     /// Look up a single proposal by ID.
     pub async fn get(&self, id: ProposalId) -> Result<Option<Proposal>, StoreError> {
         let row: Option<ProposalRow> = sqlx::query_as(&format!(
@@ -435,7 +604,7 @@ fn status_names(statuses: &[ProposalStatus]) -> Vec<String> {
 const PROPOSAL_COLUMNS: &str = "id, sub_solver, order_uid, order_uid_hash, sell_amount, \
                                 buy_amount, sell_token, buy_token, interactions, \
                                 interactions_hash, valid_until, nonce, signature, status, \
-                                rejection_reason, gas_used, trampoline";
+                                rejection_reason, gas_used, trampoline, settlement_tx_hash";
 
 /// The raw column values; [`Proposal::try_from`] parses them back into
 /// domain types. A parse failure means a corrupt row (we wrote these
@@ -459,6 +628,7 @@ struct ProposalRow {
     rejection_reason: Option<String>,
     gas_used: Option<i64>,
     trampoline: Option<String>,
+    settlement_tx_hash: Option<String>,
 }
 
 /// Wrap a column parse failure as a database error.
@@ -514,6 +684,11 @@ impl TryFrom<ProposalRow> for Proposal {
                 .map(|t| t.parse::<Address>())
                 .transpose()
                 .map_err(|e| corrupt("trampoline", e))?,
+            settlement_tx_hash: row
+                .settlement_tx_hash
+                .map(|t| t.parse::<B256>())
+                .transpose()
+                .map_err(|e| corrupt("settlement_tx_hash", e))?,
         })
     }
 }
@@ -1124,6 +1299,92 @@ mod tests {
         assert_eq!(live.len(), 2);
     }
 
+    /// Attributable non-outcome notifications carry no transition but are
+    /// kept as evidence of the driver's view of our solution (ADR-0013).
+    #[ignore]
+    #[tokio::test]
+    async fn driver_notification_note_leaves_evidence_without_touching_the_row() {
+        let (store, mut audit) = test_store().await;
+        let id = store
+            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .await
+            .expect("insert");
+        let _received = audit.try_recv().expect("insert event");
+        let proposal = store.get(id).await.expect("get").expect("exists");
+
+        store.note_driver_notification(&proposal, "emptySolution");
+
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::Active,
+            "a note is evidence, not a transition"
+        );
+        let event = audit.try_recv().expect("the note must leave evidence");
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.event_type(), "driver_notified");
+        assert_eq!(event.payload()["kind"], "emptySolution");
+    }
+
+    /// Acceptance (COW-1204): an `Executing` proposal older than the
+    /// executing timeout falls back to `Active` without a notification —
+    /// the backstop for lost notifications and restarts mid-settlement.
+    #[ignore]
+    #[tokio::test]
+    async fn stale_executing_proposals_fall_back_to_active() {
+        let (store, mut audit, pool) = test_store_with_pool().await;
+        let id = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Executing,
+            ))
+            .await
+            .expect("insert");
+        let _received = audit.try_recv().expect("insert event");
+        backdate_status_change(&pool, id, 400.0).await;
+
+        let released = store
+            .release_stale_executing(Duration::from_secs(300))
+            .await
+            .expect("release");
+
+        assert_eq!(released, 1);
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::Active
+        );
+        let event = audit.try_recv().expect("a release leaves evidence");
+        assert_eq!(event.proposal_id(), id);
+        assert_eq!(event.event_type(), "released");
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn executing_proposals_inside_the_timeout_are_left_alone() {
+        let (store, mut audit) = test_store().await;
+        let id = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Executing,
+            ))
+            .await
+            .expect("insert");
+        let _received = audit.try_recv().expect("insert event");
+
+        let released = store
+            .release_stale_executing(Duration::from_secs(300))
+            .await
+            .expect("release");
+
+        assert_eq!(released, 0);
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::Executing
+        );
+        assert!(audit.try_recv().is_err(), "nothing released, no evidence");
+    }
+
     #[ignore]
     #[tokio::test]
     async fn sweep_deletes_dropped_proposals_past_the_window() {
@@ -1169,32 +1430,31 @@ mod tests {
         assert!(store.get(id).await.expect("get").is_some());
     }
 
+    /// The money states (`Settled`/`SettleFailed`/`Penalized`) are never
+    /// swept (ADR-0013, COW-1204), and neither are live or in-flight
+    /// proposals.
     #[ignore]
     #[tokio::test]
-    async fn sweep_never_touches_settled_or_live_proposals() {
+    async fn sweep_never_touches_money_states_or_live_proposals() {
         let (store, _audit, pool) = test_store_with_pool().await;
-        let settled = store
-            .insert(test_proposal(
-                test_order_uid(),
-                SOLVER_A,
-                ProposalStatus::Settled,
-            ))
-            .await
-            .expect("insert");
-        let active = store
-            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
-            .await
-            .expect("insert");
-        let submitted = store
-            .insert(test_proposal(
-                OrderUid([0xcc; 56]),
-                SOLVER_A,
-                ProposalStatus::Submitted,
-            ))
-            .await
-            .expect("insert");
-        for id in [settled, active, submitted] {
+        let mut spared = Vec::new();
+        for (i, status) in [
+            ProposalStatus::Settled,
+            ProposalStatus::SettleFailed,
+            ProposalStatus::Penalized,
+            ProposalStatus::Executing,
+            ProposalStatus::Active,
+            ProposalStatus::Submitted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = store
+                .insert(test_proposal(OrderUid([i as u8; 56]), SOLVER_A, status))
+                .await
+                .expect("insert");
             backdate_status_change(&pool, id, 7200.0).await;
+            spared.push((id, status));
         }
 
         let deleted = store
@@ -1203,12 +1463,66 @@ mod tests {
             .expect("sweep");
 
         assert_eq!(deleted, 0);
-        for id in [settled, active, submitted] {
+        for (id, status) in spared {
             assert!(
                 store.get(id).await.expect("get").is_some(),
-                "proposal {id} must survive the sweep"
+                "{status} proposal {id} must survive the sweep"
             );
         }
+    }
+
+    /// A swept proposal takes its auction-participation rows with it;
+    /// settled proposals are never swept, so their rows survive — that is
+    /// how "solutions rows tied to settlements are never swept" holds
+    /// (COW-1204).
+    #[ignore]
+    #[tokio::test]
+    async fn sweep_cascades_solutions_rows_of_dropped_proposals_only() {
+        let (store, _audit, pool) = test_store_with_pool().await;
+        let dropped = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Cancelled,
+            ))
+            .await
+            .expect("insert");
+        let settled = store
+            .insert(test_proposal(
+                OrderUid([0xbb; 56]),
+                SOLVER_A,
+                ProposalStatus::Settled,
+            ))
+            .await
+            .expect("insert");
+        store
+            .record_solution(1, 1, dropped)
+            .await
+            .expect("record dropped bid");
+        store
+            .record_solution(2, 1, settled)
+            .await
+            .expect("record settled bid");
+        for id in [dropped, settled] {
+            backdate_status_change(&pool, id, 7200.0).await;
+        }
+
+        let deleted = store
+            .sweep_dropped(Duration::from_secs(3600))
+            .await
+            .expect("sweep");
+        assert_eq!(deleted, 1, "only the cancelled proposal is swept");
+
+        let remaining: Vec<(i64,)> =
+            sqlx::query_as("SELECT proposal_id FROM solutions ORDER BY proposal_id")
+                .fetch_all(&pool)
+                .await
+                .expect("solutions query");
+        assert_eq!(
+            remaining,
+            vec![(as_db_id(settled),)],
+            "the dropped proposal's participation row cascades away; the settlement's survives"
+        );
     }
 
     /// The owner cancels after the validator snapshotted the proposal but

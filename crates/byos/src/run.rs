@@ -127,6 +127,13 @@ pub(crate) struct Args {
     #[arg(long, env, default_value_t = 300)]
     max_proposal_lifetime_secs: u64,
 
+    /// How long a proposal may sit in `Executing` before falling back to
+    /// `Active` (ADR-0013's lost-notification backstop). Re-simulation
+    /// reconciles reality if the settlement actually landed. Accepts
+    /// humantime strings, e.g. `5m`.
+    #[arg(long, env, default_value = "5m", value_parser = humantime::parse_duration)]
+    executing_timeout: std::time::Duration,
+
     /// Profitability floor in wei (ADR-0013): the first simulation rejects
     /// proposals whose score (`surplus + fee - gas`, ADR-0002) does not
     /// exceed this. The default 0 mirrors /solve's own score > 0 rule.
@@ -300,10 +307,15 @@ async fn run_with(
             U256::from(args.min_proposal_score),
         );
         let validator = ProposalValidator::new(escrow, simulation);
-        crate::infra::validation::spawn(store, validator, period)
+        crate::infra::validation::spawn(store, validator, period, args.executing_timeout)
     } else {
         tracing::warn!("no --rpc-url provided, validation disabled (AcceptAll)");
-        crate::infra::validation::spawn(store, crate::domain::validator::AcceptAll, period)
+        crate::infra::validation::spawn(
+            store,
+            crate::domain::validator::AcceptAll,
+            period,
+            args.executing_timeout,
+        )
     };
 
     api::serve(

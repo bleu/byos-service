@@ -62,7 +62,7 @@ impl From<Kind> for Error {
                 "Proposal validUntil exceeds the maximum proposal lifetime"
             }
             Kind::ProposalNotFound => "Proposal not found",
-            Kind::ProposalNotCancellable => "Proposal is already in a terminal state",
+            Kind::ProposalNotCancellable => "Proposal is executing or already in a terminal state",
             Kind::BadRequest => "Malformed request",
             Kind::Internal => "Internal error",
         };

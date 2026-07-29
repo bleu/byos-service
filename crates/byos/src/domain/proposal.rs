@@ -81,7 +81,17 @@ pub enum ProposalStatus {
     /// Failed background gatekeeping (e.g. insufficient escrow).
     Rejected,
     Expired,
+    /// The driver is submitting a settlement built on this proposal
+    /// (ADR-0013): frozen out of re-simulation, `/solve`, the expiry sweep,
+    /// and cancellation until a driver notification or the executing
+    /// timeout resolves it.
+    Executing,
     Settled,
+    /// The settlement transaction reverted on-chain; the Track A escrow
+    /// debit follows (ADR-0010).
+    SettleFailed,
+    /// The Track A debit landed (COW-1205 wires this transition).
+    Penalized,
     SimFailed,
     Cancelled,
 }
@@ -114,6 +124,10 @@ pub struct Proposal {
     /// `TrampolineFactory.addressOf(sub_solver)`. Set by the validator on
     /// first validation; `None` until resolved.
     pub trampoline: Option<Address>,
+    /// Settlement transaction hash from the driver's outcome notification
+    /// (ADR-0013): the landed tx for `Settled`, the reverted tx for
+    /// `SettleFailed`.
+    pub settlement_tx_hash: Option<B256>,
 }
 
 /// Test fixture: a minimal proposal in the given status.
@@ -142,5 +156,6 @@ pub(crate) fn test_proposal(
         rejection_reason: None,
         gas_used: None,
         trampoline: None,
+        settlement_tx_hash: None,
     }
 }

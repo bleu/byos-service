@@ -75,8 +75,7 @@ async fn insert(pool: &PgPool, event: &AuditEvent) -> Result<(), sqlx::Error> {
     .bind(event.event_type())
     .bind(format!("{:#x}", event.sub_solver()))
     .bind(event.order_uid().to_string())
-    // No settling event types exist yet; reserved for ADR-0010 outcomes.
-    .bind(Option::<String>::None)
+    .bind(event.settlement_tx_hash().map(|t| format!("{t:#x}")))
     .bind(event.payload())
     .bind(chrono::DateTime::<chrono::Utc>::from(event.occurred_at))
     .execute(pool)
