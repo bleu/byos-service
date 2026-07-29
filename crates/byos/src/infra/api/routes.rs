@@ -179,20 +179,16 @@ pub async fn list_proposals(
     let order_uid = OrderUid::from_hex(&order_uid_hex)
         .map_err(|e| Error::new(Kind::BadRequest, format!("invalid orderUid: {e}")))?;
 
+    // Owner-scoped reads (ADR-0011): the store query only returns the
+    // caller's own proposals on this order.
     let proposals = state
         .store()
-        .list_by_order_uid(&order_uid)
+        .list_by_order_uid_for_owner(&order_uid, reader)
         .await
         .map_err(internal)?;
 
     Ok(Json(ListProposalsResponse {
-        proposals: proposals
-            .iter()
-            // Owner-scoped reads (ADR-0011): competitors' proposals on the
-            // same order are invisible to the caller.
-            .filter(|p| p.sub_solver == reader)
-            .map(ProposalMetadata::from)
-            .collect(),
+        proposals: proposals.iter().map(ProposalMetadata::from).collect(),
     }))
 }
 

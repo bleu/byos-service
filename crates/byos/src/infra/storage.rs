@@ -349,6 +349,27 @@ impl ProposalStore {
         rows.into_iter().map(Proposal::try_from).collect()
     }
 
+    /// List one owner's active proposals for a given order UID — the
+    /// `GET /proposals/{order_uid}` view. The owner scoping lives in the
+    /// query (ADR-0011): competitors' proposals on the same order are
+    /// invisible to the caller.
+    pub async fn list_by_order_uid_for_owner(
+        &self,
+        order_uid: &OrderUid,
+        owner: Address,
+    ) -> Result<Vec<Proposal>, StoreError> {
+        let rows: Vec<ProposalRow> = sqlx::query_as(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE order_uid = $1 AND sub_solver = $2 \
+             AND status = $3 ORDER BY id"
+        ))
+        .bind(order_uid.to_string())
+        .bind(format!("{owner:#x}"))
+        .bind(ProposalStatus::Active.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Proposal::try_from).collect()
+    }
+
     /// List live (`Submitted` or `Active`) proposals for a given sub-solver
     /// address. This is the owner's management view, so pending submissions
     /// are included.
