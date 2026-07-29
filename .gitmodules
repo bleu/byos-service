@@ -1,0 +1,3 @@
+[submodule "byos-contracts"]
+	path = byos-contracts
+	url = https://github.com/bleu/byos-contracts.git
