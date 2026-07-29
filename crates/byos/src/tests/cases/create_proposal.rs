@@ -145,12 +145,17 @@ async fn a_proposal_id_above_i64_max_is_a_miss_not_a_crash() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(err["kind"], "ProposalNotFound");
 
-    // The listener is still answering, which is the point: a panicking
-    // handler would have dropped the connection and poisoned nothing else.
+    // An in-range id still round-trips, so the out-of-range request took the
+    // early return rather than poisoning anything shared.
+    let owner = PrivateKeySigner::random();
+    let body = ProposalFixture::default().signed_body(&owner).await;
+    let (_, created) = app.post_json("/proposals", &body).await;
+    let id = created["id"].as_u64().expect("response must carry an id");
+    let owner_auth = setup::read_auth_signature(&owner).await;
     let (status, _) = app
-        .get_json(&format!("/proposal/{}", u64::MAX - 1), Some(&auth))
+        .get_json(&format!("/proposal/{id}"), Some(&owner_auth))
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK);
 
     app.stop().await;
 }

@@ -285,6 +285,18 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             .await
         {
             Ok(gas) => {
+                // The node's answer is stored in a BIGINT column and fed to
+                // scoring arithmetic, so a value it cannot hold is a bad
+                // answer rather than an expensive proposal — no real
+                // settlement approaches a block gas limit. Defer: the next
+                // tick asks again, possibly of a healthier node.
+                if i64::try_from(gas).is_err() {
+                    tracing::warn!(
+                        id = %proposal.id, gas,
+                        "simulation returned an implausible gas value; deferring"
+                    );
+                    return None;
+                }
                 // 6. Profitability gate (ADR-0013), first simulation only: re-validation skips
                 //    it so gas-price wobble cannot churn Active proposals; /solve re-scores at
                 //    auction time.

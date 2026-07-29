@@ -299,7 +299,11 @@ impl ProposalStore {
         .bind(as_db_id(id)?)
         .bind(to.to_string())
         .bind(rejection_reason.map(|r| r.to_string()))
-        .bind(sim.map(|s| i64::try_from(s.gas_used).expect("gas exceeds i64")))
+        // Saturating, not `expect`: the validator already defers on a gas
+        // value this column cannot hold, so this is a backstop that must not
+        // be able to panic the validation loop. A saturated value scores the
+        // proposal out of contention, which is the safe direction.
+        .bind(sim.map(|s| i64::try_from(s.gas_used).unwrap_or(i64::MAX)))
         .bind(sim.map(|s| format!("{:#x}", s.trampoline)))
         .bind(sim.map(|s| format!("{:#x}", s.sell_token)))
         .bind(sim.map(|s| format!("{:#x}", s.buy_token)))
