@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # The vendored ABIs are generated from the byos-contracts pin, so a pin that
+  # falls behind is how the service silently drifts from the contracts it
+  # encodes calls for (ADR-0014). Dependabot turns that into a PR.
+  - package-ecosystem: gitsubmodule
+    directory: "/"
+    schedule:
+      interval: weekly

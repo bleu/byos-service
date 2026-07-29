@@ -5,9 +5,11 @@
 //! [`cowprotocol-primitives`](https://crates.io/crates/cowprotocol-primitives).
 //!
 //! Bespoke BYOS contract bindings (Trampoline, TrampolineFactory, Escrow) are
-//! generated from vendored JSON ABIs produced by `forge build` in
-//! [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts)
-//! at commit `886ee9cdc03b24b11392403a83985ddb26f5c7fa`.
+//! generated from the vendored JSON ABIs in `abis/`. Those are not edited by
+//! hand: `just sync-abis` regenerates them from the `byos-contracts`
+//! submodule, which is the pin of record for which contracts this service
+//! encodes calls for (see
+//! [ADR-0014](../../../docs/adr/0014-contract-artifact-provenance.md)).
 
 use alloy::sol;
 // Re-export standard CoW Protocol contract bindings so consumers don't need

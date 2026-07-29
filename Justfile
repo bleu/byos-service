@@ -31,3 +31,16 @@ test-e2e-full:
 
 build:
     cargo build --workspace
+
+# Regenerate the vendored contract ABIs from the pinned byos-contracts
+# submodule (ADR-0014). Needs foundry and jq; nothing else in this file does,
+# and `just build` never runs it. CI runs it and fails on a dirty tree.
+sync-abis:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git submodule update --init --recursive byos-contracts
+    (cd byos-contracts && forge build -q)
+    for contract in Trampoline TrampolineFactory Escrow; do
+        jq '.abi' "byos-contracts/out/$contract.sol/$contract.json" \
+            > "crates/byos-common/abis/$contract.json"
+    done
