@@ -16,10 +16,11 @@ async fn accepts_valid_until_at_the_lifetime_cap_boundary() {
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;
     let signer = PrivateKeySigner::random();
-    // Just inside the default 300s cap (a few seconds of slack for the time
-    // between building the fixture and the handler reading its clock).
+    // Exactly at the default 300s cap. Deterministic: the handler reads its
+    // clock after this one, and a later `now` only loosens its strict
+    // `valid_until > now + cap` check.
     let fixture = ProposalFixture {
-        valid_until: U256::from(setup::unix_now() + 295),
+        valid_until: U256::from(setup::unix_now() + 300),
         ..Default::default()
     };
 
