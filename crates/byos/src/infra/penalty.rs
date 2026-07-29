@@ -16,9 +16,11 @@ use {
     std::{collections::HashMap, sync::Arc, time::Duration},
 };
 
-/// A debit that keeps failing is parked after this many attempts — a
-/// permanently-reverting debit (operator lacks the role, escrow paused or
-/// drained) must not retry forever. The giving-up error log is the ops page;
+/// A debit that keeps failing is parked after this many attempts. Covers
+/// both chain calls a debit needs: a permanently-reverting debit (operator
+/// lacks the role, escrow paused or drained) and a settlement we can never
+/// price (bad hash, history pruned) must neither retry forever. The
+/// giving-up error log is the ops page;
 /// counts are in-memory, so a restart re-arms the retries once the cause is
 /// fixed.
 const MAX_DEBIT_ATTEMPTS: u32 = 10;
@@ -125,10 +127,19 @@ async fn revert_debits(
             tracing::error!(id = %proposal.id, "settleFailed without a settlement tx; cannot debit");
             continue;
         };
+        // Counted against the same cap as the debit itself: both are ways
+        // this proposal's debit failed to happen, and a receipt we can never
+        // fetch (bad hash, history pruned) must not burn an RPC call every
+        // tick forever.
         let cost = match operator.settlement_cost(settlement_tx).await {
             Ok(cost) => cost,
             Err(e) => {
-                tracing::warn!(id = %proposal.id, %e, "settlement cost lookup failed; retrying next tick");
+                note_debit_failure(
+                    attempts.entry(proposal.id).or_insert(0),
+                    proposal.id,
+                    &e,
+                    "settlement cost lookup",
+                );
                 continue;
             }
         };
@@ -493,6 +504,64 @@ mod tests {
             store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::SettleFailed,
             "a given-up debit leaves the proposal queryable, not silently penalized"
+        );
+    }
+
+    /// Chain edge whose receipt lookup never succeeds — a settlement tx we
+    /// can never price (bad hash, history pruned on the node). Counts the
+    /// lookups so the attempt cap is observable.
+    #[derive(Default)]
+    struct UnpriceableOperator {
+        lookups: std::sync::atomic::AtomicU32,
+    }
+
+    impl DebitEscrow for UnpriceableOperator {
+        async fn settlement_cost(&self, _tx: B256) -> Result<U256, DebitError> {
+            self.lookups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(DebitError::Transient("no receipt for that tx".into()))
+        }
+
+        async fn debit(
+            &self,
+            _sub_solver: Address,
+            _amount: U256,
+            _reason: B256,
+        ) -> Result<B256, DebitError> {
+            panic!("must not debit a settlement it could not price")
+        }
+    }
+
+    /// A cost lookup that can never succeed is capped like a failing debit —
+    /// otherwise an unpriceable settlement burns one RPC call every tick for
+    /// the life of the process.
+    #[ignore]
+    #[tokio::test]
+    async fn a_permanently_unpriceable_settlement_stops_being_looked_up() {
+        let store = test_store().await;
+        let mut proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            Address::repeat_byte(0x01),
+            ProposalStatus::SettleFailed,
+        );
+        proposal.settlement_tx_hash = Some(SETTLEMENT_TX);
+        let id = store.insert(proposal).await.expect("insert");
+
+        let operator = UnpriceableOperator::default();
+        let mut attempts = DebitAttempts::default();
+        for _ in 0..MAX_DEBIT_ATTEMPTS + 5 {
+            run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
+        }
+
+        assert_eq!(
+            operator.lookups.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_DEBIT_ATTEMPTS,
+            "the cost lookup must stop after the attempt cap, not retry forever"
+        );
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::SettleFailed,
+            "a parked debit leaves the proposal queryable, not silently penalized"
         );
     }
 

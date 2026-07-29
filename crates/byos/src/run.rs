@@ -286,14 +286,9 @@ async fn run_with(
 
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
 
-    // Retention sweep (ADR-0013): bounds the proposals table by deleting
-    // dropped-tier rows past their window. audit_events is never touched.
-    let retention_loop = crate::infra::retention::spawn(
-        store.clone(),
-        std::time::Duration::from_secs(args.retention_sweep_interval_secs),
-        args.dropped_retention,
-    );
-
+    // Nothing below spawns a background loop until every fallible setup step
+    // has passed: a task spawned before an early `?` return would outlive
+    // the failure with no one left to abort it.
     let mut penalty_loop = None;
 
     // Background validator (ADR-0001, async ingestion). When --rpc-url is
@@ -310,6 +305,14 @@ async fn run_with(
 
         let url: reqwest::Url = rpc_url.0.parse().context("invalid --rpc-url")?;
         let provider = alloy::providers::ProviderBuilder::new().connect_http(url.clone());
+
+        // Fail-fast: verify the RPC endpoint is reachable before accepting
+        // any proposals that would need escrow checks. Runs before the
+        // spawns below so an unreachable node leaves no orphaned tasks.
+        provider
+            .get_block_number()
+            .await
+            .context("RPC unreachable at startup (--rpc-url)")?;
 
         // Track A penalty loop (ADR-0003, COW-1205): debits SettleFailed
         // reverts and queued non-settlement charges from escrow. Without the
@@ -334,13 +337,6 @@ async fn run_with(
             None
         };
 
-        // Fail-fast: verify the RPC endpoint is reachable before accepting
-        // any proposals that would need escrow checks.
-        provider
-            .get_block_number()
-            .await
-            .context("RPC unreachable at startup (--rpc-url)")?;
-
         let escrow = EscrowValidator::new(
             provider.clone(),
             escrow_address,
@@ -360,16 +356,27 @@ async fn run_with(
             U256::from(args.min_proposal_score),
         );
         let validator = ProposalValidator::new(escrow, simulation);
-        crate::infra::validation::spawn(store, validator, period, args.executing_timeout)
+        crate::infra::validation::spawn(store.clone(), validator, period, args.executing_timeout)
     } else {
         tracing::warn!("no --rpc-url provided, validation disabled (AcceptAll)");
         crate::infra::validation::spawn(
-            store,
+            store.clone(),
             crate::domain::validator::AcceptAll,
             period,
             args.executing_timeout,
         )
     };
+
+    // Retention sweep (ADR-0013): bounds the proposals table by deleting
+    // dropped-tier rows past their window. audit_events is never touched.
+    // Takes the last `store` handle by value: every store clone holds an
+    // audit sender, so one left alive in this scope would keep the channel
+    // open and hang the `writer.await` drain below.
+    let retention_loop = crate::infra::retention::spawn(
+        store,
+        std::time::Duration::from_secs(args.retention_sweep_interval_secs),
+        args.dropped_retention,
+    );
 
     api::serve(
         args.public_addr,
