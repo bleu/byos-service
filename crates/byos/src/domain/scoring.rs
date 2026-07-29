@@ -3,7 +3,7 @@
 //! The `/solve` hot path uses this to select the single highest-scoring
 //! proposal per order UID. All computation is in-memory — no RPC, no DB.
 
-use alloy::primitives::{U256, utils::Unit};
+use alloy::primitives::{Address, U256, utils::Unit};
 
 /// Conservative gas floor for escrow threshold calculations. Not used for
 /// scoring — `/solve` uses the actual simulated gas from each proposal.
@@ -18,6 +18,14 @@ pub const GAS_BUFFER: u64 = 30_000;
 /// Effective gas for a simulated proposal: simulated gas + safety buffer.
 pub fn effective_gas(simulated: u64) -> u64 {
     simulated + GAS_BUFFER
+}
+
+/// The token surplus is denominated in: the buy token for a sell order (the
+/// user gets more buy tokens), the sell token for a buy order (the user keeps
+/// more sell tokens). Shared by `/solve` and the profitability gate so the
+/// two paths cannot drift.
+pub fn surplus_token(is_sell_order: bool, sell_token: Address, buy_token: Address) -> Address {
+    if is_sell_order { buy_token } else { sell_token }
 }
 
 pub struct ScoreInput {

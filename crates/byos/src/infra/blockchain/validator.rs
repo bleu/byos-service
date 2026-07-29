@@ -126,12 +126,11 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
         record: &crate::domain::order::OrderRecord,
         gas: u64,
     ) -> Option<Result<(), RejectionReason>> {
-        // The surplus token: buy token for sell orders, sell token for buy
-        // orders (same rule as /solve).
-        let surplus_token = match record.order.kind {
-            OrderKind::Sell => record.order.buy_token,
-            OrderKind::Buy => record.order.sell_token,
-        };
+        let surplus_token = scoring::surplus_token(
+            record.order.kind == OrderKind::Sell,
+            record.order.sell_token,
+            record.order.buy_token,
+        );
         let native_price = match self.orderbook.native_price(surplus_token).await {
             Ok(price) => price,
             Err(OrderbookError::NotFound) => {
@@ -408,12 +407,17 @@ mod tests {
         Transient,
         /// The order fetch succeeds but the native-price fetch is down.
         PriceOutage(Box<OrderRecord>),
+        /// Only the given token has a price; any other lookup is `NotFound`.
+        /// Pins which token the profitability gate prices.
+        PricedOnly(Box<OrderRecord>, Address),
     }
 
     impl FetchOrder for StubOrders {
         async fn order(&self, _uid: &OrderUid) -> Result<OrderRecord, OrderbookError> {
             match self {
-                Self::Found(record) | Self::PriceOutage(record) => Ok((**record).clone()),
+                Self::Found(record) | Self::PriceOutage(record) | Self::PricedOnly(record, _) => {
+                    Ok((**record).clone())
+                }
                 Self::NotFound => Err(OrderbookError::NotFound),
                 Self::Transient => Err(OrderbookError::Transient("boom".into())),
             }
@@ -421,9 +425,10 @@ mod tests {
 
         /// Parity pricing: 10^18 wei per 10^18 atoms, so surplus in token
         /// units equals surplus in wei.
-        async fn native_price(&self, _token: Address) -> Result<U256, OrderbookError> {
+        async fn native_price(&self, token: Address) -> Result<U256, OrderbookError> {
             match self {
                 Self::PriceOutage(_) => Err(OrderbookError::Transient("price boom".into())),
+                Self::PricedOnly(_, priced) if *priced != token => Err(OrderbookError::NotFound),
                 _ => Ok(alloy::primitives::utils::Unit::ETHER.wei()),
             }
         }
@@ -626,6 +631,31 @@ mod tests {
         assert_eq!(
             verdict,
             Some(Verdict::Reject(RejectionReason::Unprofitable)),
+        );
+    }
+
+    #[tokio::test]
+    async fn buy_order_gate_prices_the_sell_token() {
+        let server = rpc_server().await;
+        // A buy order around the same proposal: exact buy amount (the
+        // envelope requirement), sell limit above the proposal's 1_000_000 so
+        // the pair carries 100_000 surplus — in the sell token.
+        let mut record = test_order_record();
+        record.order.kind = OrderKind::Buy;
+        record.order.buy_amount = submitted_proposal().buy_amount;
+        record.order.sell_amount = U256::from(1_100_000_u64);
+        // Only the sell token is priced: if the gate wrongly priced the buy
+        // token it would see NotFound and reject as Unprofitable.
+        let sell_token = record.order.sell_token;
+        let validator = validator_with(
+            server.uri(),
+            StubOrders::PricedOnly(Box::new(record), sell_token),
+        );
+
+        let verdict = validator.validate(&submitted_proposal()).await;
+        assert!(
+            matches!(verdict, Some(Verdict::Accept(Some(_)))),
+            "buy-order surplus must be priced in the sell token, got {verdict:?}",
         );
     }
 
