@@ -12,6 +12,14 @@ use {
     },
 };
 
+/// How long to wait for a submitted debit to confirm before giving the tick
+/// up as failed. Debits run sequentially in the penalty loop, so an unbounded
+/// wait on a tx that never mines (dropped from the mempool, underpriced)
+/// would stall every other debit forever. A timed-out tx can still land
+/// later, in which case the retry double-charges — accepted, and bounded by
+/// the loop's attempt cap.
+const CONFIRMATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Sends Track A debits from the operator account. `provider` must carry the
 /// operator signer (wallet filler) — construction happens in `run.rs` from
 /// `--operator-private-key`.
@@ -54,6 +62,7 @@ impl<P: Provider + Send + Sync> DebitEscrow for EscrowOperator<P> {
             .send()
             .await
             .map_err(|e| DebitError::Transient(e.to_string()))?
+            .with_timeout(Some(CONFIRMATION_TIMEOUT))
             .get_receipt()
             .await
             .map_err(|e| DebitError::Transient(e.to_string()))?;

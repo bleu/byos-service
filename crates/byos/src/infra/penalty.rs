@@ -1,20 +1,57 @@
 //! Track A penalty loop (ADR-0003, ADR-0013, COW-1205): turns `SettleFailed`
 //! proposals into landed escrow debits. Each tick scans the pending work and
-//! drives the [`crate::domain::penalty::DebitEscrow`] chain edge; any failure
-//! is retried next tick, so a proposal stays queryable in `SettleFailed`
-//! until its debit lands.
+//! drives the [`crate::domain::penalty::DebitEscrow`] chain edge; a failed
+//! debit is retried next tick, up to [`MAX_DEBIT_ATTEMPTS`] times, and the
+//! proposal stays queryable in `SettleFailed` until its debit lands.
 
 use {
     crate::{
         domain::{
             penalty::{DebitEscrow, non_settlement_debit, revert_debit},
-            proposal::ProposalStatus,
+            proposal::{ProposalId, ProposalStatus},
         },
         infra::storage::ProposalStore,
     },
     alloy::primitives::U256,
-    std::{sync::Arc, time::Duration},
+    std::{collections::HashMap, sync::Arc, time::Duration},
 };
+
+/// A debit that keeps failing is parked after this many attempts — a
+/// permanently-reverting debit (operator lacks the role, escrow paused or
+/// drained) must not retry forever. The giving-up error log is the ops page;
+/// counts are in-memory, so a restart re-arms the retries once the cause is
+/// fixed.
+const MAX_DEBIT_ATTEMPTS: u32 = 10;
+
+/// Per-item debit attempt counts, held by the loop across ticks. An entry is
+/// dropped when its debit lands; an item that hits [`MAX_DEBIT_ATTEMPTS`] is
+/// skipped (its proposal or queue row stays put) until a restart.
+#[derive(Default)]
+pub struct DebitAttempts {
+    /// Keyed by proposal id — the `SettleFailed` proposal *is* the queue.
+    revert: HashMap<ProposalId, u32>,
+    /// Keyed by `penalties` row id.
+    non_settlement: HashMap<i64, u32>,
+}
+
+/// Count a failed debit attempt; logs a per-tick warn while retries remain
+/// and one error when the item is parked for good.
+fn note_debit_failure(
+    attempts: &mut u32,
+    id: impl std::fmt::Display,
+    e: &crate::domain::penalty::DebitError,
+    what: &str,
+) {
+    *attempts += 1;
+    if *attempts >= MAX_DEBIT_ATTEMPTS {
+        tracing::error!(
+            %id, %e, attempts = *attempts,
+            "{what} keeps failing; giving up until restart"
+        );
+    } else {
+        tracing::warn!(%id, %e, "{what} failed; retrying next tick");
+    }
+}
 
 /// Spawn the penalty loop: one [`run_tick`] every `period`. Like the other
 /// background loops it holds the store (and with it an audit sender), so
@@ -29,9 +66,10 @@ pub fn spawn(
         // First tick a full period out, mirroring the validation loop — a
         // plain `interval` fires immediately and would race startup.
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        let mut attempts = DebitAttempts::default();
         loop {
             interval.tick().await;
-            run_tick(&store, &operator, c_l).await;
+            run_tick(&store, &operator, c_l, &mut attempts).await;
         }
     })
 }
@@ -46,12 +84,22 @@ pub fn spawn(
 ///
 /// Debits run sequentially on purpose: they all spend from the operator
 /// account, and concurrent submissions would race its nonce.
-pub async fn run_tick(store: &ProposalStore, operator: &impl DebitEscrow, c_l: U256) {
-    revert_debits(store, operator, c_l).await;
-    non_settlement_debits(store, operator, c_l).await;
+pub async fn run_tick(
+    store: &ProposalStore,
+    operator: &impl DebitEscrow,
+    c_l: U256,
+    attempts: &mut DebitAttempts,
+) {
+    revert_debits(store, operator, c_l, &mut attempts.revert).await;
+    non_settlement_debits(store, operator, c_l, &mut attempts.non_settlement).await;
 }
 
-async fn revert_debits(store: &ProposalStore, operator: &impl DebitEscrow, c_l: U256) {
+async fn revert_debits(
+    store: &ProposalStore,
+    operator: &impl DebitEscrow,
+    c_l: U256,
+    attempts: &mut HashMap<ProposalId, u32>,
+) {
     let pending = match store
         .snapshot_by_statuses(&[ProposalStatus::SettleFailed])
         .await
@@ -64,6 +112,13 @@ async fn revert_debits(store: &ProposalStore, operator: &impl DebitEscrow, c_l: 
     };
 
     for proposal in pending {
+        // Parked: this debit already failed its last allowed attempt.
+        if attempts
+            .get(&proposal.id)
+            .is_some_and(|n| *n >= MAX_DEBIT_ATTEMPTS)
+        {
+            continue;
+        }
         // record_outcome always writes the tx with SettleFailed, so a
         // missing hash is a corrupt row — alert, don't guess an amount.
         let Some(settlement_tx) = proposal.settlement_tx_hash else {
@@ -84,21 +139,37 @@ async fn revert_debits(store: &ProposalStore, operator: &impl DebitEscrow, c_l: 
         {
             Ok(tx) => tx,
             Err(e) => {
-                tracing::warn!(id = %proposal.id, %e, "escrow debit failed; retrying next tick");
+                note_debit_failure(
+                    attempts.entry(proposal.id).or_insert(0),
+                    proposal.id,
+                    &e,
+                    "escrow debit",
+                );
                 continue;
             }
         };
+        attempts.remove(&proposal.id);
         match store.record_penalty(&proposal, amount, penalty_tx).await {
             Ok(()) => tracing::info!(
                 id = %proposal.id, sub_solver = %proposal.sub_solver, %amount,
                 penalty_tx = %penalty_tx, "escrow debited; proposal penalized"
             ),
-            Err(e) => tracing::warn!(id = %proposal.id, %e, "stale penalty transition dropped"),
+            // The debit tx is on-chain but the proposal still reads
+            // SettleFailed — the next tick re-debits, a double charge.
+            Err(e) => tracing::error!(
+                id = %proposal.id, %e,
+                "debit landed but proposal not marked penalized; may re-charge next tick"
+            ),
         }
     }
 }
 
-async fn non_settlement_debits(store: &ProposalStore, operator: &impl DebitEscrow, c_l: U256) {
+async fn non_settlement_debits(
+    store: &ProposalStore,
+    operator: &impl DebitEscrow,
+    c_l: U256,
+    attempts: &mut HashMap<i64, u32>,
+) {
     let pending = match store.pending_penalties().await {
         Ok(pending) => pending,
         Err(e) => {
@@ -108,6 +179,13 @@ async fn non_settlement_debits(store: &ProposalStore, operator: &impl DebitEscro
     };
 
     for penalty in pending {
+        // Parked: this debit already failed its last allowed attempt.
+        if attempts
+            .get(&penalty.id)
+            .is_some_and(|n| *n >= MAX_DEBIT_ATTEMPTS)
+        {
+            continue;
+        }
         let amount = non_settlement_debit(c_l);
         // No settlement tx exists to cite, so the on-chain reason is the
         // order the sub-solver won and abandoned.
@@ -115,13 +193,16 @@ async fn non_settlement_debits(store: &ProposalStore, operator: &impl DebitEscro
         let penalty_tx = match operator.debit(penalty.sub_solver, amount, reason).await {
             Ok(tx) => tx,
             Err(e) => {
-                tracing::warn!(
-                    id = %penalty.proposal_id, %e,
-                    "non-settlement debit failed; retrying next tick"
+                note_debit_failure(
+                    attempts.entry(penalty.id).or_insert(0),
+                    penalty.proposal_id,
+                    &e,
+                    "non-settlement debit",
                 );
                 continue;
             }
         };
+        attempts.remove(&penalty.id);
         match store
             .record_non_settlement_debit(&penalty, amount, penalty_tx)
             .await
@@ -234,6 +315,37 @@ mod tests {
         }
     }
 
+    /// Chain edge whose debit never lands — the "operator lacks the role,
+    /// escrow paused" shape the loop must eventually give up on. Counts how
+    /// many times it was asked.
+    #[derive(Default)]
+    struct DeadOperator {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl DeadOperator {
+        fn calls(&self) -> u32 {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl DebitEscrow for DeadOperator {
+        async fn settlement_cost(&self, _tx: B256) -> Result<U256, DebitError> {
+            Ok(U256::from(1_000u64))
+        }
+
+        async fn debit(
+            &self,
+            _sub_solver: Address,
+            _amount: U256,
+            _reason: B256,
+        ) -> Result<B256, DebitError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(DebitError::Transient("operator lacks OPERATOR_ROLE".into()))
+        }
+    }
+
     #[ignore]
     #[tokio::test]
     async fn spawned_loop_debits_on_its_interval() {
@@ -289,7 +401,8 @@ mod tests {
             .expect("queue");
 
         let operator = StubOperator::new(U256::ZERO);
-        run_tick(&store, &operator, U256::from(C_L)).await;
+        let mut attempts = DebitAttempts::default();
+        run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
 
         assert_eq!(
             *operator.debits.lock(),
@@ -310,7 +423,7 @@ mod tests {
             "the proposal keeps competing; only its escrow is charged"
         );
 
-        run_tick(&store, &operator, U256::from(C_L)).await;
+        run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
         assert_eq!(
             operator.debits.lock().len(),
             1,
@@ -335,18 +448,88 @@ mod tests {
         let operator = FlakyOperator {
             failures_left: std::sync::atomic::AtomicU32::new(1),
         };
+        let mut attempts = DebitAttempts::default();
 
-        run_tick(&store, &operator, U256::from(C_L)).await;
+        run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
         assert_eq!(
             store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::SettleFailed,
             "an unlanded debit must keep the proposal queryable in settleFailed (ADR-0013)"
         );
 
-        run_tick(&store, &operator, U256::from(C_L)).await;
+        run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
         let proposal = store.get(id).await.expect("get").expect("exists");
         assert_eq!(proposal.status, ProposalStatus::Penalized);
         assert_eq!(proposal.penalty_tx_hash, Some(PENALTY_TX));
+    }
+
+    /// A debit that can never land is parked after [`MAX_DEBIT_ATTEMPTS`]
+    /// tries instead of retrying every tick forever. The proposal stays in
+    /// `SettleFailed`, so a restart re-arms it once the cause is fixed.
+    #[ignore]
+    #[tokio::test]
+    async fn a_permanently_failing_revert_debit_is_given_up_on() {
+        let store = test_store().await;
+        let mut proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            Address::repeat_byte(0x01),
+            ProposalStatus::SettleFailed,
+        );
+        proposal.settlement_tx_hash = Some(SETTLEMENT_TX);
+        let id = store.insert(proposal).await.expect("insert");
+
+        let operator = DeadOperator::default();
+        let mut attempts = DebitAttempts::default();
+        for _ in 0..MAX_DEBIT_ATTEMPTS + 5 {
+            run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
+        }
+
+        assert_eq!(
+            operator.calls(),
+            MAX_DEBIT_ATTEMPTS,
+            "the loop must stop submitting after the attempt cap"
+        );
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::SettleFailed,
+            "a given-up debit leaves the proposal queryable, not silently penalized"
+        );
+    }
+
+    /// The same cap guards the non-settlement queue: a charge that cannot be
+    /// paid stops being retried, and its row stays pending for a restart.
+    #[ignore]
+    #[tokio::test]
+    async fn a_permanently_failing_non_settlement_debit_is_given_up_on() {
+        let store = test_store().await;
+        let proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            Address::repeat_byte(0x01),
+            ProposalStatus::Active,
+        );
+        let id = store.insert(proposal).await.expect("insert");
+        let stored = store.get(id).await.expect("get").expect("exists");
+        store
+            .queue_non_settlement_penalty(&stored)
+            .await
+            .expect("queue");
+
+        let operator = DeadOperator::default();
+        let mut attempts = DebitAttempts::default();
+        for _ in 0..MAX_DEBIT_ATTEMPTS + 5 {
+            run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
+        }
+
+        assert_eq!(
+            operator.calls(),
+            MAX_DEBIT_ATTEMPTS,
+            "the loop must stop submitting after the attempt cap"
+        );
+        assert_eq!(
+            store.pending_penalties().await.expect("pending").len(),
+            1,
+            "the unpaid charge stays queued for a later restart"
+        );
     }
 
     /// Acceptance (COW-1205): a `SettleFailed` proposal ends `Penalized`
@@ -364,7 +547,13 @@ mod tests {
         let id = store.insert(proposal).await.expect("insert");
 
         let operator = StubOperator::new(U256::from(6_000_000_000_000_000u64)); // 200k gas × 30 gwei
-        run_tick(&store, &operator, U256::from(C_L)).await;
+        run_tick(
+            &store,
+            &operator,
+            U256::from(C_L),
+            &mut DebitAttempts::default(),
+        )
+        .await;
 
         let proposal = store.get(id).await.expect("get").expect("exists");
         assert_eq!(proposal.status, ProposalStatus::Penalized);
