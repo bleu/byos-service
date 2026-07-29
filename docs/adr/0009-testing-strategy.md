@@ -35,7 +35,7 @@ Vehicle: offline-mode is pinned as a git submodule; this repo carries a small ov
 
 The BYOS contracts (Escrow, TrampolineFactory) are **baked into a regenerated `anvil-state.json`**: an added deploy step in offline-mode's pipeline deploys them (via the already-present CREATE2 singleton factory, for stable addresses) and the resulting state file is committed in this repo's overlay. Regeneration needs a mainnet RPC key once (offline-mode fetches original deployment txs/bytecode); afterwards everything is offline again.
 
-Tier 1 loads the **same state file** into a plain anvil — no docker — so both tiers see identical chain state and contract addresses, and the "where do e2e contract artifacts come from" question disappears: the state file is the artifact, regenerated from [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts) releases when the contracts change.
+Tier 1 loads the **same state file** into a plain anvil — no docker — so both tiers see identical chain state and contract addresses, and the "where do e2e contract artifacts come from" question disappears: the state file is the artifact, regenerated when the contracts change. [ADR-0014](0014-contract-artifact-provenance.md) owns where those contracts come from — the pinned `byos-contracts` submodule, superseding this ADR's original answer of tagged releases.
 
 ### The services pin is the API anchor
 
