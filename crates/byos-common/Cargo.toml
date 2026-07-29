@@ -1,9 +1,9 @@
 [package]
 name = "byos-common"
-version = "0.1.0"
-edition = "2024"
-authors = ["bleu <dev@bleu.studio>"]
-license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "Shared types, EIP-712 schema, Trampoline calldata encoding, and contract ABIs for the BYOS service"
 
 [lints]
