@@ -1,0 +1,14 @@
+[package]
+name = "proposal-dto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Serde wire types for the BYOS proposal API, shared by server and clients"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy.workspace = true
+serde.workspace = true

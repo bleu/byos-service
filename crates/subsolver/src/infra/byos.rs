@@ -1,22 +1,27 @@
 //! HTTP client for the BYOS proposal API: submit, verdict polling, metadata
-//! lookup, and EIP-712-signed cancellation. Wire shapes mirror the server's
-//! `byos::infra::api::dto` (camelCase JSON, 256-bit values as decimal
-//! strings, bytes as hex — ADR-0005); reads authenticate with the `ReadAuth`
-//! bearer signature in the `X-Signature` header (ADR-0011). Rejections
-//! surface as the typed `{kind, description}` shape (ADR-0007) so callers
-//! can react to the machine-readable reason.
+//! lookup, and EIP-712-signed cancellation. Wire shapes come from the shared
+//! `proposal-dto` crate (camelCase JSON, 256-bit values as decimal strings,
+//! bytes as hex — ADR-0005); reads authenticate with the `ReadAuth` bearer
+//! signature in the `X-Signature` header (ADR-0011). Rejections surface as
+//! the typed `{kind, description}` shape (ADR-0007) so callers can react to
+//! the machine-readable reason.
 
 use {
     crate::domain::proposal::SignedProposal,
     alloy::{
         hex,
-        primitives::{Address, Bytes, U256},
+        primitives::{Bytes, U256},
         signers::local::PrivateKeySigner,
         sol_types::Eip712Domain,
     },
-    byos_common::{contracts::Interaction, eip712},
+    byos_common::eip712,
+    proposal_dto::proposal::{
+        CreateProposalRequest,
+        CreateProposalResponse,
+        GetProposalResponse,
+        ListProposalsResponse,
+    },
     reqwest::{StatusCode, Url},
-    serde::{Deserialize, Serialize},
 };
 
 /// Client for one BYOS instance's public proposal endpoints, acting as one
@@ -33,7 +38,7 @@ pub enum Error {
     /// The service answered with a machine-readable rejection (4xx/5xx with
     /// the ADR-0007 body).
     #[error("proposal rejected: {0:?}")]
-    Rejected(Rejection),
+    Rejected(proposal_dto::error::Error),
     /// The service answered outside the API contract (no typed error body).
     #[error("unexpected status {0}")]
     UnexpectedStatus(StatusCode),
@@ -42,29 +47,8 @@ pub enum Error {
 }
 
 // ---------------------------------------------------------------------------
-// Wire types (client side of `byos::infra::api::dto`)
+// Domain -> wire conversion
 // ---------------------------------------------------------------------------
-
-/// Body of `POST /proposals`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateProposalRequest {
-    order_uid: String,
-    sell_amount: String,
-    buy_amount: String,
-    interactions: Vec<InteractionDto>,
-    valid_until: String,
-    nonce: String,
-    signature: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InteractionDto {
-    target: Address,
-    value: String,
-    call_data: String,
-}
 
 impl From<&SignedProposal> for CreateProposalRequest {
     fn from(proposal: &SignedProposal) -> Self {
@@ -72,117 +56,22 @@ impl From<&SignedProposal> for CreateProposalRequest {
             order_uid: proposal.order_uid.to_string(),
             sell_amount: proposal.sell_amount.to_string(),
             buy_amount: proposal.buy_amount.to_string(),
-            interactions: proposal.interactions.iter().map(Into::into).collect(),
+            // Inline because both interaction types are foreign here, so a
+            // `From` impl is unavailable (orphan rule).
+            interactions: proposal
+                .interactions
+                .iter()
+                .map(|interaction| proposal_dto::proposal::Interaction {
+                    target: interaction.target,
+                    value: interaction.value.to_string(),
+                    call_data: hex::encode_prefixed(&interaction.callData),
+                })
+                .collect(),
             valid_until: proposal.valid_until.to_string(),
             nonce: proposal.nonce.to_string(),
             signature: proposal.signature.to_string(),
         }
     }
-}
-
-impl From<&Interaction> for InteractionDto {
-    fn from(interaction: &Interaction) -> Self {
-        Self {
-            target: interaction.target,
-            value: interaction.value.to_string(),
-            call_data: hex::encode_prefixed(&interaction.callData),
-        }
-    }
-}
-
-/// Body of a 202 `POST /proposals` response: the server-assigned proposal id.
-#[derive(Deserialize)]
-struct Submitted {
-    id: u64,
-}
-
-/// Proposal lifecycle status as served by the API. `Unknown` absorbs states
-/// newer than this client, so server additions never break deserialization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Status {
-    /// Signature verified, awaiting background validation (COW-1162).
-    Submitted,
-    Active,
-    Rejected,
-    Expired,
-    Settled,
-    SimFailed,
-    Cancelled,
-    #[serde(other)]
-    Unknown,
-}
-
-impl Status {
-    /// Whether the proposal can never become executable again — the signal
-    /// to resubmit with a fresh nonce.
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Rejected | Self::Expired | Self::Settled | Self::SimFailed | Self::Cancelled
-        )
-    }
-}
-
-/// Why the background validator rejected a proposal (PascalCase, ADR-0007).
-/// `Unknown` tolerates reasons newer than this client.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-pub enum RejectionReason {
-    InsufficientEscrow,
-    #[serde(other)]
-    Unknown,
-}
-
-/// Body of `GET /proposal/{id}`: the caller's own proposal, including the
-/// async validation verdict.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProposalView {
-    pub id: u64,
-    pub status: Status,
-    /// Only present when `status` is `rejected`.
-    #[serde(default)]
-    pub rejection_reason: Option<RejectionReason>,
-}
-
-/// Body of `GET /proposals/{order_uid}`: per-proposal metadata for the
-/// caller's own proposals on that order.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Metadata {
-    pub proposals: Vec<ProposalMetadata>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProposalMetadata {
-    pub id: u64,
-    pub sub_solver: Address,
-    pub status: Status,
-}
-
-/// Body of a 4xx/5xx response (ADR-0007): machine-readable kind plus a
-/// human-oriented description. `Unknown` absorbs kinds newer than the
-/// client, so server additions never break deserialization.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Rejection {
-    pub kind: Kind,
-    pub description: String,
-}
-
-/// Error kinds served by `byos::infra::api::error` (PascalCase).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-pub enum Kind {
-    InvalidSignature,
-    SignatureRecoveryFailed,
-    InsufficientEscrow,
-    ProposalExpired,
-    ProposalNotFound,
-    ProposalNotCancellable,
-    BadRequest,
-    Internal,
-    #[serde(other)]
-    Unknown,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,13 +99,13 @@ impl ByosClient {
             .json(&CreateProposalRequest::from(proposal))
             .send()
             .await?;
-        let submitted: Submitted = Self::parse(response).await?;
+        let submitted: CreateProposalResponse = Self::parse(response).await?;
         Ok(submitted.id)
     }
 
     /// `GET /proposal/{id}`: one of the signer's own proposals, including
     /// the async validation verdict.
-    pub async fn proposal(&self, id: u64) -> Result<ProposalView, Error> {
+    pub async fn proposal(&self, id: u64) -> Result<GetProposalResponse, Error> {
         let response = self
             .http
             .get(self.url(&format!("/proposal/{id}")))
@@ -228,7 +117,7 @@ impl ByosClient {
 
     /// `GET /proposals/{order_uid}`: the signer's own proposal metadata on
     /// this order; the discovery channel for cancellation ids.
-    pub async fn proposals(&self, order_uid: &Bytes) -> Result<Metadata, Error> {
+    pub async fn proposals(&self, order_uid: &Bytes) -> Result<ListProposalsResponse, Error> {
         let response = self
             .http
             .get(self.url(&format!("/proposals/{order_uid}")))
@@ -286,7 +175,7 @@ impl ByosClient {
     /// ADR-0007, or `UnexpectedStatus` when it doesn't.
     async fn error(response: reqwest::Response) -> Error {
         let status = response.status();
-        match response.json::<Rejection>().await {
+        match response.json::<proposal_dto::error::Error>().await {
             Ok(rejection) => Error::Rejected(rejection),
             Err(_) => Error::UnexpectedStatus(status),
         }
@@ -300,6 +189,11 @@ mod tests {
         alloy::{
             primitives::{Address, Bytes, Signature, U256},
             signers::local::PrivateKeySigner,
+        },
+        byos_common::contracts::Interaction,
+        proposal_dto::{
+            error::Kind,
+            proposal::{RejectionReason, Status},
         },
         serde_json::json,
         wiremock::{

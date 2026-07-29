@@ -18,6 +18,7 @@ byos = { path = "crates/byos" }
 byos-common = { path = "crates/byos-common" }
 byos-watcher = { path = "crates/byos-watcher" }
 e2e = { path = "crates/e2e" }
+proposal-dto = { path = "crates/proposal-dto" }
 subsolver = { path = "crates/subsolver" }
 
 # cowprotocol/services — pinned to the driver API revision we target (ADR-0009)

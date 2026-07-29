@@ -3,15 +3,7 @@
 use {
     super::{
         AppState,
-        dto::{
-            CreateProposalRequest,
-            CreateProposalResponse,
-            GetProposalResponse,
-            ListProposalsResponse,
-            ProposalMetadata,
-            parse_hex,
-            parse_u256,
-        },
+        dto::{self, parse_hex, parse_u256},
         error::{Error, Kind},
     },
     crate::domain::proposal::{OrderUid, ProposalId, ProposalStatus},
@@ -25,6 +17,13 @@ use {
     byos_common::{
         contracts::{Interaction, Proposal},
         eip712,
+    },
+    proposal_dto::proposal::{
+        CreateProposalRequest,
+        CreateProposalResponse,
+        GetProposalResponse,
+        ListProposalsResponse,
+        ProposalMetadata,
     },
     std::time::{SystemTime, UNIX_EPOCH},
 };
@@ -67,7 +66,7 @@ pub async fn create_proposal(
     let interactions: Vec<Interaction> = body
         .interactions
         .iter()
-        .map(Interaction::try_from)
+        .map(dto::interaction)
         .collect::<Result<_, _>>()?;
 
     // 3. Compute hashes.
@@ -135,7 +134,10 @@ pub async fn create_proposal(
 
     tracing::info!(%id, %sub_solver, "proposal accepted for validation");
 
-    Ok((StatusCode::ACCEPTED, Json(CreateProposalResponse { id })))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CreateProposalResponse { id: id.0 }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -160,14 +162,14 @@ pub async fn get_proposal(
         .ok_or(Error::from(Kind::ProposalNotFound))?;
 
     Ok(Json(GetProposalResponse {
-        id: proposal.id,
+        id: proposal.id.0,
         sub_solver: proposal.sub_solver,
         order_uid: proposal.order_uid.to_string(),
         sell_amount: proposal.sell_amount.to_string(),
         buy_amount: proposal.buy_amount.to_string(),
         valid_until: proposal.valid_until.to_string(),
-        status: proposal.status.to_string(),
-        rejection_reason: proposal.rejection_reason,
+        status: proposal.status.into(),
+        rejection_reason: proposal.rejection_reason.map(Into::into),
         settlement_tx_hash: proposal.settlement_tx_hash.map(|t| format!("{t:#x}")),
         penalty_tx_hash: proposal.penalty_tx_hash.map(|t| format!("{t:#x}")),
     }))

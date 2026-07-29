@@ -20,6 +20,7 @@ path = "src/main.rs"
 alloy = { workspace = true, features = ["reqwest"] }
 anyhow.workspace = true
 byos-common.workspace = true
+proposal-dto.workspace = true
 clap.workspace = true
 humantime-serde.workspace = true
 reqwest.workspace = true

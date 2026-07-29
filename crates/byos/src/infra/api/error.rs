@@ -1,26 +1,14 @@
-//! Typed API error types per ADR-0007.
+//! Typed API error responses per ADR-0007. The wire body (`{ kind,
+//! description }` and the `Kind` enum) lives in `proposal-dto`; this module
+//! adds the server-side behaviour: status-code mapping and default
+//! descriptions.
 
-use {
-    axum::{Json, http::StatusCode, response::IntoResponse},
-    serde::Serialize,
-};
+use axum::{Json, http::StatusCode, response::IntoResponse};
+pub use proposal_dto::error::Kind;
 
-/// Machine-readable rejection kind. PascalCase on the wire.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub enum Kind {
-    InvalidSignature,
-    SignatureRecoveryFailed,
-    InsufficientEscrow,
-    ProposalExpired,
-    ProposalLifetimeExceeded,
-    ProposalNotFound,
-    ProposalNotCancellable,
-    BadRequest,
-    Internal,
-}
-
-/// JSON error body: `{ "kind": "PascalCase", "description": "..." }`.
-#[derive(Debug, Serialize)]
+/// A rejection to be served: the wire kind plus a description. Local wrapper
+/// so `IntoResponse` can be implemented (the wire type is foreign).
+#[derive(Debug)]
 pub struct Error {
     pub kind: Kind,
     pub description: String,
@@ -36,9 +24,15 @@ impl IntoResponse for Error {
             Kind::InsufficientEscrow => StatusCode::FORBIDDEN,
             Kind::ProposalNotFound => StatusCode::NOT_FOUND,
             Kind::ProposalNotCancellable => StatusCode::CONFLICT,
-            Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            // `Unknown` exists for client-side tolerance; the server never
+            // constructs it.
+            Kind::Internal | Kind::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(self)).into_response()
+        let body = proposal_dto::error::Error {
+            kind: self.kind,
+            description: self.description,
+        };
+        (status, Json(body)).into_response()
     }
 }
 
@@ -64,7 +58,7 @@ impl From<Kind> for Error {
             Kind::ProposalNotFound => "Proposal not found",
             Kind::ProposalNotCancellable => "Proposal is executing or already in a terminal state",
             Kind::BadRequest => "Malformed request",
-            Kind::Internal => "Internal error",
+            Kind::Internal | Kind::Unknown => "Internal error",
         };
         Self {
             kind,
