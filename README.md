@@ -13,7 +13,7 @@ Status: **in progress** — the proposal API, scoring/solve engine, background v
 | [`byos`](crates/byos) | The BYOS service: public proposal API + CoW solver engine, one process, two listeners | in progress |
 | [`byos-common`](crates/byos-common) | Shared contract bindings, EIP-712 schema, and Trampoline calldata encoding | in progress |
 | [`subsolver`](crates/subsolver) | Reference sub-solver: example proposal-API client, also the e2e-test counterpart | implemented |
-| [`e2e`](crates/e2e) | End-to-end tests, two tiers: in-process against plain anvil, and full CoW stack via [offline-mode](https://github.com/cowdao-grants/offline-mode) | skeleton |
+| [`e2e`](crates/e2e) | End-to-end tests, two tiers: in-process against plain anvil, and full CoW stack via [offline-mode](https://github.com/cowdao-grants/offline-mode) | tier-1 chain fixture |
 
 ## Architecture
 
@@ -30,7 +30,7 @@ CoW protocol background (solver auctions, slashing policy, CIPs) is captured in 
 
 ## Development
 
-Prerequisites: stable Rust (via [rustup](https://rustup.rs); `rust-toolchain.toml` pins the channel), a nightly toolchain for rustfmt, [`just`](https://github.com/casey/just), and [`cargo-nextest`](https://nexte.st). E2e tests additionally need [Foundry](https://getfoundry.sh)'s anvil. Running the service (and the DB-backed tests) needs Postgres — `docker compose up -d postgres` provides one. In production, pass the connection string via the `DATABASE_URL` env var rather than `--database-url`: CLI arguments are visible to other users on the host via `ps`.
+Prerequisites: stable Rust (via [rustup](https://rustup.rs); `rust-toolchain.toml` pins the channel), a nightly toolchain for rustfmt, [`just`](https://github.com/casey/just), and [`cargo-nextest`](https://nexte.st). E2e tests additionally need [Foundry](https://getfoundry.sh)'s anvil and the offline-mode submodule (`git submodule update --init`), whose committed `anvil-state.json` is the tier-1 chain fixture. Running the service (and the DB-backed tests) needs Postgres — `docker compose up -d postgres` provides one. In production, pass the connection string via the `DATABASE_URL` env var rather than `--database-url`: CLI arguments are visible to other users on the host via `ps`.
 
 ```sh
 just build          # cargo build --workspace
