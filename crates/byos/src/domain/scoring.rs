@@ -16,8 +16,13 @@ pub const ESCROW_GAS_ESTIMATION: u64 = 200_000;
 pub const GAS_BUFFER: u64 = 30_000;
 
 /// Effective gas for a simulated proposal: simulated gas + safety buffer.
+///
+/// Saturating because `simulated` is whatever the node returned from
+/// `eth_estimateGas`. The release profile has no overflow checks, so a wrapped
+/// sum would collapse `gas_cost` to near zero and score an absurd proposal as
+/// the auction's best.
 pub fn effective_gas(simulated: u64) -> u64 {
-    simulated + GAS_BUFFER
+    simulated.saturating_add(GAS_BUFFER)
 }
 
 /// The token surplus is denominated in: the buy token for a sell order (the

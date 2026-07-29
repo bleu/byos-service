@@ -123,7 +123,7 @@ impl ProposalStore {
             "UPDATE proposals SET status = $3, status_changed_at = now() WHERE id = $1 AND status \
              = $2",
         )
-        .bind(as_db_id(proposal.id))
+        .bind(as_db_id(proposal.id)?)
         .bind(from.to_string())
         .bind(to.to_string())
         .execute(&self.pool)
@@ -167,7 +167,7 @@ impl ProposalStore {
             "UPDATE proposals SET status = $3, settlement_tx_hash = $4, status_changed_at = now() \
              WHERE id = $1 AND status = $2",
         )
-        .bind(as_db_id(proposal.id))
+        .bind(as_db_id(proposal.id)?)
         .bind(from.to_string())
         .bind(to.to_string())
         .bind(format!("{settlement_tx_hash:#x}"))
@@ -208,7 +208,7 @@ impl ProposalStore {
             "UPDATE proposals SET status = $3, penalty_tx_hash = $4, status_changed_at = now() \
              WHERE id = $1 AND status = $2",
         )
-        .bind(as_db_id(proposal.id))
+        .bind(as_db_id(proposal.id)?)
         .bind(from.to_string())
         .bind(ProposalStatus::Penalized.to_string())
         .bind(format!("{penalty_tx_hash:#x}"))
@@ -259,7 +259,7 @@ impl ProposalStore {
         let row: Option<(String, String, String)> = sqlx::query_as(
             "SELECT status, sub_solver, order_uid FROM proposals WHERE id = $1 FOR UPDATE",
         )
-        .bind(as_db_id(id))
+        .bind(as_db_id(id)?)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -296,7 +296,7 @@ impl ProposalStore {
              sell_token), buy_token = COALESCE($7, buy_token), status_changed_at = CASE WHEN \
              status = $2 THEN status_changed_at ELSE now() END WHERE id = $1",
         )
-        .bind(as_db_id(id))
+        .bind(as_db_id(id)?)
         .bind(to.to_string())
         .bind(rejection_reason.map(|r| r.to_string()))
         .bind(sim.map(|s| i64::try_from(s.gas_used).expect("gas exceeds i64")))
@@ -332,7 +332,7 @@ impl ProposalStore {
         let row: Option<(String, String, String)> = sqlx::query_as(
             "SELECT status, sub_solver, order_uid FROM proposals WHERE id = $1 FOR UPDATE",
         )
-        .bind(as_db_id(id))
+        .bind(as_db_id(id)?)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -357,7 +357,7 @@ impl ProposalStore {
         }
 
         sqlx::query("UPDATE proposals SET status = $2, status_changed_at = now() WHERE id = $1")
-            .bind(as_db_id(id))
+            .bind(as_db_id(id)?)
             .bind(ProposalStatus::Cancelled.to_string())
             .execute(&mut *tx)
             .await?;
@@ -471,9 +471,15 @@ impl ProposalStore {
     /// Disambiguate a zero-row compare-and-swap: the proposal is either gone
     /// (`NotFound`) or sits in a different status (`StaleTransition`).
     async fn stale_or_missing(&self, id: ProposalId, expected: String) -> StoreError {
+        let db_id = match as_db_id(id) {
+            Ok(db_id) => db_id,
+            // An id the column cannot hold never named a row, so the
+            // zero-row CAS was a miss, not a lost race.
+            Err(e) => return e,
+        };
         let status: Option<String> =
             match sqlx::query_scalar("SELECT status FROM proposals WHERE id = $1")
-                .bind(as_db_id(id))
+                .bind(db_id)
                 .fetch_optional(&self.pool)
                 .await
             {
@@ -577,7 +583,7 @@ impl ProposalStore {
         sqlx::query(
             "INSERT INTO penalties (proposal_id, sub_solver, order_uid) VALUES ($1, $2, $3)",
         )
-        .bind(as_db_id(proposal.id))
+        .bind(as_db_id(proposal.id)?)
         .bind(format!("{:#x}", proposal.sub_solver))
         .bind(proposal.order_uid.to_string())
         .execute(&self.pool)
@@ -658,7 +664,7 @@ impl ProposalStore {
         )
         .bind(auction_id)
         .bind(solution_id)
-        .bind(as_db_id(proposal_id))
+        .bind(as_db_id(proposal_id)?)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -690,11 +696,18 @@ impl ProposalStore {
     }
 
     /// Look up a single proposal by ID.
+    ///
+    /// An id the `id` column cannot hold is a miss, not an error: the caller
+    /// maps `Ok(None)` to the owner-scoped 404 (ADR-0011) and every
+    /// `StoreError` to a 500, and an unrepresentable id is the former.
     pub async fn get(&self, id: ProposalId) -> Result<Option<Proposal>, StoreError> {
+        let Ok(db_id) = as_db_id(id) else {
+            return Ok(None);
+        };
         let row: Option<ProposalRow> = sqlx::query_as(&format!(
             "SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE id = $1"
         ))
-        .bind(as_db_id(id))
+        .bind(db_id)
         .fetch_optional(&self.pool)
         .await?;
         row.map(Proposal::try_from).transpose()
@@ -702,8 +715,14 @@ impl ProposalStore {
 }
 
 /// A `ProposalId` as the BIGINT the `id` column holds.
-fn as_db_id(id: ProposalId) -> i64 {
-    i64::try_from(id.0).expect("proposal id exceeds i64")
+///
+/// Ids reach the store from two places: the Postgres sequence, always in
+/// range, and `Path<ProposalId>` on the wire, which is a bare `u64` and so can
+/// exceed `i64::MAX`. An id the column cannot hold names no row, so it is a
+/// miss rather than a panic — the wire path is reachable by anyone who can
+/// reach `GET /proposal/{id}`.
+fn as_db_id(id: ProposalId) -> Result<i64, StoreError> {
+    i64::try_from(id.0).map_err(|_| StoreError::NotFound(id))
 }
 
 /// Status strings for a `= ANY($n)` bind.
@@ -902,7 +921,7 @@ mod tests {
             "UPDATE proposals SET status_changed_at = now() - make_interval(secs => $2) WHERE id \
              = $1",
         )
-        .bind(as_db_id(id))
+        .bind(as_db_id(id).expect("db-assigned id"))
         .bind(secs)
         .execute(pool)
         .await
@@ -1723,7 +1742,7 @@ mod tests {
                 .expect("solutions query");
         assert_eq!(
             remaining,
-            vec![(as_db_id(settled),)],
+            vec![(as_db_id(settled).expect("db-assigned id"),)],
             "the dropped proposal's participation row cascades away; the settlement's survives"
         );
     }
