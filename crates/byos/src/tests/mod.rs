@@ -4,4 +4,6 @@
 //! and runs via `just test-db` (needs the compose Postgres).
 
 mod cases;
-mod setup;
+// pub(crate): store-level DB tests (infra/storage.rs) reuse the TestDb
+// harness.
+pub(crate) mod setup;

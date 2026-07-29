@@ -134,6 +134,7 @@ The in-memory hot store is removed. A `proposals` table in the existing Postgres
 - **Restarts stop being lossy.** Live proposals survive: `Submitted`/`Active` re-validate on the next tick, `Executing` resolves via notification or timeout. Sub-solver resubmission on restart is no longer part of the design.
 - **A `solutions` table maps notifications back to proposals**: `(auction_id, solution_id, proposal_id, created_at)`, written synchronously inside `/solve` before the solution is returned — if we can't record it, we don't bid it. `/notify` joins through it; it doubles as the per-auction participation record (a row with no subsequent `SettlementStarted` is a loss).
 - **`audit_events` is unchanged**: append-only history and dispute evidence, written behind the same channel. The `proposals` table holds what *is*; `audit_events` holds what *happened*.
+- **The write-behind keeps a small crash window.** An audit event is emitted only after its proposal write commits, so a crash between the two leaves a durable state change with no matching event. With the in-memory store the state died with the process, so the two always agreed; now they can diverge by exactly one event per crash. Accepted: closing it means writing evidence in the same transaction as the mutation, which couples every store write to the audit codec and removes the writer's retry/backoff isolation. Revisit if a dispute ever hinges on a single missing event.
 
 ### Retention: one sweep, one knob
 

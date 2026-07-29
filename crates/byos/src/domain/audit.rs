@@ -20,9 +20,7 @@ pub type Sender = tokio::sync::mpsc::UnboundedSender<AuditEvent>;
 /// A proposal lifecycle event worth keeping as dispute evidence.
 #[derive(Clone, Debug)]
 pub struct AuditEvent {
-    /// Wall-clock time at emission — the evidentiary timestamp. The hot
-    /// store's `created_at` stays monotonic (`Instant`); evidence needs an
-    /// absolute clock.
+    /// Wall-clock time at emission — the evidentiary timestamp.
     pub occurred_at: SystemTime,
     pub kind: AuditKind,
 }
@@ -182,7 +180,6 @@ mod tests {
             rejection_reason: None,
             gas_used: None,
             trampoline: None,
-            created_at: std::time::Instant::now(),
         };
         AuditEvent {
             occurred_at: SystemTime::now(),

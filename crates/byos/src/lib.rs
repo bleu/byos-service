@@ -1,6 +1,6 @@
 //! BYOS service: public proposal API + CoW solver engine.
 //!
-//! Two listeners share an in-memory proposal store (ADR-0001):
+//! Two listeners share the Postgres proposal store (ADR-0013):
 //! - **Public** (`/proposals`): sub-solver-facing CRUD
 //! - **Internal** (`/solve`): driver-facing solver engine (COW-1163)
 //!

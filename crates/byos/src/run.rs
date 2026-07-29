@@ -3,16 +3,14 @@
 //! e2e tests can discover the bound ports.
 
 use {
-    crate::{
-        domain::proposal::InMemoryProposalStore,
-        infra::{
-            api::{self, AppState},
-            audit,
-            blockchain::{
-                escrow::EscrowValidator,
-                validator::{ProposalValidator, SimulationValidator},
-            },
+    crate::infra::{
+        api::{self, AppState},
+        audit,
+        blockchain::{
+            escrow::EscrowValidator,
+            validator::{ProposalValidator, SimulationValidator},
         },
+        storage::ProposalStore,
     },
     alloy::{primitives::U256, providers::Provider},
     anyhow::Context,
@@ -109,6 +107,19 @@ pub(crate) struct Args {
     /// Seconds between background validation ticks (expiry sweep + verdicts).
     #[arg(long, env, default_value_t = 12)]
     validation_interval_secs: u64,
+
+    /// How long dropped proposals (rejected/simFailed/expired/cancelled)
+    /// stay readable after reaching their terminal state; the retention
+    /// sweep deletes them past this window and they 404. Their audit trail
+    /// is kept regardless. Accepts humantime strings, e.g. `1h`, `30m`.
+    #[arg(long, env, default_value = "1h", value_parser = humantime::parse_duration)]
+    dropped_retention: std::time::Duration,
+
+    /// Seconds between retention sweep passes. Deliberately slow — dropped
+    /// proposals only need to disappear on the order of the retention
+    /// window, not of a block.
+    #[arg(long, env, default_value_t = 300)]
+    retention_sweep_interval_secs: u64,
 
     /// Maximum proposal lifetime in seconds (ADR-0013): `POST /proposals`
     /// rejects any `validUntil` further out than this. Bounds the worst-case
@@ -219,17 +230,15 @@ async fn run_with(
 
     tracing::info!(?args, "starting byos");
 
-    // Fail-fast: no audit database, no service (ADR-0001 — the audit trail
-    // is required by the slashing policy, so "up but not auditing" must be
-    // an impossible state).
+    // Fail-fast: no database, no service (ADR-0001/ADR-0013 — Postgres holds
+    // both the proposal state and the audit trail the slashing policy
+    // requires, so "up but not persisting" must be an impossible state).
     let pool = audit::connect_and_migrate(&args.database_url.0).await?;
-    let last_id = audit::max_proposal_id(&pool).await?;
 
     let domain = byos_common::eip712::byos_domain(args.chain_id, args.trampoline_factory);
     let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
-    let writer = audit::spawn(pool, audit_rx);
-    let store = Arc::new(InMemoryProposalStore::new(audit_tx));
-    store.seed_next_id(last_id);
+    let writer = audit::spawn(pool.clone(), audit_rx);
+    let store = Arc::new(ProposalStore::new(pool, audit_tx));
 
     let default_gas_price = args.default_gas_price.unwrap_or(0);
     let gas_price = Arc::new(AtomicU64::new(default_gas_price));
@@ -241,6 +250,14 @@ async fn run_with(
     );
 
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
+
+    // Retention sweep (ADR-0013): bounds the proposals table by deleting
+    // dropped-tier rows past their window. audit_events is never touched.
+    let retention_loop = crate::infra::retention::spawn(
+        store.clone(),
+        std::time::Duration::from_secs(args.retention_sweep_interval_secs),
+        args.dropped_retention,
+    );
 
     // Background validator (ADR-0001, async ingestion). When --rpc-url is
     // set, the composite ProposalValidator gates proposals via on-chain escrow
@@ -300,12 +317,13 @@ async fn run_with(
     .await
     .context("API server exited with error")?;
 
-    // The validation loop holds the store — and with it an audit sender — so
-    // stop it first, or the writer's channel never closes and the drain below
-    // hangs. A verdict lost mid-tick to the abort is moot: the in-memory
-    // store vanishes at shutdown anyway. Then awaiting the writer flushes
-    // everything still queued.
+    // The validation and retention loops hold the store — and with it an
+    // audit sender — so stop them first, or the writer's channel never
+    // closes and the drain below hangs. A verdict lost mid-tick to the
+    // abort is redone by the first tick after the next boot — proposals are
+    // durable now. Then awaiting the writer flushes everything still queued.
     validation_loop.abort();
+    retention_loop.abort();
     writer.await.context("audit writer task panicked")
 }
 
