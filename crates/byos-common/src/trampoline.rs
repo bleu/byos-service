@@ -5,11 +5,12 @@
 //!
 //! 1. `sellToken.transfer(trampoline, sellAmount)` — push trade capital from
 //!    settlement to the sub-solver's Trampoline instance.
-//! 2. `trampoline.execute(proposal, interactions, buyToken, signature)` — run
-//!    the sub-solver's route.
+//! 2. `trampoline.execute(proposal, interactions, sellToken, buyToken,
+//!    signature)` — run the sub-solver's route.
 //!
-//! The Trampoline contract's own code handles the settle-back (`buyAmount` of
-//! `buyToken` back to the settlement contract) — BYOS does not encode that.
+//! What happens inside `execute` — returning funds to the settlement contract
+//! and enforcing the signed amounts — is contract behavior, owned by contracts
+//! ADR-0003. BYOS encodes the call and nothing else.
 
 use {
     crate::contracts::{ERC20, Interaction, Proposal, Trampoline},
@@ -45,8 +46,8 @@ pub fn encode_trampoline_interactions(
         callData: transfer_calldata.into(),
     };
 
-    // 2. Trampoline.execute(proposal, interactions, sellToken, buyToken, signature)
-    //    — sellToken added in contracts #27 for the both-token sweep.
+    // 2. Trampoline.execute. Both tokens are BYOS-supplied call parameters taken
+    //    from the order, not signed proposal fields (contracts ADR-0003).
     let execute_calldata = Trampoline::executeCall {
         _proposal: proposal.clone(),
         _interactions: interactions.to_vec(),
@@ -176,6 +177,9 @@ mod tests {
         assert_eq!(decoded._interactions[0].target, interactions[0].target);
         assert_eq!(decoded._interactions[0].value, interactions[0].value);
         assert_eq!(decoded._interactions[0].callData, interactions[0].callData);
+        // The sell token BYOS pushed to the instance is the one execute sweeps
+        // back, so the two interactions must name the same address.
+        assert_eq!(decoded._sellToken, sell_token);
         assert_eq!(decoded._buyToken, buy_token);
         assert_eq!(decoded._signature, signature);
     }

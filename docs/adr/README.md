@@ -23,9 +23,10 @@ This repo owns the service-scoped ADRs for BYOS. ADRs 0001–0003 were designed 
 | [0011](0011-owner-scoped-reads.md) | Signature-gated, owner-scoped proposal reads | accepted |
 | [0012](0012-simulation.md) | Proposal simulation via `eth_estimateGas` | accepted |
 | [0013](0013-proposal-lifecycle-and-retention.md) | Proposal lifecycle & retention | accepted |
+| [0014](0014-contract-artifact-provenance.md) | Contract artifact provenance (byos-contracts submodule) | accepted |
 
 ## Known open questions
 
 - **ADR-0002 is still proposed.** Cross-sub-solver batching is out of scope for now, and the fat Trampoline is confirmed (the contract/service split is owned by the contracts repo). The ingestion-time profitability gate is settled by [ADR-0013](0013-proposal-lifecycle-and-retention.md) (reject at first simulation, `Unprofitable`). The "driver callbacks for outcome observation" question is resolved by [ADR-0010](0010-settlement-outcome-source.md).
-- **Anvil-state regeneration procedure** — the e2e chain fixture bakes the BYOS contracts into offline-mode's `anvil-state.json` ([ADR-0009](0009-testing-strategy.md)); the exact regeneration workflow (and whether the deploy hook lands upstream in offline-mode) is settled when the e2e crate gains its first test.
+- **Anvil-state regeneration procedure** — where the contracts come from is settled by [ADR-0014](0014-contract-artifact-provenance.md) (the pinned submodule). Still open: whether the deploy hook lands upstream in offline-mode, decided when the e2e crate gains its first settling test.
 - **Reference-price source for scoring** — [ADR-0002](0002-solver-engine.md) assumes cached native-token reference prices for surplus/fee conversion; where they come from (auction payload, external feed) is unspecified.
