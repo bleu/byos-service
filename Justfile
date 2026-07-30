@@ -10,6 +10,22 @@ fmt-check:
 clippy:
     cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
 
+# Validate and lint crates/byos/openapi.yml, mirroring the `openapi` job in
+# cowprotocol/services: swagger-cli for structural validity, spectral for
+# style, ruleset in .spectral.yaml. No code, test or handler reads that spec,
+# so this is the only thing keeping it honest — ADR-0005's "linted in CI
+# later, as services does".
+#
+# Needs node; nothing else in this file does. Warnings do not fail the run —
+# spectral only exits non-zero on `error`, and services keeps the same posture
+# (its own orderbook spec carries 30 warnings today).
+#
+# swagger-cli is abandoned upstream and prints a deprecation notice; it is what
+# services runs, and @redocly/cli is the successor whenever we want to move.
+lint-openapi:
+    npx --yes @apidevtools/swagger-cli@4 validate crates/byos/openapi.yml
+    npx --yes @stoplight/spectral-cli lint crates/byos/openapi.yml
+
 # Unit tests. Drop --no-tests=pass once the first test lands.
 test-unit:
     cargo nextest run --no-tests=pass
