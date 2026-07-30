@@ -106,7 +106,7 @@ pub enum RejectionReason {
     Unknown,
 }
 
-/// Body of `GET /proposals/{order_uid}` and `GET /proposals/by-solver`:
+/// Body of `GET /proposals/{order_uid}` and `GET /proposals/by-sub-solver`:
 /// per-proposal metadata for the caller's own proposals.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

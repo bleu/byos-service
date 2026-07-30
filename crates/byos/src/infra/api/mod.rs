@@ -91,12 +91,8 @@ fn public_router(state: AppState) -> Router {
         .route("/proposal/{id}", get(routes::get_proposal))
         .route("/proposal/{id}", delete(routes::cancel_proposal))
         .route("/proposals/{order_uid}", get(routes::list_proposals))
-        // The path says `by-solver` where the glossary says `sub_solver`. It is
-        // the one place the drift is on the wire, so renaming it breaks every
-        // sub-solver client and `openapi.yml` with them — left as a deliberate
-        // exception rather than folded into an internal rename.
         .route(
-            "/proposals/by-solver",
+            "/proposals/by-sub-solver",
             get(routes::list_proposals_by_sub_solver),
         )
         .with_state(state)
@@ -733,7 +729,7 @@ mod tests {
 
         let header = read_auth_header(&caller, &state).await;
 
-        let (status, json) = get(state, "/proposals/by-solver", Some(&header)).await;
+        let (status, json) = get(state, "/proposals/by-sub-solver", Some(&header)).await;
 
         assert_eq!(status, StatusCode::OK);
         let proposals = json["proposals"].as_array().unwrap();
@@ -869,7 +865,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/proposals/by-solver")
+                    .uri("/proposals/by-sub-solver")
                     .body(Body::empty())
                     .unwrap(),
             )

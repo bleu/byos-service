@@ -1303,7 +1303,7 @@ mod tests {
     async fn an_unparseable_row_is_reported_as_permanent_not_transient() {
         let (store, _audit, pool) = test_store_with_pool().await;
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         corrupt_sub_solver(&pool, id).await;
@@ -1340,11 +1340,11 @@ mod tests {
     async fn an_unparseable_row_does_not_take_the_whole_snapshot_with_it() {
         let (store, _audit, pool) = test_store_with_pool().await;
         let broken = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let healthy = store
-            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_B))
+            .insert(make_proposal(OrderUid([0xbb; 56]), SUB_SOLVER_B))
             .await
             .expect("insert");
         corrupt_sub_solver(&pool, broken).await;
@@ -1377,7 +1377,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Active,
             ))
             .await
@@ -1432,7 +1432,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Active,
             ))
             .await
@@ -1473,7 +1473,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Cancelled,
             ))
             .await
@@ -1912,22 +1912,22 @@ mod tests {
         let absent = OrderUid([0xcc; 56]);
 
         store
-            .insert(make_proposal(wanted.clone(), SOLVER_A))
+            .insert(make_proposal(wanted.clone(), SUB_SOLVER_A))
             .await
             .expect("insert");
         store
-            .insert(make_proposal(wanted.clone(), SOLVER_B))
+            .insert(make_proposal(wanted.clone(), SUB_SOLVER_B))
             .await
             .expect("insert");
         store
-            .insert(make_proposal(other.clone(), SOLVER_A))
+            .insert(make_proposal(other.clone(), SUB_SOLVER_A))
             .await
             .expect("insert");
         // Not Active: must not be offered to the driver.
         store
             .insert(test_proposal(
                 wanted.clone(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await

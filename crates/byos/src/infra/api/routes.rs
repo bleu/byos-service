@@ -203,7 +203,7 @@ pub async fn list_proposals(
 }
 
 // ---------------------------------------------------------------------------
-// GET /proposals/by-solver
+// GET /proposals/by-sub-solver
 // ---------------------------------------------------------------------------
 
 /// Lists the caller's own active proposals. The caller's identity comes

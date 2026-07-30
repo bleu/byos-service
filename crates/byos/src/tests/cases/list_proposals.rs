@@ -1,5 +1,6 @@
-//! `GET /proposals/{order_uid}` and `GET /proposals/by-solver`: owner-scoped
-//! listing (ADR-0011) and the metadata-only response shape (ADR-0001).
+//! `GET /proposals/{order_uid}` and `GET /proposals/by-sub-solver`:
+//! owner-scoped listing (ADR-0011) and the metadata-only response shape
+//! (ADR-0001).
 
 use {
     crate::tests::setup::{self, ProposalFixture, TestApp, TestDb},
@@ -69,7 +70,7 @@ async fn by_sub_solver_listing_uses_the_signature_identity() {
     let b = PrivateKeySigner::random();
 
     // Two proposals from `a` (distinct orders), one from `b`. Submitted
-    // proposals count here — the by-solver listing shows submitted + active.
+    // proposals count here — the by-sub-solver listing shows submitted + active.
     let first = ProposalFixture::default();
     let second = ProposalFixture {
         order_uid: [0xcd; 56],
@@ -84,7 +85,9 @@ async fn by_sub_solver_listing_uses_the_signature_identity() {
     // No address parameter: the caller's identity comes entirely from the
     // ReadAuth signature (ADR-0011).
     let auth_a = setup::read_auth_signature(&a).await;
-    let (status, listed) = app.get_json("/proposals/by-solver", Some(&auth_a)).await;
+    let (status, listed) = app
+        .get_json("/proposals/by-sub-solver", Some(&auth_a))
+        .await;
     assert_eq!(status, StatusCode::OK);
 
     let proposals = listed["proposals"].as_array().unwrap();
