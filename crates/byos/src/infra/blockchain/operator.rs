@@ -254,7 +254,7 @@ mod tests {
         let (server, sent) = rpc_server_with(false).await;
         let operator = operator_at(server.uri());
 
-        let err = operator
+        operator
             .debit(
                 SUB_SOLVER,
                 U256::from(16_000_000_000_000_000u64),
@@ -263,10 +263,9 @@ mod tests {
             .await
             .expect_err("a reverted debit must not resolve as success");
 
-        assert!(
-            matches!(err, DebitError::Transient(_)),
-            "a revert retries next tick like any other failure, got {err:?}"
-        );
+        // No assertion on the variant: `DebitError` has exactly one, so
+        // `matches!` could not fail. `expect_err` above *is* the behaviour —
+        // a mined-but-reverted receipt must not resolve as a landed charge.
         assert!(
             sent.lock().unwrap().is_some(),
             "the tx was submitted — the failure is the receipt, not the send"
