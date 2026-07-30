@@ -1,0 +1,20 @@
+# Reference sub-solver config for the offline-mode demo stack (COW-1236).
+#
+# Same shape as crates/subsolver/config/example.toml. The Uniswap V2 addresses
+# are unchanged from it because offline-mode places its contracts at their real
+# mainnet addresses, and chain-id is 1 for the same reason — the fixture's anvil
+# runs `--chain-id 1`, so 31337 would be wrong here.
+
+chain-id = 1
+
+# The TrampolineFactory `just stack-up` deploys. Kept in step with the
+# Justfile's `stack-trampoline-factory`: stack-up fails loudly if the deployment
+# lands anywhere else, which happens when `just sync-abis` regenerates the
+# vendored Escrow artifact.
+trampoline-factory = "0xDA50c08F941FEFb955e0a0B62160da9A809c0faC"
+
+uniswap-router = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+uniswap-factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+pair-init-code-hash = "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"
+
+proposal-ttl = "60s"
