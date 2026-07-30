@@ -385,7 +385,11 @@ async fn run_with(
         args.dropped_retention,
     );
 
-    api::serve(
+    // Bound, not `?`: teardown has to run even when serving fails, or a bind
+    // error leaves three loops polling the database with nobody to stop them
+    // and the queued audit events unflushed. In-process callers (`run`,
+    // `run_until`) are where that leak is observable.
+    let served = api::serve(
         args.public_addr,
         args.internal_addr,
         state,
@@ -393,8 +397,7 @@ async fn run_with(
         bind_tx,
         shutdown_rx,
     )
-    .await
-    .context("API server exited with error")?;
+    .await;
 
     // The validation, retention, and penalty loops hold the store — and
     // with it an audit sender — so stop them first, or the writer's channel
@@ -407,7 +410,21 @@ async fn run_with(
     if let Some(penalty_loop) = penalty_loop {
         penalty_loop.abort();
     }
-    writer.await.context("audit writer task panicked")
+    // Log the serve error before draining, not after. The writer retries every
+    // insert with backoff and never gives up, so with Postgres unreachable and
+    // events queued the drain does not return — and the startup diagnostic an
+    // operator actually needs would be held hostage behind it. (That hang
+    // already existed on the graceful-shutdown path; this keeps it from
+    // swallowing the reason we are shutting down.)
+    if let Err(e) = &served {
+        tracing::error!(%e, "API server exited with error; draining audit trail");
+    }
+    // Evidence first: whatever went wrong with the listeners, the audit trail
+    // up to that point is worth keeping. The serve error is the actionable
+    // diagnostic, so it wins the return value; a writer panic has already gone
+    // through tracing by the time we get here.
+    let drained = writer.await.context("audit writer task panicked");
+    served.context("API server exited with error").and(drained)
 }
 
 // try_init: a second in-process instance (tests restart the service) must
