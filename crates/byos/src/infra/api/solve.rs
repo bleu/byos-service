@@ -5,6 +5,7 @@
 use {
     super::AppState,
     crate::domain::{
+        fee::{Cut, CutInput, gas_cut},
         proposal::{OrderUid, Proposal},
         scoring::{ScoreInput, effective_gas, score_proposal, surplus_token},
     },
@@ -68,11 +69,17 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
 
-        let native_price = auction
-            .tokens
-            .get(&surplus_token(is_sell, order.sell_token, order.buy_token))
-            .and_then(|t| t.reference_price)
-            .unwrap_or(U256::ZERO);
+        let price_of = |token| {
+            auction
+                .tokens
+                .get(&token)
+                .and_then(|t| t.reference_price)
+                .unwrap_or(U256::ZERO)
+        };
+        let native_price = price_of(surplus_token(is_sell, order.sell_token, order.buy_token));
+        // The cut is denominated in the sell token, which for a sell order is
+        // not the token the surplus is in — a second lookup, not the same one.
+        let sell_token_price = price_of(order.sell_token);
 
         // Score and select the best proposal for this order. Only proposals
         // with simulation gas are eligible — proposals that haven't been
@@ -93,17 +100,32 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                     gas_cost,
                     native_price,
                 })?;
-                (score > U256::ZERO).then_some((p, gas_used, score))
+                // Sizing the cut can rule a proposal out where the score cannot:
+                // the score converts surplus at the auction's price for the
+                // surplus token, while the user's limit is enforced on the
+                // route's own amounts. A stale auction price makes the two
+                // disagree. Drop it here so a runner-up can still take the
+                // order.
+                let cut = gas_cut(&CutInput {
+                    order_sell: order.sell_amount,
+                    order_buy: order.buy_amount,
+                    proposal_sell: p.sell_amount,
+                    proposal_buy: p.buy_amount,
+                    is_sell_order: is_sell,
+                    gas_cost,
+                    sell_token_price,
+                })?;
+                (score > U256::ZERO).then_some((p, gas_used, cut, score))
             })
-            .max_by_key(|(_, _, score)| *score);
+            .max_by_key(|(_, _, _, score)| *score);
 
-        let Some((proposal, gas_used, _score)) = best else {
+        let Some((proposal, gas_used, cut, _score)) = best else {
             continue;
         };
 
         // Build the solution using solvers-dto types.
         let id = solutions.len() as u64 + 1;
-        let Some(sol) = build_solution(id, order, proposal, gas_used) else {
+        let Some(sol) = build_solution(id, order, proposal, gas_used, cut) else {
             continue;
         };
 
@@ -136,6 +158,7 @@ fn build_solution(
     order: &auction::Order,
     proposal: &Proposal,
     gas_used: u64,
+    cut: Cut,
 ) -> Option<solution::Solution> {
     let Some(trampoline) = proposal.trampoline else {
         tracing::error!(
@@ -176,22 +199,22 @@ fn build_solution(
         })
         .collect();
 
-    // Clearing prices: cross-multiplied from the proposal amounts.
+    // Clearing prices: cross-multiplied from the proposal amounts, and left
+    // alone by the cut. The cut is a declared fee, not a price shade, so the
+    // price vector stays the one the sub-solver signed a route against and
+    // `encode_settle` keeps producing the transaction we simulated.
     let mut prices = HashMap::new();
     prices.insert(order.sell_token, proposal.buy_amount);
     prices.insert(order.buy_token, proposal.sell_amount);
 
-    // Trade fulfillment.
-    let executed_amount = if matches!(order.kind, auction::Kind::Sell) {
-        proposal.sell_amount
-    } else {
-        proposal.buy_amount
-    };
-
+    // Trade fulfillment. Every live order is limit class — since the 2023 fee
+    // model every order signs `feeAmount = 0`, and `order_validation.rs`
+    // classifies those as `Limit` — so the driver requires a solver-determined
+    // fee here and rejects `Fee::Static`. See [`crate::domain::fee`].
     let trade = solution::Trade::Fulfillment(solution::Fulfillment {
         order: solution::OrderUid(order.uid),
-        executed_amount,
-        fee: None,
+        executed_amount: cut.executed_amount,
+        fee: Some(cut.fee),
     });
 
     Some(solution::Solution {

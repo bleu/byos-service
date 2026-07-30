@@ -1,4 +1,4 @@
-//! Proposal scoring: `score = surplus + fee - gas` (ADR-0002).
+//! Proposal scoring: `score = surplus - gas` in native-token units (ADR-0002).
 //!
 //! The `/solve` hot path uses this to select the single highest-scoring
 //! proposal per order UID. All computation is in-memory — no RPC, no DB.
@@ -53,7 +53,14 @@ pub struct ScoreInput {
 ///  - Sell order: `proposal_buy - order_buy` (more buy tokens for the user)
 ///  - Buy order: `order_sell - proposal_sell` (fewer sell tokens from the user)
 ///
-/// For M1, `fee` is zero and `gas_cost` is a fixed estimate.
+/// There is deliberately no fee term. CoW's own score is surplus plus protocol
+/// fees and nothing else (CIP-38) — gas never appears as a subtraction there.
+/// The protocol fee cancels out of any ranking, because it is carved out of
+/// surplus and added straight back. Our gas cut ([`crate::domain::fee`]) does
+/// reach the score, but as a subtraction from surplus: it lowers what the user
+/// receives. So once the cut equals the gas cost, `surplus - gas` is exactly
+/// the score the autopilot will compute for our bid, and reading per-order fee
+/// policies would buy nothing.
 pub fn score_proposal(input: &ScoreInput) -> Option<U256> {
     let surplus = if input.is_sell_order {
         // Sell order: user offers sell_amount, wants at least buy_amount.
@@ -70,7 +77,6 @@ pub fn score_proposal(input: &ScoreInput) -> Option<U256> {
         .checked_mul(input.native_price)?
         .checked_div(Unit::ETHER.wei())?;
 
-    // score = surplus_eth - gas_cost (fee is 0 in M1)
     surplus_eth.checked_sub(input.gas_cost)
 }
 
@@ -141,6 +147,23 @@ mod tests {
             is_sell_order: true,
             gas_cost: U256::from(20u64), // gas = 20 > surplus_eth (10)
             native_price: Unit::ETHER.wei(),
+        });
+        assert_eq!(score, None);
+    }
+
+    /// A surplus large enough to overflow the native-price conversion scores
+    /// nothing rather than wrapping. The release profile has no overflow
+    /// checks, so a wrapped product would rank an absurd proposal first.
+    #[test]
+    fn surplus_that_overflows_the_conversion_returns_none() {
+        let score = score_proposal(&ScoreInput {
+            order_sell: U256::ZERO,
+            order_buy: U256::ZERO,
+            proposal_sell: U256::ZERO,
+            proposal_buy: U256::MAX,
+            is_sell_order: true,
+            gas_cost: U256::ZERO,
+            native_price: U256::from(2),
         });
         assert_eq!(score, None);
     }

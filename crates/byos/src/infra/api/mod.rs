@@ -766,8 +766,20 @@ mod tests {
     const BUY_TOKEN: Address = address!("2222222222222222222222222222222222222222");
     const ORDER_UID: [u8; 56] = [0xaa; 56];
 
-    /// Builds a minimal valid auction JSON with one order.
+    /// Builds a minimal valid auction JSON with one order and a zero gas
+    /// price, so nothing but surplus moves the score.
     fn auction_json(kind: &str, sell_amount: &str, buy_amount: &str) -> serde_json::Value {
+        auction_json_with_gas_price(kind, sell_amount, buy_amount, "0")
+    }
+
+    /// Same auction with a gas price, for the tests where gas has to bite: the
+    /// gas cut on every fulfillment and the score's gas term.
+    fn auction_json_with_gas_price(
+        kind: &str,
+        sell_amount: &str,
+        buy_amount: &str,
+        effective_gas_price: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "tokens": {
                 SELL_TOKEN.to_string(): {
@@ -803,7 +815,7 @@ mod tests {
                 "signature": "0x"
             }],
             "liquidity": [],
-            "effectiveGasPrice": "0",
+            "effectiveGasPrice": effective_gas_price,
             "deadline": "2099-01-01T00:00:00Z",
             "surplusCapturingJitOrderOwners": []
         })
@@ -1064,6 +1076,204 @@ mod tests {
 
         let trade = &result["solutions"][0]["trades"][0];
         assert_eq!(trade["executedAmount"], "900");
+    }
+
+    /// The fixture prices both tokens at parity (10^18 wei per 10^18 atoms) and
+    /// the auction charges 1 wei per gas, so the cut in sell-token atoms is
+    /// just the effective gas: 200_000 simulated + the 30_000 buffer.
+    const CUT_AT_PARITY: u64 = 230_000;
+
+    /// COW-1189: every fulfillment carries a fee, and for a sell order the
+    /// driver checks `executed + fee == order.sellAmount`
+    /// (`driver/src/domain/competition/solution/trade.rs:157`). A `fee: None`
+    /// here is rejected for every live order, and one bad trade discards the
+    /// whole `/solve` response.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_declares_the_gas_cut_as_the_fee_on_a_sell_order() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        let trade = &result["solutions"][0]["trades"][0];
+        assert_eq!(trade["fee"], CUT_AT_PARITY.to_string());
+        assert_eq!(
+            trade["executedAmount"],
+            (1_000_000_000 - CUT_AT_PARITY).to_string()
+        );
+
+        // The invariant in the driver's own words, read back off the wire.
+        let fee: u64 = trade["fee"].as_str().unwrap().parse().unwrap();
+        let executed: u64 = trade["executedAmount"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            executed + fee,
+            1_000_000_000,
+            "executed + fee must equal the order's sell amount",
+        );
+    }
+
+    /// A buy order's fee rides alongside an unchanged execution: the driver
+    /// leaves it out of the `executed + fee == target` check for buy orders, so
+    /// the user's protection is on the paying side instead — the route's input
+    /// plus the cut against the sell amount they signed.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_declares_the_gas_cut_as_the_fee_on_a_buy_order() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 950_000_000, 900_000_000).await;
+
+        let auction = auction_json_with_gas_price("buy", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        let trade = &result["solutions"][0]["trades"][0];
+        assert_eq!(trade["executedAmount"], "900000000");
+        assert_eq!(trade["fee"], CUT_AT_PARITY.to_string());
+    }
+
+    /// The cut is a declared fee, not a price shade. If it ever moved the price
+    /// vector, `encode_settle` would stop producing the transaction ADR-0012
+    /// simulated.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_clearing_prices_are_unchanged_by_the_cut() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        let prices = &result["solutions"][0]["prices"];
+        assert_eq!(prices[SELL_TOKEN.to_string()], "1000000000");
+        assert_eq!(prices[BUY_TOKEN.to_string()], "1000000000");
+    }
+
+    /// COW-1189: taking the cut must not drop the user under the buy amount
+    /// they signed, and the score alone will not catch it. Here the auction
+    /// prices both tokens at parity while the route trades them 1:2, so the
+    /// score sees 300_000 wei of surplus against a 230_000 wei gas bill and
+    /// says yes — but the cut costs the user 460_000 buy-token atoms, which
+    /// breaks their limit and would revert the settlement.
+    ///
+    /// The fat-surplus half proves the fixture can bid at all, so the thin half
+    /// is failing on the limit and not on some unrelated filter.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_skips_a_proposal_whose_cut_breaches_the_signed_limit() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 2_000_000_000).await;
+
+        let thin = auction_json_with_gas_price("sell", "1000000000", "1999700000", "1");
+        let result = post_solve(&app, &thin).await;
+        assert!(
+            result["solutions"].as_array().unwrap().is_empty(),
+            "a cut that breaches the signed buy amount must not be bid",
+        );
+
+        let fat = auction_json_with_gas_price("sell", "1000000000", "1990000000", "1");
+        let result = post_solve(&app, &fat).await;
+        assert_eq!(
+            result["solutions"].as_array().unwrap().len(),
+            1,
+            "the same proposal against a limit with room for the cut must bid",
+        );
+    }
+
+    /// The driver uses this to budget the settlement, so it is the simulated
+    /// gas plus the scoring buffer — the same number the cut is priced
+    /// from.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_reports_the_effective_gas_on_the_solution() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        assert_eq!(result["solutions"][0]["gas"], CUT_AT_PARITY);
+    }
+
+    /// An `Active` proposal with no simulated gas cannot be priced, so it is
+    /// not biddable. Reachable in practice: `AcceptAll` activates without
+    /// simulating.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_skips_a_proposal_that_has_not_been_simulated() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        let mut proposal =
+            test_proposal(OrderUid(ORDER_UID), Address::ZERO, ProposalStatus::Active);
+        proposal.sell_amount = U256::from(1_000_000_000u64);
+        proposal.buy_amount = U256::from(1_000_000_000u64);
+        proposal.gas_used = None;
+        proposal.trampoline = Some(Address::ZERO);
+        state.store().insert(proposal).await.expect("insert");
+
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
+    }
+
+    /// Without a price for the surplus token there is no score to compare, and
+    /// the auction that omitted it could not rank our bid either.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_does_not_bid_when_the_surplus_token_is_unpriced() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        // Sell order: the surplus is in the buy token.
+        let mut auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        auction["tokens"][BUY_TOKEN.to_string()]["referencePrice"] = serde_json::Value::Null;
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
+    }
+
+    /// The cut is denominated in the sell token, so an unpriced sell token
+    /// cannot be cut — and bidding without a cut means paying the gas out of
+    /// our own pocket.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_does_not_bid_when_the_sell_token_is_unpriced() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let mut auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        auction["tokens"][SELL_TOKEN.to_string()]["referencePrice"] = serde_json::Value::Null;
+        let result = post_solve(&app, &auction).await;
+
+        assert!(
+            result["solutions"].as_array().unwrap().is_empty(),
+            "the surplus token is still priced, so only the missing cut can stop this bid",
+        );
+    }
+
+    /// The `score > 0` boundary lives in two files — here and the ingestion
+    /// gate's `score <= min_score` (`blockchain/validator.rs`). Gas exactly
+    /// equal to the surplus scores zero, and zero does not bid.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_does_not_bid_when_gas_exactly_equals_the_surplus() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        // Surplus at parity pricing is 230_000 wei, the same as the gas bill.
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 900_230_000).await;
+
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
     }
 
     #[ignore]

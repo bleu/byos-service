@@ -3,6 +3,7 @@
 //! no wall-clock reads — callers pass the time in.
 
 pub mod audit;
+pub mod fee;
 pub mod order;
 pub mod penalty;
 pub mod proposal;
