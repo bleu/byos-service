@@ -194,12 +194,13 @@ pub async fn serve(
     // One shutdown signal fanned out to both servers: when the spawned task
     // drops the watch sender, every receiver's `changed()` resolves.
     let (watch_tx, watch_rx) = tokio::sync::watch::channel(());
-    // Owned, because this task parks on ctrl_c for the process lifetime. When
-    // serving ends for any other reason (a bind error, one listener failing
-    // out of the try_join), an un-aborted task keeps a registered signal
-    // handler alive — and in tests that call `run()` repeatedly in one
-    // process, one accumulates per instance and can fire a later instance's
-    // shutdown.
+    // Owned, because this task parks on ctrl_c for the process lifetime. The
+    // path that reaches the abort below with it still parked is `try_join!`
+    // returning early because one listener errored: without the abort, the
+    // task outlives `serve` holding a signal registration and the shutdown
+    // oneshot. (A bind failure cannot get here — both `?`s above return before
+    // the spawn.) Each task owns its own watch sender, wired only to its own
+    // servers, so a leaked one cannot reach a later instance.
     let signal = tokio::spawn(async move {
         shutdown_signal(shutdown_rx).await;
         drop(watch_tx);

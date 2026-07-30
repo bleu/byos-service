@@ -410,10 +410,21 @@ async fn run_with(
     if let Some(penalty_loop) = penalty_loop {
         penalty_loop.abort();
     }
-    // Evidence is flushed before the serve error surfaces: whatever went wrong
-    // with the listeners, the audit trail up to that point is worth keeping.
-    writer.await.context("audit writer task panicked")?;
-    served.context("API server exited with error")
+    // Log the serve error before draining, not after. The writer retries every
+    // insert with backoff and never gives up, so with Postgres unreachable and
+    // events queued the drain does not return — and the startup diagnostic an
+    // operator actually needs would be held hostage behind it. (That hang
+    // already existed on the graceful-shutdown path; this keeps it from
+    // swallowing the reason we are shutting down.)
+    if let Err(e) = &served {
+        tracing::error!(%e, "API server exited with error; draining audit trail");
+    }
+    // Evidence first: whatever went wrong with the listeners, the audit trail
+    // up to that point is worth keeping. The serve error is the actionable
+    // diagnostic, so it wins the return value; a writer panic has already gone
+    // through tracing by the time we get here.
+    let drained = writer.await.context("audit writer task panicked");
+    served.context("API server exited with error").and(drained)
 }
 
 // try_init: a second in-process instance (tests restart the service) must
