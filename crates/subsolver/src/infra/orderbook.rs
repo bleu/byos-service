@@ -208,7 +208,12 @@ mod tests {
 
     #[tokio::test]
     async fn solvable_orders_keeps_in_envelope_fill_or_kill_orders() {
-        let mut partially_fillable = auction_order(0x22);
+        // Buy orders are inside the envelope as much as sell orders are;
+        // kept here so the kind mapping stays covered.
+        let mut buy = auction_order(0x22);
+        buy["kind"] = json!("buy");
+
+        let mut partially_fillable = auction_order(0x66);
         partially_fillable["partiallyFillable"] = json!(true);
         // A pre-hook, as the orderbook expands it for the auction.
         let mut pre_hooked = auction_order(0x33);
@@ -230,6 +235,7 @@ mod tests {
 
         let orders = solvable(vec![
             auction_order(0x11),
+            buy,
             partially_fillable,
             pre_hooked,
             post_hooked,
@@ -239,13 +245,15 @@ mod tests {
 
         assert_eq!(
             orders.len(),
-            1,
+            2,
             "an ordinary quote-derived appData hash is inside the envelope"
         );
         assert_eq!(orders[0].uid, Bytes::from(vec![0x11; 56]));
         assert_eq!(orders[0].kind, OrderKind::Sell);
         assert_eq!(orders[0].sell_amount, U256::from(1000));
         assert_eq!(orders[0].buy_amount, U256::from(900));
+        assert_eq!(orders[1].uid, Bytes::from(vec![0x22; 56]));
+        assert_eq!(orders[1].kind, OrderKind::Buy);
     }
 
     #[tokio::test]
