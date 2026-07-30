@@ -43,7 +43,7 @@ just lint-openapi   # validate + lint crates/byos/openapi.yml (needs node)
 just fmt            # cargo +nightly fmt (never stable fmt)
 ```
 
-The public proposal API is specified in [`crates/byos/openapi.yml`](crates/byos/openapi.yml). Nothing serves it — render it locally with `npx @redocly/cli preview-docs crates/byos/openapi.yml`. That is the same split [`cowprotocol/services`](https://github.com/cowprotocol/services) uses: the spec sits next to the crate, CI validates and lints it, and the rendered docs live outside the repo. The internal listener's `/solve` and `/notify` are deliberately absent from it — they implement CoW's own solver-engine spec.
+The public proposal API is specified in [`crates/byos/openapi.yml`](crates/byos/openapi.yml). Nothing serves it — render it locally with `npx @redocly/cli build-docs crates/byos/openapi.yml`, which writes a self-contained `redoc-static.html`. That is the same split [`cowprotocol/services`](https://github.com/cowprotocol/services) uses: the spec sits next to the crate, CI validates and lints it, and the rendered docs live outside the repo. The internal listener's `/solve` and `/notify` are deliberately absent from it — they implement CoW's own solver-engine spec.
 
 ### Running byos by hand
 
