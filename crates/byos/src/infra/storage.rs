@@ -20,6 +20,7 @@ use {
     byos_common::contracts::Interaction,
     sqlx::postgres::PgPool,
     std::{
+        collections::HashMap,
         sync::Arc,
         time::{Duration, SystemTime},
     },
@@ -641,6 +642,9 @@ impl ProposalStore {
     }
 
     /// List active proposals for a given order UID — the `/solve` view.
+    /// No production callers since `/solve` moved to
+    /// [`Self::active_by_order_uids`]; kept as that function's differential
+    /// oracle in tests.
     pub async fn list_by_order_uid(
         &self,
         order_uid: &OrderUid,
@@ -654,6 +658,54 @@ impl ProposalStore {
         .fetch_all(&self.pool)
         .await?;
         Ok(decode_rows(rows, "list_by_order_uid"))
+    }
+
+    /// Active proposals for a whole auction's worth of order uids, grouped by
+    /// uid — the `/solve` hot-path read (ADR-0002).
+    ///
+    /// One query per auction rather than one per order. An auction carries
+    /// hundreds to a thousand orders and BYOS holds proposals for a handful, so
+    /// per-order queries spent most of the 100ms p99 budget on round trips that
+    /// returned nothing, and the cost grew with auction size instead of with
+    /// how many proposals we actually have. Uids absent from the result simply
+    /// have no entry.
+    pub async fn active_by_order_uids(
+        &self,
+        order_uids: &[OrderUid],
+    ) -> Result<HashMap<OrderUid, Vec<Proposal>>, StoreError> {
+        if order_uids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let uids: Vec<String> = order_uids.iter().map(OrderUid::to_string).collect();
+        let rows: Vec<ProposalRow> = sqlx::query_as(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM proposals WHERE order_uid = ANY($1) AND status = $2 \
+             ORDER BY id"
+        ))
+        .bind(&uids)
+        .bind(ProposalStatus::Active.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut grouped: HashMap<OrderUid, Vec<Proposal>> = HashMap::new();
+        for row in rows {
+            // Skip an undecodable row rather than failing the batch. With one
+            // query per order a bad row cost only the order that shared its
+            // uid; propagating here would cost every bid in the auction, which
+            // is a much worse trade for a row we wrote ourselves and can only
+            // have corrupted by a bad migration.
+            let proposal = match Proposal::try_from(row) {
+                Ok(proposal) => proposal,
+                Err(e) => {
+                    tracing::error!(%e, "solve: skipping unreadable proposal row");
+                    continue;
+                }
+            };
+            grouped
+                .entry(proposal.order_uid.clone())
+                .or_default()
+                .push(proposal);
+        }
+        Ok(grouped)
     }
 
     /// List one owner's active proposals for a given order UID — the
@@ -1840,6 +1892,80 @@ mod tests {
         let results = store.list_by_order_uid(&uid).await.expect("list");
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|p| p.status == ProposalStatus::Active));
+    }
+
+    /// The `/solve` batch read groups by uid and applies the same Active-only
+    /// filter as the per-order query it replaces.
+    #[ignore]
+    #[tokio::test]
+    async fn active_by_order_uids_groups_and_filters_like_the_per_order_read() {
+        let (store, _audit) = test_store().await;
+        let wanted = test_order_uid();
+        let other = OrderUid([0xbb; 56]);
+        let absent = OrderUid([0xcc; 56]);
+
+        store
+            .insert(make_proposal(wanted.clone(), SOLVER_A))
+            .await
+            .expect("insert");
+        store
+            .insert(make_proposal(wanted.clone(), SOLVER_B))
+            .await
+            .expect("insert");
+        store
+            .insert(make_proposal(other.clone(), SOLVER_A))
+            .await
+            .expect("insert");
+        // Not Active: must not be offered to the driver.
+        store
+            .insert(test_proposal(
+                wanted.clone(),
+                SOLVER_A,
+                ProposalStatus::Submitted,
+            ))
+            .await
+            .expect("insert");
+
+        let grouped = store
+            .active_by_order_uids(&[wanted.clone(), other.clone(), absent.clone()])
+            .await
+            .expect("batch read");
+
+        assert_eq!(grouped[&wanted].len(), 2, "both active bids on that order");
+        assert_eq!(grouped[&other].len(), 1);
+        assert!(
+            !grouped.contains_key(&absent),
+            "an order with no proposals gets no entry, not an empty one"
+        );
+        assert!(
+            grouped
+                .values()
+                .flatten()
+                .all(|p| p.status == ProposalStatus::Active),
+            "only Active proposals are biddable"
+        );
+
+        // Every uid the old per-order query would have returned, and nothing
+        // more.
+        for uid in [&wanted, &other] {
+            let per_order = store.list_by_order_uid(uid).await.expect("per-order");
+            let ids: Vec<_> = grouped[uid].iter().map(|p| p.id).collect();
+            let expected: Vec<_> = per_order.iter().map(|p| p.id).collect();
+            assert_eq!(ids, expected, "batch read must match the per-order read");
+        }
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn empty_uid_list_does_not_query() {
+        let (store, _audit) = test_store().await;
+        assert!(
+            store
+                .active_by_order_uids(&[])
+                .await
+                .expect("no uids is not an error")
+                .is_empty()
+        );
     }
 
     #[ignore]
