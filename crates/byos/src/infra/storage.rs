@@ -44,19 +44,43 @@ pub enum StoreError {
     /// packing both into `Database` meant callers retried the unparseable one
     /// forever with no way to tell them apart except by matching on the
     /// message (ADR-0007: split by what the caller should do).
-    #[error("corrupt proposals.{column}: {detail}")]
+    #[error("corrupt {table}.{column}: {detail}")]
     CorruptRow {
+        /// Named explicitly: the message used to hard-code `proposals`, which
+        /// sent an operator to the wrong table for the `penalties` reads.
+        table: &'static str,
         column: &'static str,
         detail: String,
     },
 }
 
 impl StoreError {
-    /// Whether retrying the same call could plausibly succeed. `false` means
-    /// the data is the problem, so the caller should surface it and move on
-    /// rather than spend a tick on it every pass.
-    pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Database(_))
+    /// Whether retrying this call could plausibly succeed.
+    ///
+    /// `false` means the data or the schema is the problem, so a caller should
+    /// surface it rather than spend a tick on it every pass. A bad migration
+    /// lands in `Database` rather than `CorruptRow` — a missing column is
+    /// likelier than an unparseable value the service itself wrote — so the
+    /// sqlx variants that can never resolve on their own are classified here
+    /// too.
+    pub fn should_retry(&self) -> bool {
+        match self {
+            // Neither retryable nor a data fault: the caller lost a race, or
+            // asked for something that is not there.
+            Self::NotFound(_) | Self::NotOwner(_, _) | Self::StaleTransition { .. } => false,
+            Self::CorruptRow { .. } => false,
+            Self::Database(e) => !matches!(
+                e,
+                sqlx::Error::Configuration(_)
+                    | sqlx::Error::Decode(_)
+                    | sqlx::Error::Encode(_)
+                    | sqlx::Error::ColumnNotFound(_)
+                    | sqlx::Error::ColumnIndexOutOfBounds { .. }
+                    | sqlx::Error::ColumnDecode { .. }
+                    | sqlx::Error::TypeNotFound { .. }
+                    | sqlx::Error::Migrate(_)
+            ),
+        }
     }
 }
 
@@ -536,7 +560,7 @@ impl ProposalStore {
         .bind(ProposalStatus::Active.to_string())
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Proposal::try_from).collect()
+        Ok(decode_rows(rows, "list_by_order_uid"))
     }
 
     /// List one owner's active proposals for a given order UID — the
@@ -557,7 +581,7 @@ impl ProposalStore {
         .bind(ProposalStatus::Active.to_string())
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Proposal::try_from).collect()
+        Ok(decode_rows(rows, "list_by_order_uid_for_owner"))
     }
 
     /// List live (`Submitted` or `Active`) proposals for a given sub-solver
@@ -578,7 +602,7 @@ impl ProposalStore {
         ]))
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Proposal::try_from).collect()
+        Ok(decode_rows(rows, "list_by_sub_solver"))
     }
 
     /// Every proposal currently in one of the given statuses — the
@@ -593,7 +617,7 @@ impl ProposalStore {
         .bind(status_names(statuses))
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Proposal::try_from).collect()
+        Ok(decode_rows(rows, "snapshot_by_statuses"))
     }
 
     /// Queue the 0.1 × c_l non-settlement charge for a proposal whose won
@@ -631,10 +655,15 @@ impl ProposalStore {
                 Ok(crate::domain::penalty::PendingPenalty {
                     id,
                     proposal_id: ProposalId(
-                        u64::try_from(proposal_id).map_err(|e| corrupt("proposal_id", e))?,
+                        u64::try_from(proposal_id)
+                            .map_err(|e| corrupt_in("penalties", "proposal_id", e))?,
                     ),
-                    sub_solver: sub_solver.parse().map_err(|e| corrupt("sub_solver", e))?,
-                    order_uid: order_uid.parse().map_err(|e| corrupt("order_uid", e))?,
+                    sub_solver: sub_solver
+                        .parse()
+                        .map_err(|e| corrupt_in("penalties", "sub_solver", e))?,
+                    order_uid: order_uid
+                        .parse()
+                        .map_err(|e| corrupt_in("penalties", "order_uid", e))?,
                 })
             })
             .collect()
@@ -716,7 +745,7 @@ impl ProposalStore {
         .bind(ids)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Proposal::try_from).collect()
+        Ok(decode_rows(rows, "solution_proposals"))
     }
 
     /// Look up a single proposal by ID.
@@ -736,6 +765,42 @@ impl ProposalStore {
         .await?;
         row.map(Proposal::try_from).transpose()
     }
+}
+
+/// Decode a batch of rows, dropping the ones that cannot be read.
+///
+/// The rule across the store: a *collection* returns what it can read, a single
+/// lookup ([`ProposalStore::get`]) reports that it could not read the row.
+/// Collecting into `Result` instead — what every one of these call sites used
+/// to do — means one unreadable row fails the whole query, and the blast radius
+/// is severe: `snapshot_by_statuses` is the validation loop's working set, so a
+/// single bad row stopped every verdict, every expiry, and (via the penalty
+/// loop's own snapshot) every Track A debit, on every tick, forever. Skipping
+/// costs one proposal; propagating cost the whole book.
+///
+/// `error!` rather than `warn!` because nothing else will notice: the row keeps
+/// its status, no sweep can move it, and it needs a human.
+fn decode_rows(rows: Vec<ProposalRow>, context: &str) -> Vec<Proposal> {
+    let total = rows.len();
+    let decoded: Vec<Proposal> = rows
+        .into_iter()
+        .filter_map(|row| match Proposal::try_from(row) {
+            Ok(proposal) => Some(proposal),
+            Err(e) => {
+                tracing::error!(%e, context, "unreadable proposal row skipped");
+                None
+            }
+        })
+        .collect();
+    if decoded.len() != total {
+        tracing::error!(
+            skipped = total - decoded.len(),
+            total,
+            context,
+            "proposal rows dropped from this read; manual repair needed"
+        );
+    }
+    decoded
 }
 
 /// A `ProposalId` as the BIGINT the `id` column holds.
@@ -764,8 +829,9 @@ const PROPOSAL_COLUMNS: &str =
      gas_used, trampoline, settlement_tx_hash, penalty_tx_hash";
 
 /// The raw column values; [`Proposal::try_from`] parses them back into
-/// domain types. A parse failure means a corrupt row (we wrote these
-/// values), surfaced as a `StoreError::Database`.
+/// domain types. A parse failure means a corrupt row (we wrote these values),
+/// surfaced as [`StoreError::CorruptRow`] — which batch reads skip and single
+/// lookups report.
 #[derive(sqlx::FromRow)]
 struct ProposalRow {
     id: i64,
@@ -789,9 +855,19 @@ struct ProposalRow {
     penalty_tx_hash: Option<String>,
 }
 
-/// Wrap a column parse failure as a database error.
+/// A column in `proposals` that cannot be parsed back into its domain type.
 fn corrupt(column: &'static str, err: impl std::fmt::Display) -> StoreError {
+    corrupt_in("proposals", column, err)
+}
+
+/// As [`corrupt`], for the reads that decode `penalties` rows.
+fn corrupt_in(
+    table: &'static str,
+    column: &'static str,
+    err: impl std::fmt::Display,
+) -> StoreError {
     StoreError::CorruptRow {
+        table,
         column,
         detail: err.to_string(),
     }
@@ -940,6 +1016,17 @@ mod tests {
         (ProposalStore::new(pool.clone(), tx), rx, pool)
     }
 
+    /// Make a stored row undecodable, the way a bad migration or hand-edit
+    /// would. `sub_solver` is the column of choice because no read filters on
+    /// it, so the row is still selected and the failure lands in the decoder.
+    async fn corrupt_sub_solver(pool: &PgPool, id: ProposalId) {
+        sqlx::query("UPDATE proposals SET sub_solver = 'not-an-address' WHERE id = $1")
+            .bind(as_db_id(id).expect("db-assigned id"))
+            .execute(pool)
+            .await
+            .expect("corrupt the row");
+    }
+
     /// Pretend the proposal reached its current status `secs` seconds ago.
     async fn backdate_status_change(pool: &PgPool, id: ProposalId, secs: f64) {
         sqlx::query(
@@ -1062,37 +1149,70 @@ mod tests {
     ///
     /// Both used to be `Database`, so a caller that retried transient failures
     /// retried a row that could never parse on every tick, forever.
+    ///
+    /// `sub_solver` is corrupted rather than `status` on purpose: the reads
+    /// below filter on `status`, so a bad status is excluded by the query and
+    /// never reaches the decoder at all.
     #[ignore]
     #[tokio::test]
-    async fn an_unparseable_row_is_not_reported_as_a_transient_failure() {
+    async fn an_unparseable_row_is_reported_as_permanent_not_transient() {
         let (store, _audit, pool) = test_store_with_pool().await;
         let id = store
             .insert(make_proposal(test_order_uid(), SOLVER_A))
             .await
             .expect("insert");
+        corrupt_sub_solver(&pool, id).await;
 
-        // A status string no `ProposalStatus` will parse — what a bad
-        // migration or hand-edit leaves behind.
-        sqlx::query("UPDATE proposals SET status = 'not-a-status' WHERE id = $1")
-            .bind(as_db_id(id).expect("db-assigned id"))
-            .execute(&pool)
-            .await
-            .expect("corrupt the row");
-
+        // A single lookup reports it: there is nothing to skip to, and
+        // `Ok(None)` would claim the row does not exist.
         let err = store.get(id).await.expect_err("row cannot be read back");
         assert!(
             matches!(
                 err,
                 StoreError::CorruptRow {
-                    column: "status",
+                    table: "proposals",
+                    column: "sub_solver",
                     ..
                 }
             ),
-            "expected a CorruptRow naming the column, got {err:?}"
+            "expected a CorruptRow naming the table and column, got {err:?}"
         );
         assert!(
-            !err.is_transient(),
+            !err.should_retry(),
             "retrying an unparseable row can never succeed"
+        );
+    }
+
+    /// One unreadable row must not take down the reads the loops depend on.
+    ///
+    /// `snapshot_by_statuses` is the validation loop's working set and, through
+    /// the penalty loop's own snapshot, the Track A debit queue. Collecting
+    /// into `Result` meant a single bad row failed the whole query, so
+    /// every verdict, every expiry sweep, and every debit stopped on every
+    /// tick, forever, until someone found the row by hand.
+    #[ignore]
+    #[tokio::test]
+    async fn an_unparseable_row_does_not_take_the_whole_snapshot_with_it() {
+        let (store, _audit, pool) = test_store_with_pool().await;
+        let broken = store
+            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .await
+            .expect("insert");
+        let healthy = store
+            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_B))
+            .await
+            .expect("insert");
+        corrupt_sub_solver(&pool, broken).await;
+
+        let live = store
+            .snapshot_by_statuses(&[ProposalStatus::Active])
+            .await
+            .expect("a bad row must not fail the snapshot");
+
+        assert_eq!(
+            live.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![healthy],
+            "the readable proposal still gets its tick; only the bad row drops out"
         );
     }
 

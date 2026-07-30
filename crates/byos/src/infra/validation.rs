@@ -74,12 +74,12 @@ fn note_lost_transition(
         StoreError::StaleTransition { .. } | StoreError::NotFound(_) => {
             tracing::debug!(%id, %e, "{what} lost the race, dropped");
         }
-        // The row will never parse: retrying it every tick is waste, and it
-        // means a proposal is stuck where no sweep can move it.
-        StoreError::CorruptRow { .. } => {
-            tracing::error!(%id, %e, "{what} failed on an unreadable row; manual repair needed");
-        }
-        _ => tracing::warn!(%id, %e, "{what} failed; retrying next tick"),
+        // Everything else defers to the store's own classification rather than
+        // re-deriving it here, so the two cannot drift as variants are added.
+        _ if e.should_retry() => tracing::warn!(%id, %e, "{what} failed; retrying next tick"),
+        // Retrying will never help: the row or the schema is the problem, and
+        // it means a proposal is stuck where no sweep can move it.
+        _ => tracing::error!(%id, %e, "{what} failed permanently; manual repair needed"),
     }
 }
 
@@ -114,7 +114,9 @@ pub async fn run_tick(
     validator.begin_tick();
 
     if let Err(e) = store.release_stale_executing(executing_timeout).await {
-        tracing::error!(%e, "executing-timeout release failed; retrying next tick");
+        // No "retrying next tick" promise here: it holds for a transient
+        // failure, not for a schema fault that will fail identically forever.
+        tracing::error!(%e, retryable = e.should_retry(), "executing-timeout release failed");
     }
 
     let live = match store
