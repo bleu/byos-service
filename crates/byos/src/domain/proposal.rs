@@ -96,6 +96,34 @@ pub enum ProposalStatus {
     Cancelled,
 }
 
+/// What the driver reported about a settlement built on a proposal
+/// (ADR-0010), stripped of the wire vocabulary `/notify` receives.
+///
+/// Only the kinds that move a proposal appear here; everything else the driver
+/// sends is evidence, not a transition. Which status each one produces depends
+/// on the proposal's status *at the moment of the write*, so the mapping lives
+/// with the compare-and-swap rather than at the edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementOutcome {
+    /// A settlement carrying this proposal is being submitted.
+    Started,
+    /// The settlement landed.
+    Succeeded(B256),
+    /// The settlement reverted on-chain; a Track A debit follows.
+    Reverted(B256),
+    /// Submission was abandoned before any transaction landed, so the
+    /// proposal re-enters competition and owes the non-settlement charge.
+    Abandoned,
+}
+
+impl SettlementOutcome {
+    /// Whether failing to apply this outcome costs the service a charge it is
+    /// owed — the difference between a log line and an alert.
+    pub fn is_chargeable(self) -> bool {
+        matches!(self, Self::Reverted(_) | Self::Abandoned)
+    }
+}
+
 /// A stored proposal, post-validation. Domain type — never serialized directly
 /// to the wire (DTOs handle that).
 #[derive(Clone, Debug)]

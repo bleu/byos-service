@@ -126,8 +126,9 @@ async fn revert_debits(
         {
             continue;
         }
-        // record_outcome always writes the tx with SettleFailed, so a
-        // missing hash is a corrupt row — alert, don't guess an amount.
+        // apply_settlement_outcome always writes the tx alongside
+        // SettleFailed, so a missing hash is a corrupt row — alert, don't
+        // guess an amount.
         let Some(settlement_tx) = proposal.settlement_tx_hash else {
             tracing::error!(id = %proposal.id, "settleFailed without a settlement tx; cannot debit");
             continue;
