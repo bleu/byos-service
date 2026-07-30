@@ -56,6 +56,33 @@ pub fn spawn(
     })
 }
 
+/// Report a transition the tick could not complete, at a level that matches
+/// why.
+///
+/// Losing the compare-and-swap is the expected case — a cancellation or a
+/// driver notification won the race — and stays at `debug`. Everything else
+/// used to be logged the same way, which meant a pool timeout or an
+/// unparseable row read as "stale, dropped" and vanished entirely under the
+/// production `byos=info` filter.
+fn note_lost_transition(
+    id: &crate::domain::proposal::ProposalId,
+    e: &crate::infra::storage::StoreError,
+    what: &str,
+) {
+    use crate::infra::storage::StoreError;
+    match e {
+        StoreError::StaleTransition { .. } | StoreError::NotFound(_) => {
+            tracing::debug!(%id, %e, "{what} lost the race, dropped");
+        }
+        // Everything else defers to the store's own classification rather than
+        // re-deriving it here, so the two cannot drift as variants are added.
+        _ if e.should_retry() => tracing::warn!(%id, %e, "{what} failed; retrying next tick"),
+        // Retrying will never help: the row or the schema is the problem, and
+        // it means a proposal is stuck where no sweep can move it.
+        _ => tracing::error!(%id, %e, "{what} failed permanently; manual repair needed"),
+    }
+}
+
 /// One pass of the background validator, in three sweeps:
 ///
 /// 1. **Executing timeout** (ADR-0013) — any `Executing` proposal older than
@@ -87,7 +114,9 @@ pub async fn run_tick(
     validator.begin_tick();
 
     if let Err(e) = store.release_stale_executing(executing_timeout).await {
-        tracing::error!(%e, "executing-timeout release failed; retrying next tick");
+        // No "retrying next tick" promise here: it holds for a transient
+        // failure, not for a schema fault that will fail identically forever.
+        tracing::error!(%e, retryable = e.should_retry(), "executing-timeout release failed");
     }
 
     let live = match store
@@ -106,7 +135,7 @@ pub async fn run_tick(
         if proposal.valid_until < alloy::primitives::U256::from(now) {
             match store.transition(&proposal, ProposalStatus::Expired).await {
                 Ok(()) => tracing::info!(id = %proposal.id, "proposal expired"),
-                Err(e) => tracing::debug!(id = %proposal.id, %e, "stale expiry dropped"),
+                Err(e) => note_lost_transition(&proposal.id, &e, "expiry"),
             }
         } else {
             // Both Submitted and Active proposals are validated.
@@ -132,7 +161,7 @@ pub async fn run_tick(
             };
             match store.resolve_verdict(proposal.id, verdict).await {
                 Ok(status) => tracing::info!(id = %proposal.id, %status, "proposal validated"),
-                Err(e) => tracing::debug!(id = %proposal.id, %e, "stale verdict dropped"),
+                Err(e) => note_lost_transition(&proposal.id, &e, "verdict"),
             }
         }
     }))
