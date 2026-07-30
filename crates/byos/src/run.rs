@@ -385,7 +385,11 @@ async fn run_with(
         args.dropped_retention,
     );
 
-    api::serve(
+    // Bound, not `?`: teardown has to run even when serving fails, or a bind
+    // error leaves three loops polling the database with nobody to stop them
+    // and the queued audit events unflushed. In-process callers (`run`,
+    // `run_until`) are where that leak is observable.
+    let served = api::serve(
         args.public_addr,
         args.internal_addr,
         state,
@@ -393,8 +397,7 @@ async fn run_with(
         bind_tx,
         shutdown_rx,
     )
-    .await
-    .context("API server exited with error")?;
+    .await;
 
     // The validation, retention, and penalty loops hold the store — and
     // with it an audit sender — so stop them first, or the writer's channel
@@ -407,7 +410,10 @@ async fn run_with(
     if let Some(penalty_loop) = penalty_loop {
         penalty_loop.abort();
     }
-    writer.await.context("audit writer task panicked")
+    // Evidence is flushed before the serve error surfaces: whatever went wrong
+    // with the listeners, the audit trail up to that point is worth keeping.
+    writer.await.context("audit writer task panicked")?;
+    served.context("API server exited with error")
 }
 
 // try_init: a second in-process instance (tests restart the service) must
