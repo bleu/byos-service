@@ -12,7 +12,6 @@ Status: **in progress** — the proposal API, scoring/solve engine, background v
 |---|---|---|
 | [`byos`](crates/byos) | The BYOS service: public proposal API + CoW solver engine, one process, two listeners | in progress |
 | [`byos-common`](crates/byos-common) | Shared contract bindings, EIP-712 schema, and Trampoline calldata encoding | in progress |
-| [`byos-watcher`](crates/byos-watcher) | Empty placeholder — the chain watcher is superseded by the driver's `/notify` (ADR-0010) and the escrow operator lives in `byos` | unused |
 | [`subsolver`](crates/subsolver) | Reference sub-solver: example proposal-API client, also the e2e-test counterpart | implemented |
 | [`e2e`](crates/e2e) | End-to-end tests, two tiers: in-process against plain anvil, and full CoW stack via [offline-mode](https://github.com/cowdao-grants/offline-mode) | skeleton |
 
