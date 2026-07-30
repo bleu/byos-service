@@ -22,17 +22,20 @@ No batching across sub-solvers — this preserves the "one sub-solver per settle
 
 Multi-order proposals (one proposal covering multiple order UIDs) are out of scope for v1. Sub-solvers propose single-order routes; CoW-finding is left to other solvers in the auction.
 
-### Scoring: BYOS-internal, mirroring the driver
+### Scoring: surplus minus gas
 
-BYOS computes its own score for each proposal: `score = surplus + fee - gas`.
+BYOS computes its own score for each proposal: `score = surplus - gas`, in native-token units.
 
-- **Surplus** — the buy-side improvement beyond the order's limit price **net of the BYOS fee** (what the user actually receives), converted to native token using cached reference prices.
-- **Fee** — the BYOS fee for the settlement (see §Fee mechanism below), converted to native token using the same reference prices.
-- **Gas** — estimated gas cost from `eth_estimateGas` simulation plus a 30k buffer ([ADR-0012](0012-simulation.md)), cached on the proposal.
+- **Surplus** — the improvement beyond the order's limit price: extra buy tokens on a sell order, sell tokens kept back on a buy order. Converted to native token with the auction's reference price for whichever token it lands in.
+- **Gas** — the `eth_estimateGas` result of the full-settle simulation ([ADR-0012](0012-simulation.md)) plus a 30k buffer, cached on the proposal, times the auction's effective gas price.
 
-Because surplus is net of fee, `surplus + fee` is the gross price improvement — the fee is not counted twice, and ranking follows total value created rather than the fee portion.
+There is **no fee term**, and its absence is deliberate. CoW's score is surplus plus protocol fees and nothing else (CIP-38, `driver/src/domain/competition/solution/scoring.rs`); gas never appears as a subtraction there. It reaches the score only because a solver declares gas as its own fee, which lowers what the user receives, which lowers surplus.
 
-This mirrors the driver's scoring approach (`surplus + protocol_fees` in native token, `scoring.rs`) so that BYOS's ranking closely tracks the driver's final ranking. The driver still performs its own scoring after encoding and gas simulation — BYOS's score is a pre-ranking to select which proposals deserve the driver's encoding budget.
+The protocol fee then cancels out of any ranking. It is carved out of surplus and added straight back, so substituting through the on-chain arithmetic leaves `score = route surplus − our own cut`, for all three policy kinds. That is the "ranking is fee-neutral" property in the contracts' [cow-fee-collection reference](https://github.com/bleu/byos-contracts/blob/main/docs/reference/cow-fee-collection.md). Once our cut equals the gas cost (§Fee mechanism), `surplus − gas` is exactly the score the autopilot will compute for our bid, so reading per-order fee policies would buy nothing.
+
+**We do not estimate protocol fees either.** The driver applies them itself (`Solution::new` calls `with_protocol_fees`, gated on `fee_handler`, default `Driver`), then encodes and simulates before bidding. A solution that cannot absorb the fee fails that simulation and is dropped: we lose the round, with no revert, no penalty and no escrow debit. Estimating the fee ourselves would only produce a slightly earlier "no". It is also impossible before `/solve`: fee policies are built per auction by the autopilot and delivered only in the `/solve` payload, so the orderbook's order model carries no fee-policy field and the ingestion gate has nothing to read. That gate can check gas headroom and nothing more.
+
+BYOS's score remains a pre-ranking: it decides which proposals deserve the driver's encoding budget. The driver re-scores after encoding and simulation.
 
 ### Selection: single best per order UID
 
@@ -42,12 +45,13 @@ Before returning solutions, BYOS filters and ranks proposals, selecting **one wi
 2. **Order liveness** — order UID is present in the auction's order list
 3. **Amount matching** — proposal amounts satisfy the order's limit price and remaining fillable amount (see §Order amount matching below)
 4. ~~**Escrow re-check**~~ — moved off this path: the background validator re-checks escrow and rejects (ADR-0013's transition table). `/solve` reads no chain state.
-5. **Score rank** — rank by `surplus + fee - gas` (using cached values from ingestion)
-6. **Select best** — take the single highest-scoring proposal per order UID
+5. **Score rank** — rank by `surplus - gas` (using the gas cached at simulation and the auction's prices)
+6. **Gas cut** — size the cut and drop the proposal if taking it would breach the user's signed limit (§Fee mechanism)
+7. **Select best** — take the single highest-scoring proposal per order UID
 
-A winner with non-positive score is not returned: settling a trade expected to cost more in gas than it earns in surplus and fee is worse than skipping the order.
+A winner with non-positive score is not returned: settling a trade expected to cost more in gas than it earns in surplus is worse than skipping the order.
 
-This matches the RFP requirement: "the engine selects the one yielding the greatest surplus after any configured BYOS fee." BYOS's score is a pre-ranking approximation of the driver's effective scoring; the driver still performs its own scoring after encoding.
+This matches the RFP requirement: "the engine selects the one yielding the greatest surplus after any configured BYOS fee." Nothing is configured any more — the only fee BYOS charges is the gas cut, always on and sized at cost (§Fee mechanism) — and ranking on `surplus - gas` is what "after the fee" reduces to once the cut equals the gas. BYOS's score is a pre-ranking approximation of the driver's effective scoring; the driver still performs its own scoring after encoding.
 
 ### Validation split: ingestion vs `/solve`
 
@@ -58,7 +62,7 @@ Heavy validation runs in the **background validation loop**, not on the `POST /p
 - Simulation against reference block (permanent drop on failure); gas estimate cached per proposal
 - Hook presence — required pre/post hooks from order app data present in `interactions`
 - Baseline price sanity — proposal not obviously worse than reference AMM prices (EBBO baseline)
-- Fee gate — proposal's surplus must cover BYOS fee (`surplus >= fee_rate × sellAmount`, both sides in native token — see §Fee mechanism)
+- Profitability gate — proposal's surplus must exceed its gas cost (`surplus - gas > min_score`, ADR-0013). This gate cannot see fee policies: they exist only in the `/solve` payload, so gas headroom is the whole question it can ask (§Scoring)
 - Rate limiting (IP-based + signer-based, escrow-tiered)
 
 Cheap validation runs at **`/solve` time** (local computation, no RPC):
@@ -84,13 +88,39 @@ The engine's responsibilities: compute the Trampoline CREATE2 address from the s
 
 The Solution returned to the driver contains these two `Interaction::Custom` entries targeting the sell token and the Trampoline respectively. The driver sees two interactions per order.
 
-### Fee mechanism: percentage of sellAmount
+### Fee mechanism: the gas cut
 
-BYOS charges a configurable fee on winning solutions, expressed as a **percentage of `sellAmount`** (RFP §Economics: "percentage of volume or surplus"). The fee rate **defaults to 0** in v1.
+> The percentage-of-`sellAmount` fee this section used to specify is gone, not amended. It took the cut by routing less than the user sold, which cannot work against a fixed signed route: the sub-solver signed for the full `proposal.sell_amount` and the Trampoline enforces delivery against the signed `buyAmount`, so the input cannot be resized. The configurable rate, its default of 0, and the `surplus >= fee_rate × sellAmount` ingestion gate went with it.
 
-At ingestion, proposals whose surplus does not cover the fee are rejected: `surplus < fee_rate × sellAmount → reject`. The comparison is done in native token — `fee_rate × sellAmount` is converted from sell-token units using the same cached reference prices as surplus. This matches the RFP requirement that "proposals whose surplus does not cover the fee are rejected at acceptance."
+What BYOS charges is a **gas cut**: exactly the gas the settlement is estimated to cost, in sell-token units, always on. No multiplier, no config knob. Every solver carries this cost.
 
-At settlement, the fee is extracted from the trade's surplus — the user receives at least the order's limit price, BYOS retains the fee portion, and any remaining surplus above the fee flows to `GPv2Settlement` as positive slippage. BYOS also retains 100% of CoW rewards earned under its bonded solver address; reward pass-through to sub-solvers is out of scope for v1.
+**How it is taken.** Declared as the fulfillment's `fee` while we still route the full sell amount. The two are separable, and declaring the fee is what keeps the price vector honest. The settlement pulls the whole sell amount, the Trampoline receives all of it, the user gets `R × (1 - f/S)`, and the difference stays in the `GPv2Settlement` buffers. Nothing reimburses gas: what comes back weekly is money we declined to pass on, valued in native token by CoW's Tuesday-to-Tuesday accounting. One inflow, one smaller outflow — no transfer to make and no contract of our own to hold it. This is the mechanism [contracts ADR-0003](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md) already describes: "fees are a price wedge, not a transfer". Confirmed with the CoW solver team (Haris Angelidakis, 2026-07-22).
+
+Using the `fee` field rather than shading the clearing prices leaves `encode_settle`'s price vector untouched, so the transaction we simulated stays the transaction we bid, and it books the cut as a declared solver fee in CoW's accounting instead of as slippage.
+
+**The limit check is ours.** The price is ours, so we check it: skip the proposal when the cut would drop the user below the amount they signed for. On a sell order the on-chain check (`GPv2Settlement.sol:368`, which under the driver's custom prices reduces to "user receives at least the signed buy amount") becomes exactly that headroom condition. On a buy order the fee sits outside the driver's execution check and the test is "the user's total payment does not exceed the signed sell amount". This check needs no fee policies, and it can rule out a proposal the score accepts: the score converts surplus at the auction's price, while the limit is enforced on the route's own amounts, and a stale auction price makes the two disagree.
+
+**Why it is not padded.** A larger cut lowers our score, which lowers CIP-85 consistency rewards. Those are allocated by how close our bids sit to the winner across every order we bid on, won or lost, out of a shared bucket, so we do not recapture what we add to it. There is no regime where a bigger cut is free. Revenue margin above gas recovery is tracked separately (COW-1238).
+
+BYOS retains 100% of CoW rewards earned under its bonded solver address; reward pass-through to sub-solvers is out of scope for v1.
+
+### Solution shape: what we put in the `Solution` we return
+
+Every field, and why:
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `id` | index within this response, 1-based | Recorded against the proposal id so `/notify` can be attributed (ADR-0013) |
+| `prices` | `{sell_token: proposal.buy_amount, buy_token: proposal.sell_amount}` | Cross-multiplied from the proposal amounts. Unaffected by the cut, which is a declared fee rather than a price shade |
+| `trades` | exactly one `Fulfillment` | One order per solution (§Selection granularity) |
+| `trades[0].fee` | the gas cut, in sell-token atoms | **Never `None`.** Every live order is limit class, so the driver requires a solver-determined fee and rejects `Fee::Static` |
+| `trades[0].executed_amount` | sell order: `order.sellAmount - fee`. Buy order: `order.buyAmount` | The driver requires `executed + fee == order.target()` for sell orders and leaves the fee out of that check for buy orders |
+| `interactions` | two `Custom` entries, `internalize: false` | The transfer and the Trampoline `execute` (§Settlement crafting) |
+| `pre_interactions`, `post_interactions`, `wrappers` | empty | Hook-carrying orders are outside the simulation envelope (ADR-0012) |
+| `gas` | simulated gas + 30k buffer | The driver's settlement budget; the same number the cut is priced from |
+| `flashloans` | `None` | Out of scope for v1 |
+
+**Every real order is limit class**, which is the fact the whole fee question turns on. `shared/src/order_validation.rs` assigns `Limit` when the signed `feeAmount` is zero and `Market` otherwise, and since the 2023 fee-model change every order signs `feeAmount = 0`. A `Limit` order is never reclassified back. `Fulfillment::new` accepts `Fee::Static` (what `fee: None` becomes) only for `Market` orders, so a missing fee is rejected on every order we bid — and because the DTO conversion collects into a `Result`, one invalid trade discards **every** solution in that `/solve` response. Quote requests are the one exception: their static fee is zero, and they are never settled.
 
 ### Order amount matching: strict, no clamping
 
@@ -141,7 +171,7 @@ reasonable `/solve` SLO.
 
 ## Alternatives considered
 
-- **Fully delegate scoring to the driver (no BYOS-internal ranking).** BYOS would return all valid proposals and let the driver's scoring pipeline decide. Rejected — floods the driver's encoding budget with obviously worse proposals, wasting gas simulation RPC calls. BYOS's internal `surplus + fee - gas` pre-ranking ensures only competitive proposals consume encoding slots.
+- **Fully delegate scoring to the driver (no BYOS-internal ranking).** BYOS would return all valid proposals and let the driver's scoring pipeline decide. Rejected — floods the driver's encoding budget with obviously worse proposals, wasting gas simulation RPC calls. BYOS's internal `surplus - gas` pre-ranking ensures only competitive proposals consume encoding slots.
 - **Return all valid proposals (no pre-filter).** Rejected — the driver's encoding pipeline is the bottleneck (each solution requires gas simulation via RPC). Flooding it with obviously worse proposals wastes the encoding budget and risks hitting the deadline. A cheap ratio-based pre-filter keeps the load manageable.
 - **Every-block continuous simulation.** Rejected — simulating all standing proposals every ~12s is substantial RPC load with diminishing returns. The driver's post-encoding re-simulation catches anything that goes stale between BYOS's periodic cycles. A 3–5 block interval is a practical trade-off.
 - **EBBO re-check at `/solve` time.** Rejected — requires a price lookup on the hot path, adding latency. The ingestion-time baseline check is the primary defense; simulation catches routes that stopped working. The marginal safety of a fresh EBBO check doesn't justify the cost.
@@ -155,8 +185,9 @@ reasonable `/solve` SLO.
 ## Consequences
 
 - **BYOS is a thin layer with internal scoring.** The engine's `/solve` scores the live proposal rows and encodes two Trampoline interactions (ERC-20 transfer + execute). Scoring uses the gas the background simulation stored on each proposal. The driver still performs its own scoring after encoding — BYOS's score is a pre-ranking, not the final word.
-- **Scoring divergence from the driver.** BYOS's `surplus + fee - gas` uses cached gas estimates and reference prices, which may diverge from the driver's post-encoding gas simulation and real-time price feeds. Because BYOS sends a single proposal per order, there is no fallback if the selected proposal fails the driver's post-encoding re-simulation — BYOS loses that order for that auction round. Accepted: the divergence is marginal in practice (gas estimates are close, surplus dominates for competitive proposals), and sub-solvers naturally resubmit via their polling loop.
+- **Scoring divergence from the driver.** BYOS's `surplus - gas` uses cached gas estimates and reference prices, which may diverge from the driver's post-encoding gas simulation and real-time price feeds. Because BYOS sends a single proposal per order, there is no fallback if the selected proposal fails the driver's post-encoding re-simulation — BYOS loses that order for that auction round. Accepted: the divergence is marginal in practice (gas estimates are close, surplus dominates for competitive proposals), and sub-solvers naturally resubmit via their polling loop.
 - **No batching means lower theoretical maximum score.** Single-order solutions can't capture CoW surplus or batching efficiencies. BYOS competes on single-order execution quality. Acceptable in v1 — the target use case is "execution against a baseline the sub-solver computed."
 - **Outcome observation costs no extra infrastructure**, per [ADR-0010](0010-settlement-outcome-source.md): the driver's notifications carry the settlement result, so there is no watcher to run and no `GPv2Settlement` events to parse.
-- **Fee gate may reject viable proposals.** The ingestion-time surplus estimate and fee calculation could reject proposals that would ultimately be profitable (gas estimate may be high, surplus may improve). Mitigated by setting a conservative fee rate (0 in v1) and tuning as real data accumulates.
+- **The profitability gate may reject viable proposals.** The ingestion-time surplus estimate uses the gas price last seen on an auction, so a proposal rejected during a gas spike would have been profitable minutes later. `Rejected` is terminal (ADR-0013), so the sub-solver has to resubmit. Accepted: the alternative is holding proposals we would not bid, and the polling loop resubmits cheaply.
+- **The gas cut recovers gas approximately, not exactly.** It is sized from the auction's native price, while the weekly payout converts at an average observed over roughly an hour around the trade. Padding the cut would cost more in CIP-85 consistency rewards than it recovers, so the gap is accepted and monitored through CoW's per-solver dashboard of gas paid against gas collected.
 - **Proposal freshness gap.** With 3–5 block simulation intervals, proposals can be up to ~60s stale when served at `/solve`. The driver's re-simulation catches this, but with pick-one there is no fallback if the stale proposal fails. Acceptable trade-off vs every-block RPC load; sub-solvers resubmit naturally.
