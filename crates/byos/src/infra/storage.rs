@@ -10,7 +10,7 @@
 use {
     crate::domain::{
         audit,
-        proposal::{OrderUid, Proposal, ProposalId, ProposalStatus},
+        proposal::{OrderUid, Proposal, ProposalId, ProposalStatus, SettlementOutcome},
         validator::RejectionReason,
     },
     alloy::primitives::{Address, B256, Bytes, U256},
@@ -82,6 +82,17 @@ impl StoreError {
             ),
         }
     }
+}
+
+/// What [`ProposalStore::apply_settlement_outcome`] did, for the caller's log.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OutcomeEffect {
+    Applied {
+        from: ProposalStatus,
+        to: ProposalStatus,
+    },
+    /// The outcome is not legal from the status the row actually held.
+    Ignored { from: ProposalStatus },
 }
 
 pub struct ProposalStore {
@@ -420,6 +431,96 @@ impl ProposalStore {
             },
         });
         Ok(())
+    }
+
+    /// Apply a driver-reported settlement outcome (ADR-0010, ADR-0013),
+    /// deciding the transition from the row as it stands under the lock.
+    ///
+    /// The status a given outcome is legal from is only knowable at the moment
+    /// of the write: the driver does not order its notifications, and the
+    /// executing timeout, a cancellation, and the expiry sweep all move the
+    /// row underneath. Deciding from a snapshot read outside the transaction
+    /// means a `Revert` that arrives while `settlementStarted` is still
+    /// committing looks illegal and gets dropped — and a dropped `Revert` is a
+    /// Track A debit the sub-solver never pays.
+    ///
+    /// Returns what happened so the caller can log it; an outcome that is
+    /// genuinely illegal from the committed status is `Ok(Ignored)`, not an
+    /// error, because the timeout backstop and re-simulation reconcile it.
+    pub async fn apply_settlement_outcome(
+        &self,
+        proposal: &Proposal,
+        outcome: SettlementOutcome,
+    ) -> Result<OutcomeEffect, StoreError> {
+        let id = proposal.id;
+        let mut tx = self.pool.begin().await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM proposals WHERE id = $1 FOR UPDATE")
+                .bind(as_db_id(id)?)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((status,)) = row else {
+            return Err(StoreError::NotFound(id));
+        };
+        let from: ProposalStatus = status.parse().map_err(|e| corrupt("status", e))?;
+
+        // The legality table. `Started` is the only outcome legal from
+        // `Active`; the rest resolve a settlement already in flight.
+        let to = match (outcome, from) {
+            (SettlementOutcome::Started, ProposalStatus::Active) => ProposalStatus::Executing,
+            (SettlementOutcome::Succeeded(_), ProposalStatus::Executing) => ProposalStatus::Settled,
+            (SettlementOutcome::Reverted(_), ProposalStatus::Executing) => {
+                ProposalStatus::SettleFailed
+            }
+            (SettlementOutcome::Abandoned, ProposalStatus::Executing) => ProposalStatus::Active,
+            _ => return Ok(OutcomeEffect::Ignored { from }),
+        };
+
+        let settlement_tx = match outcome {
+            SettlementOutcome::Succeeded(tx_hash) | SettlementOutcome::Reverted(tx_hash) => {
+                Some(tx_hash)
+            }
+            _ => None,
+        };
+        sqlx::query(
+            "UPDATE proposals SET status = $2, settlement_tx_hash = COALESCE($3, \
+             settlement_tx_hash), status_changed_at = now() WHERE id = $1",
+        )
+        .bind(as_db_id(id)?)
+        .bind(to.to_string())
+        .bind(settlement_tx.map(|t| format!("{t:#x}")))
+        .execute(&mut *tx)
+        .await?;
+
+        // Queued inside the same transaction as the release, so the charge
+        // cannot be lost to a crash between the two, and a duplicate
+        // notification cannot double-queue it: the second one finds the row
+        // `Active` and is ignored above.
+        if outcome == SettlementOutcome::Abandoned {
+            sqlx::query(
+                "INSERT INTO penalties (proposal_id, sub_solver, order_uid) VALUES ($1, $2, $3)",
+            )
+            .bind(as_db_id(id)?)
+            .bind(format!("{:#x}", proposal.sub_solver))
+            .bind(proposal.order_uid.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        self.emit(audit::AuditEvent {
+            occurred_at: SystemTime::now(),
+            kind: audit::AuditKind::StatusChanged {
+                proposal_id: id,
+                sub_solver: proposal.sub_solver,
+                order_uid: proposal.order_uid.clone(),
+                from,
+                to,
+                rejection_reason: None,
+                settlement_tx_hash: settlement_tx,
+            },
+        });
+        Ok(OutcomeEffect::Applied { from, to })
     }
 
     /// Keep an attributable non-outcome driver notification (a
@@ -1213,6 +1314,95 @@ mod tests {
             live.iter().map(|p| p.id).collect::<Vec<_>>(),
             vec![healthy],
             "the readable proposal still gets its tick; only the bad row drops out"
+        );
+    }
+
+    /// The outcome is decided from the locked row, not from the caller's copy.
+    ///
+    /// `/notify` reads the proposal, then applies an outcome; between those
+    /// two the driver's own next notification, the executing timeout, or a
+    /// cancellation can move the row. Deciding from the caller's copy dropped
+    /// a `revert` whose proposal had since entered `Executing`, and a dropped
+    /// revert is a Track A debit the sub-solver never pays. The stale copy is
+    /// injected directly here — that is exactly what a concurrent handler
+    /// holds.
+    #[ignore]
+    #[tokio::test]
+    async fn a_settlement_outcome_is_judged_against_the_committed_status() {
+        let (store, _audit) = test_store().await;
+        let id = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Active,
+            ))
+            .await
+            .expect("insert");
+        let stale = store.get(id).await.expect("get").expect("exists");
+        assert_eq!(stale.status, ProposalStatus::Active);
+
+        // The row moves on, as another notification would move it.
+        store
+            .transition(&stale, ProposalStatus::Executing)
+            .await
+            .expect("enter executing");
+
+        let tx = alloy::primitives::b256!(
+            "3333333333333333333333333333333333333333333333333333333333333333"
+        );
+        let effect = store
+            .apply_settlement_outcome(&stale, SettlementOutcome::Reverted(tx))
+            .await
+            .expect("store write");
+
+        assert_eq!(
+            effect,
+            OutcomeEffect::Applied {
+                from: ProposalStatus::Executing,
+                to: ProposalStatus::SettleFailed
+            },
+            "the revert is legal from the committed status, whatever the caller's copy said"
+        );
+        let stored = store.get(id).await.expect("get").expect("exists");
+        assert_eq!(stored.status, ProposalStatus::SettleFailed);
+        assert_eq!(
+            stored.settlement_tx_hash,
+            Some(tx),
+            "the reverted tx is the evidence the debit cites"
+        );
+    }
+
+    /// The other half of the contract: an outcome that is genuinely illegal
+    /// from the committed status is reported, not written and not an error.
+    #[ignore]
+    #[tokio::test]
+    async fn an_outcome_illegal_from_the_committed_status_is_ignored() {
+        let (store, _audit) = test_store().await;
+        let id = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Cancelled,
+            ))
+            .await
+            .expect("insert");
+        let proposal = store.get(id).await.expect("get").expect("exists");
+
+        let effect = store
+            .apply_settlement_outcome(&proposal, SettlementOutcome::Started)
+            .await
+            .expect("an inapplicable outcome is not an error");
+
+        assert_eq!(
+            effect,
+            OutcomeEffect::Ignored {
+                from: ProposalStatus::Cancelled
+            }
+        );
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::Cancelled,
+            "a cancelled proposal must not be dragged into Executing"
         );
     }
 

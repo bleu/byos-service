@@ -5,7 +5,7 @@
 
 use {
     super::AppState,
-    crate::domain::proposal::ProposalStatus,
+    crate::{domain::proposal::SettlementOutcome, infra::storage::OutcomeEffect},
     axum::{Json, extract::State, http::StatusCode},
 };
 
@@ -67,81 +67,83 @@ pub async fn notify(
         return StatusCode::OK;
     }
 
+    let Some(outcome) = outcome_of(&notification) else {
+        // Attributable non-outcome kinds (pre-submission rejections, future
+        // additions): evidence only, no transition (ADR-0013).
+        for proposal in &proposals {
+            state
+                .store()
+                .note_driver_notification(proposal, &notification.kind);
+        }
+        return StatusCode::OK;
+    };
+
     for proposal in &proposals {
-        let result = match notification.kind.as_str() {
-            "settlementStarted" if proposal.status == ProposalStatus::Active => {
-                state
-                    .store()
-                    .transition(proposal, ProposalStatus::Executing)
-                    .await
-            }
-            "success" | "revert" if proposal.status == ProposalStatus::Executing => {
-                let Some(tx) = notification.transaction else {
-                    tracing::error!(
-                        id = %proposal.id, kind = %notification.kind,
-                        "outcome notification without a tx hash"
-                    );
-                    continue;
-                };
-                let to = if notification.kind == "success" {
-                    ProposalStatus::Settled
-                } else {
-                    ProposalStatus::SettleFailed
-                };
-                state.store().record_outcome(proposal, to, tx).await
-            }
-            // The submission was abandoned before any tx landed: the
-            // proposal re-enters competition. If it actually settled (lost
-            // notification), the next re-simulation kills it (ADR-0013).
-            // Winning and not settling is charged 0.1 × c_l (ADR-0003) —
-            // queue it once the transition commits, so a duplicate
-            // notification (stale CAS) cannot double-charge. A crash between
-            // the two under-penalizes; the reverse order could over-charge.
-            "cancelled" | "expired" | "fail" if proposal.status == ProposalStatus::Executing => {
-                let result = state
-                    .store()
-                    .transition(proposal, ProposalStatus::Active)
-                    .await;
-                if result.is_ok()
-                    && let Err(e) = state.store().queue_non_settlement_penalty(proposal).await
-                {
-                    tracing::error!(
-                        id = %proposal.id, %e,
-                        "non-settlement penalty not queued; sub-solver goes uncharged"
-                    );
-                }
-                result
-            }
-            // An outcome kind whose proposal is not in the expected state:
-            // the snapshot raced another transition (or a notification was
-            // lost). The timeout backstop and re-simulation reconcile.
-            kind if is_outcome(kind) => {
-                tracing::warn!(
-                    id = %proposal.id, kind, status = ?proposal.status,
-                    "stale outcome notification dropped"
-                );
-                continue;
-            }
-            // Attributable non-outcome kinds (pre-submission rejections,
-            // future additions): evidence only, no transition (ADR-0013).
-            kind => {
-                state.store().note_driver_notification(proposal, kind);
-                continue;
-            }
-        };
-        if let Err(e) = result {
-            tracing::warn!(
+        // The status is decided inside the store under `FOR UPDATE`; nothing
+        // here branches on `proposal.status`, which is already stale by the
+        // time this runs.
+        match state
+            .store()
+            .apply_settlement_outcome(proposal, outcome)
+            .await
+        {
+            Ok(OutcomeEffect::Applied { from, to }) => tracing::info!(
+                id = %proposal.id, kind = %notification.kind, %from, %to,
+                "settlement outcome recorded"
+            ),
+            // Not legal from the committed status: a duplicate notification,
+            // or the executing timeout / a cancellation got there first. The
+            // timeout backstop and re-simulation reconcile.
+            Ok(OutcomeEffect::Ignored { from }) => tracing::warn!(
+                id = %proposal.id, kind = %notification.kind, %from,
+                "settlement outcome not applicable to the proposal's current status"
+            ),
+            // A write we could not perform on a money path: the debit that
+            // should follow a revert now depends on the timeout backstop.
+            Err(e) => tracing::error!(
                 id = %proposal.id, kind = %notification.kind, %e,
-                "notification transition dropped"
-            );
+                "settlement outcome not recorded"
+            ),
         }
     }
 
     StatusCode::OK
 }
 
-/// The six kinds that describe the fate of a submitted settlement — the
-/// ones that drive transitions and whose loss is alert-worthy (ADR-0010).
+/// Map the wire kind to the outcome it reports, or `None` for the kinds that
+/// are evidence only.
+///
+/// The kind stays a string on the DTO so an unknown one still deserializes
+/// (ADR-0010), but the vocabulary is spelled out exactly once here rather than
+/// in a dispatch match and a separate `is_outcome` list that could drift.
+fn outcome_of(notification: &Notification) -> Option<SettlementOutcome> {
+    match notification.kind.as_str() {
+        "settlementStarted" => Some(SettlementOutcome::Started),
+        // A landed-or-reverted report with no tx hash names no settlement, so
+        // there is nothing to record or to charge against. Left `Executing`
+        // for the timeout backstop rather than guessed at.
+        "success" => Some(SettlementOutcome::Succeeded(transaction(notification)?)),
+        "revert" => Some(SettlementOutcome::Reverted(transaction(notification)?)),
+        "cancelled" | "expired" | "fail" => Some(SettlementOutcome::Abandoned),
+        kind => {
+            tracing::debug!(kind, "non-outcome driver notification");
+            None
+        }
+    }
+}
+
+fn transaction(notification: &Notification) -> Option<alloy::primitives::B256> {
+    if notification.transaction.is_none() {
+        tracing::error!(
+            kind = %notification.kind,
+            "outcome notification without a tx hash; leaving the proposal to the timeout"
+        );
+    }
+    notification.transaction
+}
+
+/// Whether this kind describes the fate of a submitted settlement — the ones
+/// whose loss of attribution is alert-worthy (ADR-0010).
 fn is_outcome(kind: &str) -> bool {
     matches!(
         kind,
