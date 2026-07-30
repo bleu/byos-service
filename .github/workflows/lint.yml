@@ -32,6 +32,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pinned rather than inheriting whatever node the runner image ships:
+      # GitHub bumps that on its own schedule, and the linters are the only
+      # thing here that cares.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: extractions/setup-just@v2
       - run: just lint-openapi
 

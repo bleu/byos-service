@@ -22,9 +22,14 @@ clippy:
 #
 # swagger-cli is abandoned upstream and prints a deprecation notice; it is what
 # services runs, and @redocly/cli is the successor whenever we want to move.
+#
+# Both majors are pinned. A spectral major adds rules to `spectral:oas` and can
+# change what exits non-zero, so an unpinned version turns CI red on a PR that
+# never touched the spec — and `npx --yes` on a floating version is the wider
+# supply-chain surface too.
 lint-openapi:
     npx --yes @apidevtools/swagger-cli@4 validate crates/byos/openapi.yml
-    npx --yes @stoplight/spectral-cli lint crates/byos/openapi.yml
+    npx --yes @stoplight/spectral-cli@6 lint crates/byos/openapi.yml
 
 # Unit tests. Drop --no-tests=pass once the first test lands.
 test-unit:
