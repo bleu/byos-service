@@ -116,6 +116,14 @@ pub enum SettlementOutcome {
     Abandoned,
 }
 
+impl SettlementOutcome {
+    /// Whether failing to apply this outcome costs the service a charge it is
+    /// owed — the difference between a log line and an alert.
+    pub fn is_chargeable(self) -> bool {
+        matches!(self, Self::Reverted(_) | Self::Abandoned)
+    }
+}
+
 /// A stored proposal, post-validation. Domain type — never serialized directly
 /// to the wire (DTOs handle that).
 #[derive(Clone, Debug)]

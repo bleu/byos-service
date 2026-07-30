@@ -4,8 +4,11 @@
 //! no cache layer. The table holds what *is*; `audit_events` holds what
 //! *happened*.
 //!
-//! Every mutation emits an [`audit::AuditEvent`] — auditing happens by
-//! construction, so future mutation sites cannot forget to leave evidence.
+//! Every status change emits an [`audit::AuditEvent`] — auditing happens by
+//! construction, so future transition sites cannot forget to leave evidence.
+//! The one mutation without its own event is the `penalties` queue insert,
+//! which rides along inside the transaction that emits the accompanying
+//! `StatusChanged`.
 
 use {
     crate::domain::{
@@ -198,51 +201,6 @@ impl ProposalStore {
                 to,
                 rejection_reason: None,
                 settlement_tx_hash: None,
-            },
-        });
-        Ok(())
-    }
-
-    /// Record a driver-reported settlement outcome (ADR-0013): `Executing`
-    /// → `Settled` (the tx landed) or `SettleFailed` (it reverted), citing
-    /// the transaction as evidence. Same compare-and-swap semantics as
-    /// [`Self::transition`] — zero rows means the snapshot went stale.
-    pub async fn record_outcome(
-        &self,
-        proposal: &Proposal,
-        to: ProposalStatus,
-        settlement_tx_hash: B256,
-    ) -> Result<(), StoreError> {
-        debug_assert!(
-            matches!(to, ProposalStatus::Settled | ProposalStatus::SettleFailed),
-            "only settlement outcomes carry a tx hash"
-        );
-        let from = proposal.status;
-        let result = sqlx::query(
-            "UPDATE proposals SET status = $3, settlement_tx_hash = $4, status_changed_at = now() \
-             WHERE id = $1 AND status = $2",
-        )
-        .bind(as_db_id(proposal.id)?)
-        .bind(from.to_string())
-        .bind(to.to_string())
-        .bind(format!("{settlement_tx_hash:#x}"))
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(self.stale_or_missing(proposal.id, from.to_string()).await);
-        }
-
-        self.emit(audit::AuditEvent {
-            occurred_at: SystemTime::now(),
-            kind: audit::AuditKind::StatusChanged {
-                proposal_id: proposal.id,
-                sub_solver: proposal.sub_solver,
-                order_uid: proposal.order_uid.clone(),
-                from,
-                to,
-                rejection_reason: None,
-                settlement_tx_hash: Some(settlement_tx_hash),
             },
         });
         Ok(())
@@ -464,14 +422,36 @@ impl ProposalStore {
         };
         let from: ProposalStatus = status.parse().map_err(|e| corrupt("status", e))?;
 
-        // The legality table. `Started` is the only outcome legal from
-        // `Active`; the rest resolve a settlement already in flight.
+        // The legality table.
+        //
+        // The two outcomes that cite a transaction are legal from `Active` as
+        // well as `Executing`, and that is the point of this function. A tx
+        // hash is an on-chain fact, and `attributed_proposals` has already
+        // proved via the `solutions` join that we bid this proposal into that
+        // auction — so `Active` means we lost track of the submission, not
+        // that the settlement never happened. Requiring `Executing` forfeits
+        // the Track A debit in every case where `settlementStarted` did not
+        // commit: the driver never sent it, its write failed, the process
+        // restarted in between, or the two notifications simply arrived out of
+        // order.
+        //
+        // `Started` stays `Active`-only: nothing to reconcile, and it must not
+        // drag a terminal proposal back into flight.
+        //
+        // `Abandoned` stays `Executing`-only, deliberately. It cites no
+        // transaction, and the driver's `fail` covers more than "abandoned
+        // after submission", so from `Active` there is nothing to release and
+        // no evidence that a charge is owed.
         let to = match (outcome, from) {
             (SettlementOutcome::Started, ProposalStatus::Active) => ProposalStatus::Executing,
-            (SettlementOutcome::Succeeded(_), ProposalStatus::Executing) => ProposalStatus::Settled,
-            (SettlementOutcome::Reverted(_), ProposalStatus::Executing) => {
-                ProposalStatus::SettleFailed
-            }
+            (
+                SettlementOutcome::Succeeded(_),
+                ProposalStatus::Executing | ProposalStatus::Active,
+            ) => ProposalStatus::Settled,
+            (
+                SettlementOutcome::Reverted(_),
+                ProposalStatus::Executing | ProposalStatus::Active,
+            ) => ProposalStatus::SettleFailed,
             (SettlementOutcome::Abandoned, ProposalStatus::Executing) => ProposalStatus::Active,
             _ => return Ok(OutcomeEffect::Ignored { from }),
         };
@@ -493,9 +473,21 @@ impl ProposalStore {
         .await?;
 
         // Queued inside the same transaction as the release, so the charge
-        // cannot be lost to a crash between the two, and a duplicate
-        // notification cannot double-queue it: the second one finds the row
-        // `Active` and is ignored above.
+        // cannot be lost to a crash between the two.
+        //
+        // The only guard against a duplicate charge is the status CAS above: a
+        // repeat notification finds the row `Active` and is ignored. That is
+        // keyed on status alone, not on the settlement, so a retransmitted
+        // `fail` arriving after the proposal re-won and re-entered `Executing`
+        // would queue a second row for one lost settlement. `penalties` has no
+        // uniqueness constraint to catch it. Narrow enough to accept; closing
+        // it means keying the row on something that identifies the settlement.
+        //
+        // Liveness cost of the shared transaction: an INSERT failure now rolls
+        // the release back too, so the proposal stays `Executing` until
+        // `release_stale_executing` picks it up (default 5 minutes) — and that
+        // path queues no penalty. Previously the release survived and only the
+        // charge was lost. Both under-charge; this one is recoverable by hand.
         if outcome == SettlementOutcome::Abandoned {
             sqlx::query(
                 "INSERT INTO penalties (proposal_id, sub_solver, order_uid) VALUES ($1, $2, $3)",
@@ -1369,6 +1361,54 @@ mod tests {
             stored.settlement_tx_hash,
             Some(tx),
             "the reverted tx is the evidence the debit cites"
+        );
+    }
+
+    /// A revert is still charged when `settlementStarted` never landed.
+    ///
+    /// This is the reachable half of the bug, and the one the first attempt at
+    /// this fix missed: requiring `Executing` forfeits the Track A debit
+    /// whenever the first notification did not commit — the driver never sent
+    /// it, its write failed, the process restarted in between, or the two
+    /// simply arrived out of order. A tx hash is an on-chain fact and the
+    /// `solutions` join already proved we bid this proposal, so `Active` means
+    /// we lost track of the submission, not that it never happened.
+    #[ignore]
+    #[tokio::test]
+    async fn a_revert_without_a_preceding_settlement_started_is_still_charged() {
+        let (store, _audit) = test_store().await;
+        let id = store
+            .insert(test_proposal(
+                test_order_uid(),
+                SOLVER_A,
+                ProposalStatus::Active,
+            ))
+            .await
+            .expect("insert");
+        let proposal = store.get(id).await.expect("get").expect("exists");
+
+        let tx = alloy::primitives::b256!(
+            "4444444444444444444444444444444444444444444444444444444444444444"
+        );
+        let effect = store
+            .apply_settlement_outcome(&proposal, SettlementOutcome::Reverted(tx))
+            .await
+            .expect("store write");
+
+        assert_eq!(
+            effect,
+            OutcomeEffect::Applied {
+                from: ProposalStatus::Active,
+                to: ProposalStatus::SettleFailed
+            },
+            "dropping this revert would forfeit the debit entirely"
+        );
+        let stored = store.get(id).await.expect("get").expect("exists");
+        assert_eq!(stored.status, ProposalStatus::SettleFailed);
+        assert_eq!(
+            stored.settlement_tx_hash,
+            Some(tx),
+            "the penalty loop prices the debit off this tx"
         );
     }
 

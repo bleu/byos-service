@@ -68,9 +68,16 @@ pub async fn notify(
     }
 
     let Some(outcome) = outcome_of(&notification) else {
-        // Attributable non-outcome kinds (pre-submission rejections, future
-        // additions): evidence only, no transition (ADR-0013).
+        // Kinds that carry no transition: pre-submission rejections, future
+        // additions, and outcome kinds whose tx hash is missing (see
+        // `outcome_of`). Evidence only, no row mutation (ADR-0013).
         for proposal in &proposals {
+            if is_outcome(&notification.kind) {
+                tracing::error!(
+                    id = %proposal.id, kind = %notification.kind,
+                    "outcome notification without a tx hash; left for the executing timeout"
+                );
+            }
             state
                 .store()
                 .note_driver_notification(proposal, &notification.kind);
@@ -92,12 +99,28 @@ pub async fn notify(
                 "settlement outcome recorded"
             ),
             // Not legal from the committed status: a duplicate notification,
-            // or the executing timeout / a cancellation got there first. The
-            // timeout backstop and re-simulation reconcile.
-            Ok(OutcomeEffect::Ignored { from }) => tracing::warn!(
-                id = %proposal.id, kind = %notification.kind, %from,
-                "settlement outcome not applicable to the proposal's current status"
-            ),
+            // or a cancellation got there first.
+            //
+            // Recorded as evidence either way, because after the retention
+            // sweep the log line is all that would remain of "the driver told
+            // us something we did not act on" — and for `Reverted` that is a
+            // charge nobody collected.
+            Ok(OutcomeEffect::Ignored { from }) => {
+                state
+                    .store()
+                    .note_driver_notification(proposal, &notification.kind);
+                if outcome.is_chargeable() {
+                    tracing::error!(
+                        id = %proposal.id, kind = %notification.kind, %from,
+                        "chargeable outcome ignored; the sub-solver may go uncharged"
+                    );
+                } else {
+                    tracing::warn!(
+                        id = %proposal.id, kind = %notification.kind, %from,
+                        "settlement outcome not applicable to the proposal's current status"
+                    );
+                }
+            }
             // A write we could not perform on a money path: the debit that
             // should follow a revert now depends on the timeout backstop.
             Err(e) => tracing::error!(
@@ -132,13 +155,10 @@ fn outcome_of(notification: &Notification) -> Option<SettlementOutcome> {
     }
 }
 
+/// The tx hash a `success`/`revert` must carry. `None` makes `outcome_of`
+/// yield no outcome, so the caller records the notification as evidence and
+/// logs it with the proposal id it belongs to.
 fn transaction(notification: &Notification) -> Option<alloy::primitives::B256> {
-    if notification.transaction.is_none() {
-        tracing::error!(
-            kind = %notification.kind,
-            "outcome notification without a tx hash; leaving the proposal to the timeout"
-        );
-    }
     notification.transaction
 }
 
