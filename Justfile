@@ -129,8 +129,10 @@ propose:
         --chain-id {{local-chain-id}} \
         --trampoline-factory {{local-factory}}
 
-# Regenerate the vendored contract ABIs from the pinned byos-contracts
-# submodule (ADR-0014). Needs foundry and jq; nothing else in this file does,
+# Regenerate the vendored contract artifacts from the pinned byos-contracts
+# submodule (ADR-0014): ABI-only files for the service bindings, plus the
+# e2e harness's Escrow artifact, which also carries creation bytecode because
+# the harness deploys it. Needs foundry and jq; nothing else in this file does,
 # and `just build` never runs it. CI runs it and fails on a dirty tree.
 sync-abis:
     #!/usr/bin/env bash
@@ -148,3 +150,8 @@ sync-abis:
         jq '.abi' "byos-contracts/out/$contract.sol/$contract.json" \
             > "crates/byos-common/abis/$contract.json"
     done
+    # The e2e fixture deploys the Escrow, so it needs creation bytecode too.
+    # Only the Escrow: its constructor deploys the TrampolineFactory, which in
+    # turn embeds the Trampoline creation code.
+    jq '{abi, bytecode}' byos-contracts/out/Escrow.sol/Escrow.json \
+        > crates/e2e/testdata/artifacts/Escrow.json

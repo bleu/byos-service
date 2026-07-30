@@ -41,16 +41,21 @@ jobs:
       - uses: extractions/setup-just@v2
       - run: just lint-openapi
 
-  # The vendored ABIs must match the pinned byos-contracts submodule (ADR-0014).
-  # Separate job so the lint and test jobs stay free of submodules and foundry.
+  # The vendored contract artifacts must match the pinned byos-contracts
+  # submodule (ADR-0014). Separate job so the lint and test jobs stay free of
+  # both submodules and foundry.
   abis:
     runs-on: ubuntu-latest
     steps:
+      # No `submodules:` — `just sync-abis` populates byos-contracts and its
+      # own dependencies itself. Checking out recursively here would also drag
+      # in offline-mode's nested submodules (cowprotocol/services, cowswap),
+      # which this job has no use for.
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
       - uses: extractions/setup-just@v2
       - run: just sync-abis
-      - name: Fail if the vendored ABIs are stale
-        run: git diff --exit-code -- crates/byos-common/abis/
+      - name: Fail if the vendored artifacts are stale
+        run: |
+          git diff --exit-code -- \
+            crates/byos-common/abis/ crates/e2e/testdata/artifacts/

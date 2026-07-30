@@ -11,5 +11,5 @@
 //!   solver; isolation via `evm_snapshot`/`evm_revert`.
 //!
 //! All tests are `#[ignore]`d by default and run single-threaded.
-//!
-//! Not implemented yet — this crate is a skeleton.
+
+pub mod chain;
