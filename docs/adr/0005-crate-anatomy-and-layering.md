@@ -30,7 +30,7 @@ New capabilities get their own small, single-purpose, kebab-case-named crates (s
 Inside `byos` (and `subsolver` once it grows):
 
 - `domain/` — pure business logic, no IO: proposal store and lifecycle, scoring and selection, eligibility math, attribution. Types here are the CONTEXT.md vocabulary.
-- `infra/` — everything touching the outside world: `api/` (axum servers with per-route `dto/` modules), `blockchain/` (RPC, simulation, settlement watcher), `cli.rs`, `config/`, `observe/`, `persistence/` (audit trail).
+- `infra/` — everything touching the outside world: `api/` (axum servers with per-route `dto/` modules), `blockchain/` (RPC, simulation, escrow operator), `cli.rs`, `config/`, `observe/`, `persistence/` (audit trail).
 - DTOs live next to the route or adapter that uses them; conversion to domain types happens at the edge. Wire types shared across crates are extracted to `proposal-dto` (the `solvers-dto` pattern), so the `byos` server and any sub-solver client deserialize one model.
 
 No `boundary/` layer: services uses it as an anti-corruption layer against legacy code it is refactoring away; we have no legacy. If we later vendor code from services, its anyhow-flavored surface gets wrapped at the `infra` edge instead.

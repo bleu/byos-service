@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Chain watcher and escrow operator for the BYOS service"
+description = "Unused placeholder; the escrow operator lives in the byos crate"
 
 [lints]
 workspace = true

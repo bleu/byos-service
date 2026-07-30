@@ -17,8 +17,8 @@ This repo holds the off-chain half of that design: the **BYOS service** (`crates
 - **Proposal store** — the `proposals` table in Postgres: the single source of truth for current proposal state, read and written by `GET`, `/solve`, `/notify`, and the validation loop. Live proposals survive a restart; terminal ones are swept after their retention window ([ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md)). Distinct from the **audit trail**.
 - **Audit trail** — the async write-behind persistence of every proposal (≥3-month retention) used as dispute evidence for Track B claims. Operational logs are not the audit trail.
 - **Gatekeeping** — BYOS's *preventive* control: validating each proposal (simulation, hook presence, EBBO baseline price) before settling. Distinct from escrow, which is *recovery*. Best-effort and non-exculpatory — passing gatekeeping does not absolve a sub-solver ([ADR-0003](docs/adr/0003-slash-attribution-flow.md)).
-- **Continuous simulation** — the background loop re-simulating standing proposals every 3–5 blocks; reverting proposals are permanently dropped and sub-solvers resubmit via their polling loops.
-- **Settlement watcher** — the background observer of `GPv2Settlement` events that maps settlements to sub-solvers via the Trampoline CREATE2 address in calldata, classifies reverts (sub-solver route vs BYOS infra failure), and triggers Track A debits.
+- **Continuous simulation** — the background loop re-simulating standing proposals every `--validation-interval-secs` (default 12s, about one block); reverting proposals are permanently dropped and sub-solvers resubmit via their polling loops.
+- **Settlement outcome** — how BYOS learns a settlement landed or reverted: the driver's `/notify` calls, joined back to the proposal through the `solutions` table. There is no chain watcher — [ADR-0010](docs/adr/0010-settlement-outcome-source.md) replaced that design.
 - **Trampoline** — a contract that receives `sellAmount`, executes the sub-solver's interactions, returns the trade's funds to `GPv2Settlement`, and holds no protocol balance outside a single settlement. How much comes back and what enforces it is a contracts-repo decision, defined by contracts ADR-0003 and never restated here. One immutable instance per sub-solver at a deterministic CREATE2 address, deployed at escrow-deposit time. Implemented in the contracts repo ([contracts ADR-0001](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0001-trampoline-topology.md), [ADR-0003](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md)).
 - **Escrow** — a per-chain, native-token ERC20-ledger contract holding sub-solver collateral keyed by sub-solver address ([contracts ADR-0002](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0002-escrow-contract.md), [ADR-0007](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0007-erc20-escrow-token.md)). The service reads `effectiveBalance()` for eligibility and calls the operator functions. The collateral-at-risk is the *only* sub-solver capital BYOS touches — trade capital flows atomically through `GPv2Settlement → Trampoline`.
 - **Owner** — the secure wallet (multisig/Safe) that owns the Escrow: receives debited funds, sets the operator, configures the cooldown.
@@ -33,7 +33,7 @@ This repo holds the off-chain half of that design: the **BYOS service** (`crates
 
 1. **Solver engine** (`crates/byos`) — answers the standard CoW driver's `/solve` from the proposal store; internal `surplus + fee - gas` pre-ranking; single best proposal per order UID; fat-Trampoline settlement crafting ([ADR-0002](docs/adr/0002-solver-engine.md)).
 2. **Proposal API** (`crates/byos`) — public HTTP, EIP-712-signed, **permissionless but collateral-gated**; `POST`/`GET`(metadata only)/`DELETE`; two-layer rate limiting ([ADR-0001](docs/adr/0001-proposal-api.md)). Specified in [`crates/byos/openapi.yml`](crates/byos/openapi.yml).
-3. **Background workers** (`crates/byos`) — continuous simulation, settlement watcher + Track A debits, escrow-balance cache refresh, off-chain Track-B reserve tracking.
+3. **Background workers** (`crates/byos`) — re-simulation and expiry, Track A debits, the retention sweep, escrow-balance cache refresh, off-chain Track-B reserve tracking.
 4. **Reference sub-solver** (`crates/subsolver`) — example client and e2e-test counterpart.
 5. Plus: operational runbook + monitoring ([ADR-0008](docs/adr/0008-observability.md)).
 
@@ -57,7 +57,7 @@ v1 targets **Ethereum mainnet + Gnosis**. Out of scope: BYOS-operated orderbook,
 - Simulation failures cost the sub-solver **nothing** (rate-limit only); only on-chain failures debit escrow.
 - The API is **permissionless + collateral-gated**, not allowlisted — the escrow deposit *is* the permission.
 - The escrow contract is a dumb ledger; the service is the brain — reserve calculations, proposal eligibility, gatekeeping, attribution, and dispute handling all live here.
-- The `/solve` hot path does no simulation and no RPC — one indexed read over the live proposal rows, nothing more ([ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md) revisited ADR-0001's no-DB rule). SLO targets and their reasoning: [`docs/metrics-reasoning.md`](docs/metrics-reasoning.md).
+- The `/solve` hot path does no simulation and no RPC — an indexed read of the live proposal rows per auction order, plus one `solutions` insert per returned bid ([ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md) revisited ADR-0001's no-DB rule). SLO targets and their reasoning: [`docs/metrics-reasoning.md`](docs/metrics-reasoning.md).
 
 ## Related repositories
 

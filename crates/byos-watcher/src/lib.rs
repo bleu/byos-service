@@ -1,5 +1,5 @@
-//! Placeholder crate — no code lives here yet, and both halves of what it was
-//! scoped for have since landed elsewhere.
+//! Unused crate. Both halves of what it was scoped for have landed elsewhere,
+//! so nothing is expected to be added here.
 //!
 //! The **chain watcher** (poll blocks, detect settlements, attribute them to
 //! sub-solvers) is superseded: settlement outcomes arrive from the driver's
@@ -10,7 +10,7 @@
 //! `byos::infra::blockchain::operator` submits the debits and
 //! `byos::infra::penalty` drives them (ADR-0003, ADR-0013).
 //!
-//! Nothing depends on this crate. It is left in place only because removing a
-//! workspace member is a structural decision rather than a documentation fix —
-//! if no use emerges, delete it along with its README, AGENTS.md, and
-//! byos-common mentions.
+//! Nothing depends on it. It is left in place only because removing a workspace
+//! member is a structural decision rather than a documentation fix; deleting it
+//! means dropping this directory, the `byos-watcher` line in the root
+//! `Cargo.toml`, and its rows in README.md and AGENTS.md.

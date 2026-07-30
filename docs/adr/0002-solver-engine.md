@@ -41,7 +41,7 @@ Before returning solutions, BYOS filters and ranks proposals, selecting **one wi
 1. **Expiry** — `valid_until > now`
 2. **Order liveness** — order UID is present in the auction's order list
 3. **Amount matching** — proposal amounts satisfy the order's limit price and remaining fillable amount (see §Order amount matching below)
-4. **Escrow re-check** — sub-solver's cached escrow balance >= minimum (`gas + c_l`)
+4. ~~**Escrow re-check**~~ — moved off this path: the background validator re-checks escrow and rejects (ADR-0013's transition table). `/solve` reads no chain state.
 5. **Score rank** — rank by `surplus + fee - gas` (using cached values from ingestion)
 6. **Select best** — take the single highest-scoring proposal per order UID
 
@@ -51,7 +51,7 @@ This matches the RFP requirement: "the engine selects the one yielding the great
 
 ### Validation split: ingestion vs `/solve`
 
-Heavy validation runs at **proposal ingestion** (`POST /proposals`), per [ADR-0001](0001-proposal-api.md):
+Heavy validation runs in the **background validation loop**, not on the `POST /proposals` request — ingestion verifies the signature and stores the proposal as `submitted` (ADR-0001's async-ingestion revision, ADR-0013). The checks themselves are unchanged:
 
 - EIP-712 signature recovery and verification
 - Escrow balance >= minimum (cached with short TTL)
@@ -63,13 +63,13 @@ Heavy validation runs at **proposal ingestion** (`POST /proposals`), per [ADR-00
 
 Cheap validation runs at **`/solve` time** (local computation, no RPC):
 
-- Expiry, order liveness, amount matching against the auction's order state, escrow re-check, scoring + best-per-order selection with the non-positive-score drop (as above)
+- Expiry, order liveness, amount matching against the auction's order state, scoring + best-per-order selection with the non-positive-score drop (as above). The escrow re-check belongs to the validation loop, not this path (ADR-0013).
 
 EBBO baseline is **not** re-checked at `/solve` time. The ingestion-time check is the primary gatekeeping layer. Proposals that passed EBBO at ingestion and still simulate successfully at settlement carry low EBBO risk. Re-running it on every `/solve` adds latency for marginal safety.
 
 ### Continuous simulation: BYOS-level, periodic
 
-BYOS re-simulates standing proposals against the current block state on a **configurable interval** (default: every 3–5 blocks, ~36–60s on mainnet). Proposals that revert are permanently dropped ([ADR-0001](0001-proposal-api.md) lifecycle rule). Sub-solvers resubmit via their polling loop.
+BYOS re-simulates standing proposals against the current block state on a **configurable interval** (`--validation-interval-secs`, default 12s — about one block; ADR-0001 records the same correction). Proposals that revert are permanently dropped ([ADR-0001](0001-proposal-api.md) lifecycle rule). Sub-solvers resubmit via their polling loop.
 
 This is **not** every-block simulation — the RPC load of simulating all standing proposals every 12s is substantial and unnecessary. The driver's post-encoding re-simulation (`resimulate_until_revert`) catches proposals that go stale between BYOS simulation cycles.
 
@@ -105,7 +105,7 @@ BYOS does **not** clamp or adapt proposal amounts. The sub-solver computed a rou
 
 BYOS monitors the chain directly for settlement outcomes. It watches `GPv2Settlement` events, matches settlements to proposals via the Trampoline CREATE2 address in calldata ([contracts ADR-0001](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0001-trampoline-topology.md)), and triggers Track A escrow debits on revert ([ADR-0003](0003-slash-attribution-flow.md)). Before debiting, BYOS classifies the revert: failures caused by its own infrastructure — e.g. a trampoline missing after a deposit-tx reorg ([contracts ADR-0003](https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md)) — are BYOS's cost, not the sub-solver's. Only reverts attributable to the sub-solver's route trigger a debit.
 
-This keeps BYOS self-contained — no driver modifications required. The driver treats BYOS as a vanilla solver engine, interacting only via `/solve`. BYOS needs chain awareness anyway for continuous simulation; the settlement watcher piggybacks on the same infrastructure.
+Superseded by [ADR-0010](0010-settlement-outcome-source.md): outcomes arrive from the stock driver's notifications at `/notify`, so there is no chain watcher and no event parsing. The driver still treats BYOS as a vanilla solver engine.
 
 ### `/solve` trust boundary: internal listener only
 
@@ -122,10 +122,11 @@ latency argument survives the change — one indexed read over a few hundred liv
 rows is about a millisecond — and the rest of the path is unchanged:
 
 1. Receive auction, deserialize orders — fast
-2. One indexed read for the auction's order uids — ~1ms
+2. An indexed read of the live proposal rows per auction order — ~1ms each
 3. Pre-filter: expiry, liveness, scoring — microseconds
 4. Encode two interactions (ERC-20 transfer + Trampoline execute) — keccak256 + ABI encoding, sub-millisecond per proposal
-5. Return `Vec<Solution>`
+5. One `solutions` insert per returned bid (ADR-0013: if we cannot record it, we do not bid it)
+6. Return `Vec<Solution>`
 
 No simulation and no RPC calls on the hot path. The expensive work happens in
 the background validation loop (simulation, escrow check). The design meets any
@@ -156,6 +157,6 @@ reasonable `/solve` SLO.
 - **BYOS is a thin layer with internal scoring.** The engine's `/solve` scores the live proposal rows and encodes two Trampoline interactions (ERC-20 transfer + execute). Scoring uses the gas the background simulation stored on each proposal. The driver still performs its own scoring after encoding — BYOS's score is a pre-ranking, not the final word.
 - **Scoring divergence from the driver.** BYOS's `surplus + fee - gas` uses cached gas estimates and reference prices, which may diverge from the driver's post-encoding gas simulation and real-time price feeds. Because BYOS sends a single proposal per order, there is no fallback if the selected proposal fails the driver's post-encoding re-simulation — BYOS loses that order for that auction round. Accepted: the divergence is marginal in practice (gas estimates are close, surplus dominates for competitive proposals), and sub-solvers naturally resubmit via their polling loop.
 - **No batching means lower theoretical maximum score.** Single-order solutions can't capture CoW surplus or batching efficiencies. BYOS competes on single-order execution quality. Acceptable in v1 — the target use case is "execution against a baseline the sub-solver computed."
-- **Self-contained chain monitoring is additional infrastructure.** BYOS must run a settlement watcher, parse `GPv2Settlement` events, and map Trampoline addresses to sub-solvers. This piggybacks on the block-subscription infra needed for continuous simulation, but is still operational surface area.
+- **Outcome observation costs no extra infrastructure**, per [ADR-0010](0010-settlement-outcome-source.md): the driver's notifications carry the settlement result, so there is no watcher to run and no `GPv2Settlement` events to parse.
 - **Fee gate may reject viable proposals.** The ingestion-time surplus estimate and fee calculation could reject proposals that would ultimately be profitable (gas estimate may be high, surplus may improve). Mitigated by setting a conservative fee rate (0 in v1) and tuning as real data accumulates.
 - **Proposal freshness gap.** With 3–5 block simulation intervals, proposals can be up to ~60s stale when served at `/solve`. The driver's re-simulation catches this, but with pick-one there is no fallback if the stale proposal fails. Acceptable trade-off vs every-block RPC load; sub-solvers resubmit naturally.

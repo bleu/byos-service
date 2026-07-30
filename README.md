@@ -4,7 +4,7 @@ The off-chain service for **Bring Your Own Solver (BYOS)**: a bonded [CoW Protoc
 
 Built under a [CoW DAO grant](https://forum.cow.fi/t/grant-application-cow-byos-bring-your-own-solver/3476) answering the [BYOS RFP](https://forum.cow.fi/t/rfp-bring-your-own-solver-byos/3469). The on-chain half (Escrow, Trampoline, TrampolineFactory) lives in [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts).
 
-Status: **in progress** — the proposal API, scoring/solve engine, ingestion validation, audit trail, and reference sub-solver are implemented; the chain watcher, escrow operator, and e2e harness are not yet.
+Status: **in progress** — the proposal API, scoring/solve engine, background validation, proposal lifecycle and retention, audit trail, escrow operator with Track A debits, and reference sub-solver are implemented; the e2e harness is not. The chain watcher is not needed: settlement outcomes come from the driver's notifications (ADR-0010).
 
 ## Crates
 
