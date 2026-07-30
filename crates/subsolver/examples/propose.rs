@@ -31,7 +31,11 @@ use {
 };
 
 /// How long to wait for the validator to move the proposal off `submitted`.
-const POLL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longer than byos's own 12s `--validation-interval-secs` default: `just
+/// byos-local` passes 2s, but run against a service someone started by hand
+/// and a shorter timeout reports a dead validation loop when the loop has
+/// simply not ticked yet — the exact false alarm this tool exists to rule out.
+const POLL_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Proposal lifetime. Short, because the whole run is over in seconds — and
