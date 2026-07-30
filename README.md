@@ -42,6 +42,12 @@ just clippy         # -D warnings, all features and targets
 just fmt            # cargo +nightly fmt (never stable fmt)
 ```
 
+### Running byos by hand
+
+`just byos-local` in one shell, `just propose` in another. The service boots against the compose Postgres with no chain, so validation is AcceptAll; the helper signs a proposal, submits it, and polls until the background validator flips the status. Watching it go from `submitted` to `active` is the point — that is the checkpoint that says the service itself is fine when a full stack around it misbehaves. Both recipes share the chain id, factory, key and ports as `just` variables, so the two commands cannot disagree on the EIP-712 domain; the signer is anvil account 4.
+
+Three things that look like bugs and are not. A 202 followed by a 404 means the domain disagreement above happened anyway (you overrode a flag): `recover_proposer` only errors on a malformed signature, so a chain-id or factory mismatch recovers a different address instead of failing, the POST succeeds, and the owner-scoped read 404s the id it just handed you (ADR-0011's anti-existence-oracle rule). `active` means the validation loop is running, not that anything was checked. And do not copy `validUntil` from the test fixtures — they all use `1750000000`, June 2025, which ingestion rejects as already expired.
+
 Full-stack e2e uses [`cowdao-grants/offline-mode`](https://github.com/cowdao-grants/offline-mode) — the real CoW orderbook/autopilot/driver on a local anvil — with BYOS plugged in as a competing solver. See [ADR-0009](docs/adr/0009-testing-strategy.md) for the two-tier design and the shared chain fixture.
 
 ## License

@@ -52,6 +52,50 @@ test-e2e-full:
 build:
     cargo build --workspace
 
+# ---------------------------------------------------------------------------
+# Running byos on the host by hand
+# ---------------------------------------------------------------------------
+# Shared by `byos-local` and `propose`, because two copies of the domain
+# constants drift and a drifted domain fails in a way that looks like the
+# service's fault: the POST is accepted and the read then 404s. The factory
+# is the visibly-fake one from the sub-solver tests; the key is anvil
+# account 4, matching COW-1236's account map.
+local-chain-id := "31337"
+local-factory := "0x00000000000000000000000000000000000fac70"
+local-subsolver-key := "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
+local-byos-url := "http://127.0.0.1:9585"
+local-database := "byos_dev"
+
+# Run byos against the compose Postgres with no chain (AcceptAll validation).
+# Listeners take their defaults: 127.0.0.1:9585 public, 127.0.0.1:9586 internal.
+byos-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose up -d postgres
+    # `connect_and_migrate` migrates but does not create, so the database has
+    # to exist before the service boots.
+    docker compose exec -T postgres psql -U postgres -tAc \
+        "SELECT 1 FROM pg_database WHERE datname = '{{local-database}}'" | grep -q 1 \
+        || docker compose exec -T postgres psql -U postgres -q \
+            -c 'CREATE DATABASE {{local-database}}'
+    # 2s rather than the 12s default: right for production, too slow for a
+    # tool you re-run while debugging.
+    cargo run -p byos -- \
+        --chain-id {{local-chain-id}} \
+        --trampoline-factory {{local-factory}} \
+        --database-url postgres://postgres:postgres@localhost:5432/{{local-database}} \
+        --validation-interval-secs 2
+
+# Submit one signed proposal to `just byos-local` and follow its status.
+# `@`, so the recipe echo does not put the signing key on the terminal. It is
+# a published anvil key, but the habit is worth keeping.
+propose:
+    @SUBSOLVER_PRIVATE_KEY={{local-subsolver-key}} \
+        cargo run -q -p subsolver --example propose -- \
+        --byos-url {{local-byos-url}} \
+        --chain-id {{local-chain-id}} \
+        --trampoline-factory {{local-factory}}
+
 # Regenerate the vendored contract ABIs from the pinned byos-contracts
 # submodule (ADR-0014). Needs foundry and jq; nothing else in this file does,
 # and `just build` never runs it. CI runs it and fails on a dirty tree.
