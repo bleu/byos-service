@@ -32,3 +32,4 @@ BYOS-specific config concerns the TOML must cover from day one: chain id, `GPv2S
 
 - Every config addition touches three places: struct, example TOML, and (if operational) a clap arg. The example file drift is caught by using it in e2e tests.
 - Logging full args at startup means secrets must be typed to redact themselves on Debug (or logged as "set/unset"), a small discipline to keep.
+- Both listener defaults are loopback (`--public-addr` `127.0.0.1:9585`, `--internal-addr` `127.0.0.1:9586`), so a dev instance never lands on the LAN. A containerised deployment must pass `--public-addr 0.0.0.0:<port>` (or `PUBLIC_ADDR`) explicitly, or the public API is unreachable from outside the container and the symptom looks like a service that failed to start. `--internal-addr` stays loopback except where the driver runs in a different container ([ADR-0002](0002-solver-engine.md): `/solve` is MEV-relevant).

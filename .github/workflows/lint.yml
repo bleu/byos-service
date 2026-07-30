@@ -25,6 +25,22 @@ jobs:
       - run: just fmt-check
       - run: just clippy
 
+  # Nothing in the code, tests, or any other job reads crates/byos/openapi.yml,
+  # so without this the spec drifts silently. Separate job so the Rust lint job
+  # stays free of node, same split services uses.
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned rather than inheriting whatever node the runner image ships:
+      # GitHub bumps that on its own schedule, and the linters are the only
+      # thing here that cares.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: extractions/setup-just@v2
+      - run: just lint-openapi
+
   # The vendored contract artifacts must match the pinned byos-contracts
   # submodule (ADR-0014). Separate job so the lint and test jobs stay free of
   # both submodules and foundry.

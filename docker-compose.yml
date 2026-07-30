@@ -1,5 +1,13 @@
 # Dev/test dependencies. The audit trail (ADR-0001 write-behind) needs
 # Postgres: `docker compose up -d postgres`, then `just test-db`.
+
+# Pinned, because compose otherwise derives the project name from the
+# directory. From a git worktree that means `docker compose exec postgres`
+# reports "service postgres is not running" while a container is plainly up,
+# and `up -d postgres` starts a second one that collides on host port 5432.
+# With the name fixed, every worktree resolves to the same project.
+name: byos-service
+
 services:
   postgres:
     image: postgres:16-alpine

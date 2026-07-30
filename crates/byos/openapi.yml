@@ -4,13 +4,13 @@ info:
   title: BYOS Proposal API
   description: |
     The public HTTP API by which sub-solvers submit signed settlement
-    proposals to the BYOS solver engine (ADR-0001).
+    proposals to the BYOS solver engine.
 
     The API is permissionless but collateral-gated: there is no registration
     or API key. A sub-solver's identity is the address recovered from its
     EIP-712 signatures, and its escrow deposit is the permission.
 
-    ## Conventions (ADR-0005)
+    ## Conventions
 
     Follows the CoW Protocol solver-engine wire idiom: camelCase JSON,
     256-bit amounts as decimal strings, addresses and order UIDs as
@@ -24,7 +24,7 @@ info:
 
     - **Reads** (`GET`) sign the `ReadAuth` struct — `ReadAuth(uint256
       version)` with `version = 1`. It is a bearer token: signed once, sent
-      on every request, no nonce or expiry (ADR-0011).
+      on every request, no nonce or expiry.
     - **Cancellation** (`DELETE`) signs the `CancelProposal` struct —
       `CancelProposal(uint256 proposalId)` — so each cancellation is
       authorized individually.
@@ -33,7 +33,7 @@ info:
     `version = "0.1"`, `chainId` of the target chain, and
     `verifyingContract` set to the TrampolineFactory address.
 
-    Reads and cancellations are owner-scoped (ADR-0011): the recovered
+    Reads and cancellations are owner-scoped: the recovered
     signer only ever sees or cancels its own proposals. A non-owner
     requesting or cancelling a proposal by id gets the same `404` as a
     genuine miss, so proposal ids cannot be probed for existence.
@@ -48,13 +48,13 @@ info:
     the verdict.
 
     When a proposal wins an auction and the driver starts submitting the
-    settlement, it becomes `executing` (ADR-0013): frozen — not offered to
+    settlement, it becomes `executing`: frozen — not offered to
     further auctions, not re-simulated, not expired, not cancellable
     (`DELETE` answers `409`). The driver's outcome resolves it: `settled`
     (tx landed) or `settleFailed` (tx reverted), each recording
     `settlementTxHash`; an abandoned submission returns it to `active`. A
-    `settleFailed` proposal later becomes `penalized` when the Track A
-    escrow debit lands (ADR-0003/ADR-0010).
+    `settleFailed` proposal later becomes `penalized` once the service
+    has debited the sub-solver's escrow for the reverted settlement.
 
     `rejected`, `simFailed`, `expired`, `cancelled`, `settled`, and
     `penalized` are terminal — resubmission is a new `POST`.
@@ -69,10 +69,10 @@ info:
     url: https://www.gnu.org/licenses/gpl-3.0.html
 
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:9585
     description: |
       The public listener's bind address is deployment-specific
-      (`--public-addr`, default port 8080); there is no canonical
+      (`--public-addr`, default port 9585); there is no canonical
       production URL yet.
 
 paths:
@@ -94,12 +94,12 @@ paths:
         Parses the request, recovers the sub-solver address from the EIP-712
         `ProposalData` signature, and checks the expiry window: `validUntil`
         must be in the future but no further out than the maximum proposal
-        lifetime (ADR-0013; deployment-configurable, default 5 minutes). On
+        lifetime (deployment-configurable, default 5 minutes). On
         success the proposal is stored as `submitted` and validated in the
         background; poll `GET /proposal/{id}` for the verdict.
 
         Token addresses are not part of the request: they come from the
-        orderbook order during background validation (ADR-0012).
+        orderbook order during background validation.
 
         Proposals are immutable — there is no update operation. Replacement
         is a new `POST`, optionally preceded by a `DELETE` of the old one.
@@ -164,7 +164,7 @@ paths:
         "404":
           description: |
             No such proposal — or a proposal owned by another sub-solver;
-            the two cases are indistinguishable on the wire (ADR-0011).
+            the two cases are indistinguishable on the wire.
           content:
             application/json:
               schema:
@@ -176,7 +176,7 @@ paths:
         Requires an EIP-712 `CancelProposal` signature over the proposal id
         in the `X-Signature` header. The recovered signer must be the
         proposal's sub-solver; a non-owner gets the same `404` as a genuine
-        miss (ADR-0011). Only live proposals (`submitted` or `active`) can
+        miss. Only live proposals (`submitted` or `active`) can
         be cancelled.
       security:
         - cancelAuth: []
@@ -192,7 +192,7 @@ paths:
         "404":
           description: |
             No such proposal — or a proposal owned by another sub-solver;
-            the two cases are indistinguishable on the wire (ADR-0011).
+            the two cases are indistinguishable on the wire.
           content:
             application/json:
               schema:
@@ -200,7 +200,7 @@ paths:
         "409":
           description: |
             The proposal is not cancellable: `executing` (a settlement
-            built on it is in flight, ADR-0013) or already terminal.
+            built on it is in flight) or already terminal.
           content:
             application/json:
               schema:
@@ -213,7 +213,7 @@ paths:
       description: |
         Lists the caller's proposals across all orders. Identity comes
         entirely from the `X-Signature` header — there is no address
-        parameter (ADR-0011).
+        parameter.
       security:
         - readAuth: []
       responses:
@@ -235,7 +235,7 @@ paths:
       operationId: listProposalsByOrder
       summary: List the caller's proposals on one order.
       description: |
-        Owner-scoped (ADR-0011): returns only the caller's own proposals on
+        Owner-scoped: returns only the caller's own proposals on
         the given order. Competitors' proposals on the same order are
         invisible.
       security:
@@ -271,7 +271,7 @@ components:
       description: |
         EIP-712 signature over the `ReadAuth` struct (`version = 1`),
         hex-encoded (65 bytes). A bearer token: the recovered signer scopes
-        what the caller may read (ADR-0011).
+        what the caller may read.
     cancelAuth:
       type: apiKey
       in: header
@@ -330,7 +330,7 @@ components:
       example: 42
     ProposalStatus:
       description: |
-        Lifecycle state of a proposal (ADR-0013):
+        Lifecycle state of a proposal:
 
         - `submitted` — signature verified, awaiting background validation.
         - `active` — passed gatekeeping; eligible for `/solve` selection.
@@ -341,8 +341,8 @@ components:
         - `settled` — the settlement landed on-chain; see
           `settlementTxHash`.
         - `settleFailed` — the settlement reverted on-chain (see
-          `settlementTxHash`); the Track A escrow debit follows.
-        - `penalized` — the Track A debit landed; see `penaltyTxHash`.
+          `settlementTxHash`); the escrow debit for it follows.
+        - `penalized` — that debit landed; see `penaltyTxHash`.
         - `simFailed` — the settlement simulation reverted.
         - `cancelled` — cancelled by a signed `DELETE`.
 
@@ -362,20 +362,20 @@ components:
         - cancelled
     RejectionReason:
       description: |
-        Why the background validator rejected a proposal (ADR-0007):
+        Why the background validator rejected a proposal:
 
         - `InsufficientEscrow` — the sub-solver's escrow balance is below
           the required minimum. Fix: deposit escrow and resubmit.
         - `UnsupportedOrder` — the order is outside the simulation envelope
-          (hooks, partial fill, non-erc20 balances — ADR-0012).
+          (hooks, partial fill, non-erc20 balances).
         - `AmountMismatch` — the proposal's fill-or-kill amount differs from
           the order's (sell amount for sell orders, buy amount for buy
           orders).
         - `OrderNotFound` — the orderbook does not know the proposal's
           order UID.
         - `Unprofitable` — the first simulation scored the proposal at or
-          below the minimum (`score = surplus + fee - gas`, ADR-0002), so it
-          could never win an auction (ADR-0013). Fix: improve the price or
+          below the minimum (`score = surplus + fee - gas`), so it could
+          never win an auction. Fix: improve the price or
           resubmit when gas is cheaper.
       type: string
       enum:
@@ -388,7 +388,7 @@ components:
       description: |
         One arbitrary call executed inside the sub-solver's Trampoline at
         settlement. The sub-solver is fully responsible for the complete
-        route, including required approvals (ADR-0001).
+        route, including required approvals.
       type: object
       required:
         - target
@@ -424,7 +424,8 @@ components:
           description: >-
             Minimum amount of the order's buy token the proposal delivers. The
             Trampoline enforces it on-chain as a floor and keeps anything above
-            it; see contracts ADR-0003 for the exact mechanism.
+            it; the exact mechanism is documented in the byos-contracts
+            repository:
             https://github.com/bleu/byos-contracts/blob/main/docs/adr/0003-trampoline-deployment-settlement-integration.md
           allOf:
             - $ref: "#/components/schemas/U256"
@@ -437,7 +438,7 @@ components:
           description: |
             Unix timestamp after which the proposal expires. Must be in the
             future, and at most the maximum proposal lifetime from now
-            (ADR-0013; deployment-configurable, default 5 minutes) —
+            (deployment-configurable, default 5 minutes) —
             otherwise the request is rejected with
             `ProposalLifetimeExceeded`.
           allOf:
@@ -445,7 +446,7 @@ components:
         nonce:
           description: |
             Sub-solver-chosen salt for signature uniqueness. The service
-            enforces no ordering or uniqueness (ADR-0001).
+            enforces no ordering or uniqueness.
           allOf:
             - $ref: "#/components/schemas/U256"
         signature:
@@ -497,23 +498,23 @@ components:
         settlementTxHash:
           description: |
             Only present on settlement outcomes: the landed transaction for
-            `settled`, the reverted one for `settleFailed`/`penalized`
-            (ADR-0013).
+            `settled`, the reverted one for `settleFailed`/`penalized`.
           type: string
           pattern: "^0x[0-9a-f]{64}$"
           example: "0x2d6cea6413a3b2e37a1a5c1780e17dee056bd63c2fd0fd60d75bfa9ea38e2e28"
         penaltyTxHash:
           description: |
-            Only present when `status` is `penalized`: the Track A escrow
-            debit transaction that charged the sub-solver `gas + c_l` for
-            the reverted settlement (ADR-0003).
+            Only present when `status` is `penalized`: the escrow debit
+            transaction that charged the sub-solver for the reverted
+            settlement — the gas it wasted plus the fixed collateral
+            penalty.
           type: string
           pattern: "^0x[0-9a-f]{64}$"
           example: "0x7b1f3a9c5d8e2f4a6b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a"
     ProposalMetadata:
       description: |
         Metadata only — no amounts, no interactions. List views never expose
-        full proposal contents (ADR-0001); fetch `GET /proposal/{id}` for
+        full proposal contents; fetch `GET /proposal/{id}` for
         amounts and the rejection reason.
       type: object
       required:
@@ -541,7 +542,7 @@ components:
             $ref: "#/components/schemas/ProposalMetadata"
     Error:
       description: |
-        JSON error body (ADR-0007). `kind` is the machine-readable
+        JSON error body. `kind` is the machine-readable
         catalogue; `description` is human-readable and may vary.
       type: object
       required:
