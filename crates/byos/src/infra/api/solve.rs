@@ -1,6 +1,6 @@
-//! `/solve` hot path: one indexed read over the live proposal rows per
-//! auction order (ADR-0013 — no cache layer until latency data says
-//! otherwise). Zero simulation, zero RPC on this path (ADR-0002).
+//! `/solve` hot path: one indexed read over the live proposal rows per auction
+//! (ADR-0013 — no cache layer until latency data says otherwise). Zero
+//! simulation, zero RPC on this path (ADR-0002).
 
 use {
     super::AppState,

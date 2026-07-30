@@ -642,6 +642,9 @@ impl ProposalStore {
     }
 
     /// List active proposals for a given order UID — the `/solve` view.
+    /// No production callers since `/solve` moved to
+    /// [`Self::active_by_order_uids`]; kept as that function's differential
+    /// oracle in tests.
     pub async fn list_by_order_uid(
         &self,
         order_uid: &OrderUid,
@@ -685,7 +688,18 @@ impl ProposalStore {
 
         let mut grouped: HashMap<OrderUid, Vec<Proposal>> = HashMap::new();
         for row in rows {
-            let proposal = Proposal::try_from(row)?;
+            // Skip an undecodable row rather than failing the batch. With one
+            // query per order a bad row cost only the order that shared its
+            // uid; propagating here would cost every bid in the auction, which
+            // is a much worse trade for a row we wrote ourselves and can only
+            // have corrupted by a bad migration.
+            let proposal = match Proposal::try_from(row) {
+                Ok(proposal) => proposal,
+                Err(e) => {
+                    tracing::error!(%e, "solve: skipping unreadable proposal row");
+                    continue;
+                }
+            };
             grouped
                 .entry(proposal.order_uid.clone())
                 .or_default()
