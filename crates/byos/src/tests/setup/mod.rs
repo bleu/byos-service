@@ -51,11 +51,122 @@ pub fn unix_now() -> u64 {
 // TestDb
 // ---------------------------------------------------------------------------
 
-/// A uniquely-named database created for one test. Left behind on purpose —
-/// the compose Postgres is ephemeral, and keeping it avoids async-drop
-/// gymnastics.
+/// Databases older than this are fair game for the sweep. Comfortably longer
+/// than any tier here takes (the db tier is ~10s, e2e minutes), so a database
+/// still in use by a concurrent run is never a candidate.
+const STALE_AFTER: Duration = Duration::from_secs(3 * 3600);
+
+/// Prefix every test database shares, so the sweep can recognize its own.
+const TEST_DB_PREFIX: &str = "byos_test_";
+
+/// A uniquely-named database created for one test. Dropped by the sweep in
+/// [`TestDb::create`] rather than in `Drop`, which would need blocking IO in a
+/// destructor.
 pub struct TestDb {
     pub url: String,
+}
+
+/// Drop test databases left by earlier runs.
+///
+/// Nothing dropped these before, so they accumulated one per test per run —
+/// a few thousand after a day of iterating, at which point Postgres starts
+/// failing to allocate shared memory and every db-tier test dies on
+/// "No space left on device". The failure looks like a bug in whatever test
+/// happens to run first, which is what makes it worth fixing rather than
+/// cleaning up by hand.
+///
+/// Age comes from the timestamp already in the name. Individual failures are
+/// ignored: `DROP DATABASE` refuses while connections remain, which is exactly
+/// the outcome wanted if a long-running process still holds one.
+async fn sweep_stale_databases(admin: &PgPool) {
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .saturating_sub(STALE_AFTER)
+        .as_nanos();
+
+    let names: Vec<String> =
+        match sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE $1")
+            .bind(format!("{TEST_DB_PREFIX}%"))
+            .fetch_all(admin)
+            .await
+        {
+            Ok(names) => names,
+            // A sweep is housekeeping; never fail a test over it.
+            Err(_) => return,
+        };
+
+    for name in names {
+        // byos_test_<pid>_<nanos>_<counter>
+        let Some(nanos) = name
+            .strip_prefix(TEST_DB_PREFIX)
+            .and_then(|rest| rest.split('_').nth(1))
+            .and_then(|nanos| nanos.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        if nanos >= cutoff {
+            continue;
+        }
+        let _ = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{name}""#))
+            .execute(admin)
+            .await;
+    }
+}
+
+/// The sweep drops databases past the window and leaves the rest alone.
+///
+/// Without it these accumulated one per test per run until Postgres ran out of
+/// shared memory and every db-tier test failed on "No space left on device" —
+/// so a regression here is invisible until it takes the whole tier down.
+/// Names are seeded directly rather than by creating real test databases,
+/// because the point is the age filter, and a fresh `TestDb` cannot be old.
+#[ignore]
+#[tokio::test]
+async fn the_sweep_drops_stale_test_databases_and_spares_current_ones() {
+    let admin = PgPool::connect(&format!("{}/postgres", admin_url()))
+        .await
+        .expect("test Postgres unreachable — run `docker compose up -d postgres`");
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch");
+    // A pid no test process will use, so this cannot collide with a live run.
+    let stale = format!(
+        "{TEST_DB_PREFIX}999999_{}_0",
+        (now - STALE_AFTER * 2).as_nanos()
+    );
+    let current = format!("{TEST_DB_PREFIX}999999_{}_1", now.as_nanos());
+
+    for name in [&stale, &current] {
+        sqlx::query(&format!(r#"CREATE DATABASE "{name}""#))
+            .execute(&admin)
+            .await
+            .expect("seed database");
+    }
+
+    sweep_stale_databases(&admin).await;
+
+    let survivors: Vec<String> =
+        sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE $1")
+            .bind(format!("{TEST_DB_PREFIX}999999_%"))
+            .fetch_all(&admin)
+            .await
+            .expect("list survivors");
+
+    // Clean up before asserting, so a failure does not leave seeds behind.
+    let _ = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{current}""#))
+        .execute(&admin)
+        .await;
+
+    assert!(
+        !survivors.contains(&stale),
+        "a database past the window must be dropped"
+    );
+    assert!(
+        survivors.contains(&current),
+        "a database inside the window must survive — a concurrent run may be using it"
+    );
 }
 
 impl TestDb {
@@ -69,7 +180,7 @@ impl TestDb {
             .unwrap()
             .as_nanos();
         let name = format!(
-            "byos_test_{}_{}_{}",
+            "{TEST_DB_PREFIX}{}_{}_{}",
             std::process::id(),
             nanos,
             COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -78,6 +189,17 @@ impl TestDb {
         let admin = PgPool::connect(&format!("{}/postgres", admin_url()))
             .await
             .expect("test Postgres unreachable — run `docker compose up -d postgres`");
+
+        // Once per process. nextest gives each test its own process, so this is
+        // effectively once per test — the steady-state cost is a single indexed
+        // scan of pg_database that finds nothing.
+        static SWEPT: std::sync::Once = std::sync::Once::new();
+        let mut sweep = false;
+        SWEPT.call_once(|| sweep = true);
+        if sweep {
+            sweep_stale_databases(&admin).await;
+        }
+
         sqlx::query(&format!(r#"CREATE DATABASE "{name}""#))
             .execute(&admin)
             .await

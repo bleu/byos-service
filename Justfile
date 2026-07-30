@@ -19,6 +19,26 @@ test-unit:
 test-db:
     cargo nextest run -p byos --run-ignored ignored-only
 
+# Drop every leftover per-test database. The harness sweeps ones older than a
+# few hours on its own, so this is for reclaiming space now — after a heavy
+# session, or when Postgres starts refusing connections with
+# "No space left on device".
+test-db-clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # One psql invocation, not one per database: `docker compose exec` reads
+    # stdin, so calling it inside a `while read` loop swallows the list and
+    # drops exactly one.
+    names=$(docker compose exec -T postgres psql -U postgres -tAc \
+        "SELECT datname FROM pg_database WHERE datname LIKE 'byos_test_%'" | sed '/^$/d')
+    if [ -z "$names" ]; then echo "no leftover test databases"; exit 0; fi
+    printf 'dropping %s test database(s)\n' "$(printf '%s\n' "$names" | wc -l | tr -d ' ')"
+    printf '%s\n' "$names" \
+        | sed 's/.*/DROP DATABASE IF EXISTS "&";/' \
+        | docker compose exec -T postgres psql -U postgres -q
+    printf '%s remaining\n' "$(docker compose exec -T postgres psql -U postgres -tAc \
+        "SELECT count(*) FROM pg_database WHERE datname LIKE 'byos_test_%'" | tr -d ' ')"
+
 # E2e tier 1: byos + reference subsolver in-process against plain anvil
 # (preloaded state file). Ignored by default; single-threaded (shared chain state).
 test-e2e:
