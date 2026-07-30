@@ -38,6 +38,26 @@ pub enum StoreError {
     },
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    /// A stored row cannot be read back into a domain type. Split from
+    /// `Database` because the two want opposite handling: a connection blip is
+    /// worth retrying next tick, a row that will never parse is not, and
+    /// packing both into `Database` meant callers retried the unparseable one
+    /// forever with no way to tell them apart except by matching on the
+    /// message (ADR-0007: split by what the caller should do).
+    #[error("corrupt proposals.{column}: {detail}")]
+    CorruptRow {
+        column: &'static str,
+        detail: String,
+    },
+}
+
+impl StoreError {
+    /// Whether retrying the same call could plausibly succeed. `false` means
+    /// the data is the problem, so the caller should surface it and move on
+    /// rather than spend a tick on it every pass.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Database(_))
+    }
 }
 
 pub struct ProposalStore {
@@ -770,10 +790,11 @@ struct ProposalRow {
 }
 
 /// Wrap a column parse failure as a database error.
-fn corrupt(column: &str, err: impl std::fmt::Display) -> StoreError {
-    StoreError::Database(sqlx::Error::Decode(
-        format!("corrupt proposals.{column}: {err}").into(),
-    ))
+fn corrupt(column: &'static str, err: impl std::fmt::Display) -> StoreError {
+    StoreError::CorruptRow {
+        column,
+        detail: err.to_string(),
+    }
 }
 
 impl TryFrom<ProposalRow> for Proposal {
@@ -1034,6 +1055,45 @@ mod tests {
         let event = audit.try_recv().expect("transition should emit an event");
         assert_eq!(event.proposal_id(), id);
         assert_eq!(event.event_type(), "expired");
+    }
+
+    /// An unreadable row is its own error, distinguishable from a connection
+    /// blip without matching on the message.
+    ///
+    /// Both used to be `Database`, so a caller that retried transient failures
+    /// retried a row that could never parse on every tick, forever.
+    #[ignore]
+    #[tokio::test]
+    async fn an_unparseable_row_is_not_reported_as_a_transient_failure() {
+        let (store, _audit, pool) = test_store_with_pool().await;
+        let id = store
+            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .await
+            .expect("insert");
+
+        // A status string no `ProposalStatus` will parse — what a bad
+        // migration or hand-edit leaves behind.
+        sqlx::query("UPDATE proposals SET status = 'not-a-status' WHERE id = $1")
+            .bind(as_db_id(id).expect("db-assigned id"))
+            .execute(&pool)
+            .await
+            .expect("corrupt the row");
+
+        let err = store.get(id).await.expect_err("row cannot be read back");
+        assert!(
+            matches!(
+                err,
+                StoreError::CorruptRow {
+                    column: "status",
+                    ..
+                }
+            ),
+            "expected a CorruptRow naming the column, got {err:?}"
+        );
+        assert!(
+            !err.is_transient(),
+            "retrying an unparseable row can never succeed"
+        );
     }
 
     /// Acceptance (COW-1205): the audit trail records the debit with its
