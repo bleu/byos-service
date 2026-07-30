@@ -1219,17 +1219,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "byos-watcher"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "byos-common",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "byte-slice-cast"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

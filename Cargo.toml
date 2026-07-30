@@ -16,7 +16,6 @@ license = "GPL-3.0-or-later"
 # Internal crates
 byos = { path = "crates/byos" }
 byos-common = { path = "crates/byos-common" }
-byos-watcher = { path = "crates/byos-watcher" }
 e2e = { path = "crates/e2e" }
 proposal-dto = { path = "crates/proposal-dto" }
 subsolver = { path = "crates/subsolver" }

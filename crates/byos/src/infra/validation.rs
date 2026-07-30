@@ -19,8 +19,9 @@ use {
 
 /// Spawn the background validation loop: one [`run_tick`] every `period`.
 ///
-/// The task runs for the life of the process; it is torn down with the
-/// runtime on shutdown.
+/// Holds the store, and with it an audit sender, so shutdown must abort it
+/// before draining the audit writer — see `run.rs`, where skipping that
+/// hangs the drain.
 pub fn spawn(
     store: Arc<ProposalStore>,
     validator: impl ValidateProposal + 'static,

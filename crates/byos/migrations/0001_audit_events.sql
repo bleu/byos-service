@@ -1,7 +1,8 @@
--- Append-only audit trail (ADR-0001: in-memory hot path + async write-behind).
+-- Append-only audit trail (ADR-0001: async write-behind).
 -- Evidence for slash disputes (ADR-0003): Track B claims arrive up to 3 months
--- post-trade, so records must outlive the hot store. No deletion path — any
--- future retention policy must keep at least that window plus dispute time.
+-- post-trade, so records must outlive the proposal rows they describe, which
+-- the retention sweep deletes (ADR-0013). No deletion path here — any future
+-- retention policy must keep at least that window plus dispute time.
 CREATE TABLE audit_events (
     id                 BIGSERIAL PRIMARY KEY,
     proposal_id        BIGINT      NOT NULL,
