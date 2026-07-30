@@ -92,8 +92,8 @@ fn public_router(state: AppState) -> Router {
         .route("/proposal/{id}", delete(routes::cancel_proposal))
         .route("/proposals/{order_uid}", get(routes::list_proposals))
         .route(
-            "/proposals/by-solver",
-            get(routes::list_proposals_by_solver),
+            "/proposals/by-sub-solver",
+            get(routes::list_proposals_by_sub_solver),
         )
         .with_state(state)
 }
@@ -727,7 +727,7 @@ mod tests {
 
     #[ignore]
     #[tokio::test]
-    async fn list_by_solver_uses_signer_identity() {
+    async fn list_by_sub_solver_uses_signer_identity() {
         let state = test_state().await;
         let caller = alloy::signers::local::PrivateKeySigner::random();
         let competitor = address!("0000000000000000000000000000000000000002");
@@ -737,7 +737,7 @@ mod tests {
 
         let header = read_auth_header(&caller, &state).await;
 
-        let (status, json) = get(state, "/proposals/by-solver", Some(&header)).await;
+        let (status, json) = get(state, "/proposals/by-sub-solver", Some(&header)).await;
 
         assert_eq!(status, StatusCode::OK);
         let proposals = json["proposals"].as_array().unwrap();
@@ -750,8 +750,8 @@ mod tests {
     #[tokio::test]
     async fn get_proposal_without_signature_is_rejected() {
         let state = test_state().await;
-        let solver = address!("0000000000000000000000000000000000000001");
-        let id = insert_proposal(&state, solver).await;
+        let sub_solver = address!("0000000000000000000000000000000000000001");
+        let id = insert_proposal(&state, sub_solver).await;
 
         let (status, _) = get(state, &format!("/proposal/{id}"), None).await;
 
@@ -873,7 +873,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/proposals/by-solver")
+                    .uri("/proposals/by-sub-solver")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -203,13 +203,13 @@ pub async fn list_proposals(
 }
 
 // ---------------------------------------------------------------------------
-// GET /proposals/by-solver
+// GET /proposals/by-sub-solver
 // ---------------------------------------------------------------------------
 
 /// Lists the caller's own active proposals. The caller's identity comes
 /// entirely from the `X-Signature` header — there is no address parameter
 /// (ADR-0011).
-pub async fn list_proposals_by_solver(
+pub async fn list_proposals_by_sub_solver(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ListProposalsResponse>, Error> {

@@ -206,9 +206,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
-  /proposals/by-solver:
+  /proposals/by-sub-solver:
     get:
-      operationId: listProposalsBySolver
+      operationId: listProposalsBySubSolver
       summary: List the caller's own proposals.
       description: |
         Lists the caller's proposals across all orders. Identity comes

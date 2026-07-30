@@ -20,7 +20,7 @@ All proposal GET endpoints require an EIP-712 signature in the `X-Signature` hea
 
 - `GET /proposal/{id}` — returns the proposal only if the recovered signer is its sub-solver.
 - `GET /proposals/{order_uid}` — returns only the caller's own proposals on that order; competitors' proposals are invisible.
-- `GET /proposals/by-solver` — returns the caller's proposals. The address path parameter was dropped: identity comes entirely from the signature, so an address in the URL would be either redundant or a mismatch error for a value the server already knows.
+- `GET /proposals/by-sub-solver` — returns the caller's proposals. The address path parameter was dropped: identity comes entirely from the signature, so an address in the URL would be either redundant or a mismatch error for a value the server already knows.
 
 ### The read token is a bearer signature
 
@@ -50,7 +50,7 @@ Signed once, sent on every request. No timestamp, no nonce, no path binding — 
 - **Timestamp with validity window in the signed message.** Bounds how long a captured signature stays usable. Rejected — the leak it defends against yields read-only access to the attacker-chosen victim's own data, while the clock-sync failure mode hits every honest integrator.
 - **Nonce with server-side replay tracking.** Strongest replay protection. Rejected — introduces per-signer state the service deliberately avoids, for the same marginal benefit as the timestamp.
 - **Path binding (sign the request path).** Rejected — every read is already scoped to the signer regardless of path, so binding the path adds signing complexity without changing what a replayed signature can reach.
-- **Keep the address path parameter on the by-solver route and verify it matches the signer.** Rejected — the parameter is decorative once identity comes from the signature; a mismatch is just a confusing error.
+- **Keep the address path parameter on the by-sub-solver route and verify it matches the signer.** Rejected — the parameter is decorative once identity comes from the signature; a mismatch is just a confusing error.
 - **403 for non-owner reads.** Honest, but an existence oracle. Rejected.
 
 ## Consequences

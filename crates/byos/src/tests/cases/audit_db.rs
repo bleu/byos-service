@@ -36,13 +36,13 @@ async fn audit_db_write_behind_round_trip() {
     assert_eq!(resp.status(), 204);
 
     let rows = setup::wait_for_audit_rows(&db.pool().await, 2).await;
-    let expected_solver = format!("{:#x}", signer.address());
+    let expected_sub_solver = format!("{:#x}", signer.address());
     let expected_uid = alloy::hex::encode_prefixed(order_uid);
 
     let received = &rows[0];
     assert_eq!(received.event_type, "received");
     assert_eq!(received.proposal_id, i64::try_from(id).unwrap());
-    assert_eq!(received.sub_solver, expected_solver);
+    assert_eq!(received.sub_solver, expected_sub_solver);
     assert_eq!(received.order_uid, expected_uid);
     assert_eq!(received.settlement_tx_hash, None);
     assert_eq!(received.payload["sellAmount"], "1000000");
@@ -57,7 +57,7 @@ async fn audit_db_write_behind_round_trip() {
     let cancelled = &rows[1];
     assert_eq!(cancelled.event_type, "cancelled");
     assert_eq!(cancelled.proposal_id, received.proposal_id);
-    assert_eq!(cancelled.sub_solver, expected_solver);
+    assert_eq!(cancelled.sub_solver, expected_sub_solver);
     assert_eq!(cancelled.payload, serde_json::json!({}));
 
     app.stop().await;
