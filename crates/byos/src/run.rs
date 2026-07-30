@@ -35,15 +35,17 @@ pub(crate) struct Args {
     #[arg(long, env, default_value_t = false)]
     json_logs: bool,
 
-    /// Public API listener address (proposals endpoints).
-    #[arg(long, env, default_value = "0.0.0.0:8080")]
+    /// Public API listener address (proposals endpoints). Loopback by
+    /// default so a dev instance does not land on the LAN; deployments set
+    /// the bind address explicitly anyway.
+    #[arg(long, env, default_value = "127.0.0.1:9585")]
     public_addr: SocketAddr,
 
     /// Internal API listener address (`/solve`). Only our co-deployed driver
     /// may call `/solve` — the proposal book it returns is MEV-relevant — so
     /// keep this address unreachable from the internet (COW-1174). Defaults
     /// to loopback.
-    #[arg(long, env, default_value = "127.0.0.1:8081")]
+    #[arg(long, env, default_value = "127.0.0.1:9586")]
     internal_addr: SocketAddr,
 
     /// Optional shared secret for `/solve`: when set, requests must carry

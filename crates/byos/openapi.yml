@@ -69,10 +69,10 @@ info:
     url: https://www.gnu.org/licenses/gpl-3.0.html
 
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:9585
     description: |
       The public listener's bind address is deployment-specific
-      (`--public-addr`, default port 8080); there is no canonical
+      (`--public-addr`, default port 9585); there is no canonical
       production URL yet.
 
 paths:
