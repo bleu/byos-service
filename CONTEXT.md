@@ -12,9 +12,9 @@ This repo holds the off-chain half of that design: the **BYOS service** (`crates
 
 - **Sub-solver** — an external, permissionless party that computes a route for a specific order and submits a signed **proposal** to BYOS. Never holds submission keys; never calls settle. Identified by its address (recovered from its EIP-712 signature); that same address is its escrow key and its Trampoline CREATE2 salt.
 - **Proposal** — an EIP-712-signed message `{order_uid, sell_amount, buy_amount, interactions, valid_until, nonce, signature}` authorizing BYOS to attempt a settlement of those interactions and consenting to the associated escrow risk. The signer address is the escrow key — there is no separate `escrow_account` field ([ADR-0001](docs/adr/0001-proposal-api.md)). Expires at `valid_until`, on settlement, on simulation failure, when the order is otherwise filled/cancelled, or on signed `DELETE`.
-- **BYOS engine** — the **solver engine** half of a CoW driver + solver pair (the driver is a standard CoW driver, unmodified, with `SolutionMerging::Forbidden`). Scores proposals internally using `score = surplus + fee - gas` and answers the driver's `/solve` with the single highest-scoring proposal per order UID from the in-memory proposal store, each wrapped in one Trampoline `execute` call ([ADR-0002](docs/adr/0002-solver-engine.md)).
-- **Ingestion** — the synchronous `POST /proposals` pipeline: IP filter → parse + `ecrecover` → signer rate limit → cached escrow check → gatekeeping + simulation → store with cached score. Answers with the proposal id or a machine-readable 4xx ([ADR-0001](docs/adr/0001-proposal-api.md)).
-- **Proposal store** — the in-memory hot store serving `/solve` with no RPC or DB on the auction-critical path; rebuilt from fresh submissions on restart. Distinct from the **audit trail**.
+- **BYOS engine** — the **solver engine** half of a CoW driver + solver pair (the driver is a standard CoW driver, unmodified, with `SolutionMerging::Forbidden`). Scores proposals internally using `score = surplus + fee - gas` and answers the driver's `/solve` with the single highest-scoring proposal per order UID, each wrapped in one Trampoline `execute` call ([ADR-0002](docs/adr/0002-solver-engine.md)).
+- **Ingestion** — the `POST /proposals` pipeline: parse + `ecrecover` → expiry and lifetime checks → store as `submitted`. Answers with the proposal id or a machine-readable 4xx. Escrow checks and simulation are *not* on this path: the background validation loop does them and moves the proposal to `active` or a rejection ([ADR-0001](docs/adr/0001-proposal-api.md), [ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md)).
+- **Proposal store** — the `proposals` table in Postgres: the single source of truth for current proposal state, read and written by `GET`, `/solve`, `/notify`, and the validation loop. Live proposals survive a restart; terminal ones are swept after their retention window ([ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md)). Distinct from the **audit trail**.
 - **Audit trail** — the async write-behind persistence of every proposal (≥3-month retention) used as dispute evidence for Track B claims. Operational logs are not the audit trail.
 - **Gatekeeping** — BYOS's *preventive* control: validating each proposal (simulation, hook presence, EBBO baseline price) before settling. Distinct from escrow, which is *recovery*. Best-effort and non-exculpatory — passing gatekeeping does not absolve a sub-solver ([ADR-0003](docs/adr/0003-slash-attribution-flow.md)).
 - **Continuous simulation** — the background loop re-simulating standing proposals every 3–5 blocks; reverting proposals are permanently dropped and sub-solvers resubmit via their polling loops.
@@ -37,7 +37,7 @@ This repo holds the off-chain half of that design: the **BYOS service** (`crates
 4. **Reference sub-solver** (`crates/subsolver`) — example client and e2e-test counterpart.
 5. Plus: operational runbook + monitoring ([ADR-0008](docs/adr/0008-observability.md)).
 
-Process topology: **one process, two listeners** — a public port for `/proposals` and a firewalled internal port for `/solve`, sharing the in-memory proposal store ([ADR-0001](docs/adr/0001-proposal-api.md)).
+Process topology: **one process, two listeners** — a public port for `/proposals` and a firewalled internal port for `/solve` and `/notify`, sharing the Postgres proposal store ([ADR-0001](docs/adr/0001-proposal-api.md), [ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md)).
 
 v1 targets **Ethereum mainnet + Gnosis**. Out of scope: BYOS-operated orderbook, reward pass-through to sub-solvers, cross-chain escrow accounting, BYOS's own bonding capital.
 
@@ -57,7 +57,7 @@ v1 targets **Ethereum mainnet + Gnosis**. Out of scope: BYOS-operated orderbook,
 - Simulation failures cost the sub-solver **nothing** (rate-limit only); only on-chain failures debit escrow.
 - The API is **permissionless + collateral-gated**, not allowlisted — the escrow deposit *is* the permission.
 - The escrow contract is a dumb ledger; the service is the brain — reserve calculations, proposal eligibility, gatekeeping, attribution, and dispute handling all live here.
-- The `/solve` hot path is in-memory only: no simulation, no RPC, no DB. SLO targets and their reasoning: [`docs/metrics-reasoning.md`](docs/metrics-reasoning.md).
+- The `/solve` hot path does no simulation and no RPC — one indexed read over the live proposal rows, nothing more ([ADR-0013](docs/adr/0013-proposal-lifecycle-and-retention.md) revisited ADR-0001's no-DB rule). SLO targets and their reasoning: [`docs/metrics-reasoning.md`](docs/metrics-reasoning.md).
 
 ## Related repositories
 

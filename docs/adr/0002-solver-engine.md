@@ -61,7 +61,7 @@ Heavy validation runs at **proposal ingestion** (`POST /proposals`), per [ADR-00
 - Fee gate — proposal's surplus must cover BYOS fee (`surplus >= fee_rate × sellAmount`, both sides in native token — see §Fee mechanism)
 - Rate limiting (IP-based + signer-based, escrow-tiered)
 
-Cheap validation runs at **`/solve` time** (in-memory, no RPC):
+Cheap validation runs at **`/solve` time** (local computation, no RPC):
 
 - Expiry, order liveness, amount matching against the auction's order state, escrow re-check, scoring + best-per-order selection with the non-positive-score drop (as above)
 
@@ -115,15 +115,21 @@ As defense-in-depth, `--solve-bearer-token` optionally requires `Authorization: 
 
 ### `/solve` latency: non-issue by design
 
-The entire `/solve` hot path is served from an in-memory cache with local computation only:
+The storage half of this section is superseded by
+[ADR-0013](0013-proposal-lifecycle-and-retention.md#storage-postgres-is-the-proposal-store):
+the in-memory hot store is gone, and `/solve` reads the `proposals` table. The
+latency argument survives the change — one indexed read over a few hundred live
+rows is about a millisecond — and the rest of the path is unchanged:
 
 1. Receive auction, deserialize orders — fast
-2. Scan proposal cache per order UID — O(proposals per order), in-memory
-3. Pre-filter: expiry, liveness, escrow re-check (cached), scoring — microseconds
+2. One indexed read for the auction's order uids — ~1ms
+3. Pre-filter: expiry, liveness, scoring — microseconds
 4. Encode two interactions (ERC-20 transfer + Trampoline execute) — keccak256 + ABI encoding, sub-millisecond per proposal
 5. Return `Vec<Solution>`
 
-No simulation, no RPC calls, no database queries on the hot path. All expensive work happens at ingestion (simulation, signature verification, escrow check) or during continuous simulation (periodic re-simulation). The design naturally meets any reasonable `/solve` SLO.
+No simulation and no RPC calls on the hot path. The expensive work happens in
+the background validation loop (simulation, escrow check). The design meets any
+reasonable `/solve` SLO.
 
 ## Open questions (not settled, flagged for discussion)
 
@@ -147,7 +153,7 @@ No simulation, no RPC calls, no database queries on the hot path. All expensive 
 
 ## Consequences
 
-- **BYOS is a thin layer with internal scoring.** The engine's `/solve` serves scored proposals from an in-memory cache with two-interaction Trampoline encoding (ERC-20 transfer + execute). Scoring uses cached values from ingestion-time simulation (surplus, gas estimate). The driver still performs its own scoring after encoding — BYOS's score is a pre-ranking, not the final word.
+- **BYOS is a thin layer with internal scoring.** The engine's `/solve` scores the live proposal rows and encodes two Trampoline interactions (ERC-20 transfer + execute). Scoring uses the gas the background simulation stored on each proposal. The driver still performs its own scoring after encoding — BYOS's score is a pre-ranking, not the final word.
 - **Scoring divergence from the driver.** BYOS's `surplus + fee - gas` uses cached gas estimates and reference prices, which may diverge from the driver's post-encoding gas simulation and real-time price feeds. Because BYOS sends a single proposal per order, there is no fallback if the selected proposal fails the driver's post-encoding re-simulation — BYOS loses that order for that auction round. Accepted: the divergence is marginal in practice (gas estimates are close, surplus dominates for competitive proposals), and sub-solvers naturally resubmit via their polling loop.
 - **No batching means lower theoretical maximum score.** Single-order solutions can't capture CoW surplus or batching efficiencies. BYOS competes on single-order execution quality. Acceptable in v1 — the target use case is "execution against a baseline the sub-solver computed."
 - **Self-contained chain monitoring is additional infrastructure.** BYOS must run a settlement watcher, parse `GPv2Settlement` events, and map Trampoline addresses to sub-solvers. This piggybacks on the block-subscription infra needed for continuous simulation, but is still operational surface area.

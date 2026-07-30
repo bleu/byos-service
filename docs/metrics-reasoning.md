@@ -58,13 +58,13 @@ This is conservative relative to the market — 14 trades/day represents ~0.14% 
 
 ### BYOS API responses p99
 
-**`GET /proposals/{subsolver_address}` p99 < 50ms**
+**`GET /proposals/by-solver` p99 < 50ms**
 
-This endpoint lists a sub-solver's active/recent proposals. Served from an in-memory cache filtered by address. Even with hundreds of active proposals, this is a straightforward cache lookup.
+This endpoint lists a sub-solver's active proposals. One indexed read scoped to the caller's own address (ADR-0011). Even with hundreds of active proposals, this is a single query.
 
-**`GET /solve` p99 < 100ms**
+**`POST /solve` p99 < 100ms**
 
-The hot path called by the CoW driver during auctions. The driver gives solvers a 15-second deadline (configurable via `solve_deadline` in the autopilot), but BYOS serves entirely from an in-memory cache — no simulation, no RPC, no DB queries. It picks the highest-scoring proposal per order UID and returns it. 100ms is conservative relative to the 15s deadline but ensures BYOS is never a bottleneck in the auction cycle.
+The hot path called by the CoW driver during auctions. The driver gives solvers a 15-second deadline (configurable via `solve_deadline` in the autopilot); BYOS does no simulation and no RPC here, just one indexed read over the live proposal rows for the auction's order uids, then scoring and encoding in memory (ADR-0013 revisited ADR-0001's no-DB rule on the grounds that an indexed read over a few hundred rows is about a millisecond). 100ms is conservative relative to the 15s deadline but ensures BYOS is never a bottleneck in the auction cycle.
 
 ### Proposal ingestion time p99 < 1s
 

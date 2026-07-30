@@ -62,7 +62,8 @@ pub(crate) struct Args {
     #[arg(long, env)]
     trampoline_factory: alloy::primitives::Address,
 
-    /// Postgres URL for the audit trail (ADR-0001 write-behind). Required:
+    /// Postgres URL for the proposal store and the audit trail (ADR-0013,
+    /// ADR-0001 write-behind). Required:
     /// the service refuses to boot without its evidence store. Prefer the
     /// DATABASE_URL env var in production — CLI arguments (and the password
     /// in this one) are visible to other users via `ps`.

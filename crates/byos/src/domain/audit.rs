@@ -1,7 +1,8 @@
-//! Audit events — the durable evidence trail (ADR-0001: in-memory hot path +
-//! async write-behind). The store emits one event per mutation; an infra
-//! writer task persists them to Postgres. Track B slash claims (ADR-0003) can
-//! arrive months after a trade, so these records outlive the hot store.
+//! Audit events — the durable evidence trail (ADR-0001: async write-behind).
+//! The store emits one event per mutation; an infra writer task persists them
+//! to Postgres. Track B slash claims (ADR-0003) can arrive months after a
+//! trade, so these records outlive the proposal rows they describe, which the
+//! retention sweep deletes (ADR-0013).
 
 use {
     super::{
