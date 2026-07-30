@@ -87,13 +87,25 @@ local-database := "byos_dev"
 byos-local:
     #!/usr/bin/env bash
     set -euo pipefail
-    docker compose up -d postgres
+    # `--wait` blocks on the compose healthcheck. Plain `up -d` returns once
+    # the container has started, which on a cold container is well before
+    # Postgres accepts connections — the psql below then dies on "the database
+    # system is starting up".
+    docker compose up -d --wait postgres
     # `connect_and_migrate` migrates but does not create, so the database has
-    # to exist before the service boots.
-    docker compose exec -T postgres psql -U postgres -tAc \
-        "SELECT 1 FROM pg_database WHERE datname = '{{local-database}}'" | grep -q 1 \
-        || docker compose exec -T postgres psql -U postgres -q \
+    # to exist before the service boots, and Postgres has no CREATE DATABASE
+    # IF NOT EXISTS.
+    #
+    # Deliberately not `psql ... | grep -q 1 || createdb`: that pipeline reads
+    # a psql that could not answer as "no database" and tries to create one
+    # that is already there. Capturing first keeps the two apart — `set -e`
+    # aborts on a psql that failed, and only a genuine empty result creates.
+    exists=$(docker compose exec -T postgres psql -U postgres -tAc \
+        "SELECT 1 FROM pg_database WHERE datname = '{{local-database}}'")
+    if [ -z "$exists" ]; then
+        docker compose exec -T postgres psql -U postgres -q \
             -c 'CREATE DATABASE {{local-database}}'
+    fi
     # 2s rather than the 12s default: right for production, too slow for a
     # tool you re-run while debugging.
     cargo run -p byos -- \
