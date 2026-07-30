@@ -101,8 +101,26 @@ mod tests {
     const DEBIT_TX: B256 =
         b256!("7777777777777777777777777777777777777777777777777777777777777777");
 
-    /// A receipt in the shape `eth_getTransactionReceipt` returns.
+    /// A receipt in the shape `eth_getTransactionReceipt` returns, for a
+    /// transaction that succeeded.
     fn receipt_json(hash: B256, gas_used: u64, effective_gas_price: u128) -> serde_json::Value {
+        receipt_json_with_status(hash, gas_used, effective_gas_price, true)
+    }
+
+    /// As [`receipt_json`], with the success bit spelled out — a reverted
+    /// transaction still produces a receipt, just with `status: 0x0`.
+    fn receipt_json_with_status(
+        hash: B256,
+        gas_used: u64,
+        effective_gas_price: u128,
+        succeeded: bool,
+    ) -> serde_json::Value {
+        let mut receipt = receipt_body(hash, gas_used, effective_gas_price);
+        receipt["status"] = serde_json::json!(if succeeded { "0x1" } else { "0x0" });
+        receipt
+    }
+
+    fn receipt_body(hash: B256, gas_used: u64, effective_gas_price: u128) -> serde_json::Value {
         serde_json::json!({
             "transactionHash": hash,
             "transactionIndex": "0x0",
@@ -126,6 +144,9 @@ mod tests {
     /// confirms it as [`DEBIT_TX`].
     struct RpcResponder {
         sent: Arc<Mutex<Option<Bytes>>>,
+        /// When false, the debit's receipt comes back with `status: 0x0` —
+        /// the tx was mined but the call reverted.
+        debit_succeeds: bool,
     }
 
     impl wiremock::Respond for RpcResponder {
@@ -155,7 +176,12 @@ mod tests {
                         // 200_000 gas at 30 gwei: 0.006 ETH on-chain cost.
                         receipt_json(SETTLEMENT_TX, 200_000, 30_000_000_000)
                     } else {
-                        receipt_json(DEBIT_TX, 50_000, 1_000_000_000)
+                        receipt_json_with_status(
+                            DEBIT_TX,
+                            50_000,
+                            1_000_000_000,
+                            self.debit_succeeds,
+                        )
                     }
                 }
                 other => panic!("unexpected RPC method {other}"),
@@ -171,10 +197,18 @@ mod tests {
     /// Mounts the responder and returns the server plus the captured raw
     /// debit tx slot.
     async fn rpc_server() -> (MockServer, Arc<Mutex<Option<Bytes>>>) {
+        rpc_server_with(true).await
+    }
+
+    /// As [`rpc_server`], choosing whether the debit lands or reverts on-chain.
+    async fn rpc_server_with(debit_succeeds: bool) -> (MockServer, Arc<Mutex<Option<Bytes>>>) {
         let sent = Arc::new(Mutex::new(None));
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(RpcResponder { sent: sent.clone() })
+            .respond_with(RpcResponder {
+                sent: sent.clone(),
+                debit_succeeds,
+            })
             .mount(&server)
             .await;
         (server, sent)
@@ -203,6 +237,38 @@ mod tests {
             cost,
             U256::from(6_000_000_000_000_000u64),
             "200_000 gas at 30 gwei must price as 0.006 ETH"
+        );
+    }
+
+    /// A debit that is mined but reverts must not read as a landed charge.
+    ///
+    /// `debit` submits, waits for the receipt, and only then checks
+    /// `receipt.status()`. Nothing exercised the false branch, so a regression
+    /// that dropped or inverted it would return a tx hash for a transaction
+    /// that moved no money: the penalty loop would call `record_penalty`, the
+    /// proposal would read `Penalized` citing a failed tx, escrow would never
+    /// be charged, and the audit trail would assert the opposite of what
+    /// happened.
+    #[tokio::test]
+    async fn a_reverted_debit_is_a_failure_not_a_landed_charge() {
+        let (server, sent) = rpc_server_with(false).await;
+        let operator = operator_at(server.uri());
+
+        operator
+            .debit(
+                SUB_SOLVER,
+                U256::from(16_000_000_000_000_000u64),
+                SETTLEMENT_TX,
+            )
+            .await
+            .expect_err("a reverted debit must not resolve as success");
+
+        // No assertion on the variant: `DebitError` has exactly one, so
+        // `matches!` could not fail. `expect_err` above *is* the behaviour —
+        // a mined-but-reverted receipt must not resolve as a landed charge.
+        assert!(
+            sent.lock().unwrap().is_some(),
+            "the tx was submitted — the failure is the receipt, not the send"
         );
     }
 

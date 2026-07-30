@@ -1615,23 +1615,42 @@ mod tests {
     #[tokio::test]
     async fn sweep_deletes_dropped_proposals_past_the_window() {
         let (store, _audit, pool) = test_store_with_pool().await;
-        let uid = test_order_uid();
-        let id = store
-            .insert(test_proposal(uid, SOLVER_A, ProposalStatus::Cancelled))
-            .await
-            .expect("insert");
-        backdate_status_change(&pool, id, 7200.0).await;
+        // Every dropped-tier status, not just one: the money-state test
+        // already loops over all six it must spare, and asserting only
+        // `Cancelled` here meant a status quietly dropped from `DROPPED` would
+        // leave the table growing without failing anything — the COW-1177 leak
+        // ADR-0013 set out to close.
+        let mut ids = Vec::new();
+        for (i, status) in [
+            ProposalStatus::Rejected,
+            ProposalStatus::SimFailed,
+            ProposalStatus::Expired,
+            ProposalStatus::Cancelled,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let uid = OrderUid([u8::try_from(i).expect("few statuses"); 56]);
+            let id = store
+                .insert(test_proposal(uid, SOLVER_A, status))
+                .await
+                .expect("insert");
+            backdate_status_change(&pool, id, 7200.0).await;
+            ids.push((status, id));
+        }
 
         let deleted = store
             .sweep_dropped(Duration::from_secs(3600))
             .await
             .expect("sweep");
 
-        assert_eq!(deleted, 1);
-        assert!(
-            store.get(id).await.expect("get").is_none(),
-            "a swept proposal reads as gone (404 on the wire)"
-        );
+        assert_eq!(deleted, 4, "every dropped-tier status is swept");
+        for (status, id) in ids {
+            assert!(
+                store.get(id).await.expect("get").is_none(),
+                "a swept {status} proposal reads as gone (404 on the wire)"
+            );
+        }
     }
 
     #[ignore]
@@ -1770,7 +1789,19 @@ mod tests {
         store.cancel(id, SOLVER_A).await.expect("cancel succeeds");
         let stale = store.resolve_verdict(id, Verdict::Accept(None)).await;
 
-        assert!(stale.is_err(), "stale verdict must be dropped");
+        // The variant matters, not just the failure: `is_err()` would also
+        // accept a connection blip or an unreadable row, neither of which
+        // proves the compare-and-swap did its job.
+        assert!(
+            matches!(
+                stale,
+                Err(StoreError::StaleTransition {
+                    actual: ProposalStatus::Cancelled,
+                    ..
+                })
+            ),
+            "expected the verdict to lose the CAS against Cancelled, got {stale:?}"
+        );
         assert_eq!(
             store.get(id).await.expect("get").expect("exists").status,
             ProposalStatus::Cancelled,
