@@ -1138,8 +1138,8 @@ mod tests {
         tokio::sync::mpsc,
     };
 
-    const SOLVER_A: Address = address!("0000000000000000000000000000000000000001");
-    const SOLVER_B: Address = address!("0000000000000000000000000000000000000002");
+    const SUB_SOLVER_A: Address = address!("0000000000000000000000000000000000000001");
+    const SUB_SOLVER_B: Address = address!("0000000000000000000000000000000000000002");
 
     /// A fresh store on a fresh database, plus the audit receiver so tests
     /// can assert on emitted evidence.
@@ -1197,7 +1197,7 @@ mod tests {
     #[tokio::test]
     async fn insert_and_get_round_trips_every_field() {
         let (store, _audit) = test_store().await;
-        let mut proposal = make_proposal(test_order_uid(), SOLVER_A);
+        let mut proposal = make_proposal(test_order_uid(), SUB_SOLVER_A);
         proposal.interactions = vec![byos_common::contracts::Interaction {
             target: address!("00000000000000000000000000000000000000bb"),
             value: alloy::primitives::U256::from(5u64),
@@ -1249,13 +1249,13 @@ mod tests {
         let (store, mut audit) = test_store().await;
 
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert succeeds");
 
         let event = audit.try_recv().expect("insert should emit an audit event");
         assert_eq!(event.proposal_id(), id);
-        assert_eq!(event.sub_solver(), SOLVER_A);
+        assert_eq!(event.sub_solver(), SUB_SOLVER_A);
         assert_eq!(*event.order_uid(), test_order_uid());
         match event.kind {
             crate::domain::audit::AuditKind::Received { proposal } => {
@@ -1270,7 +1270,7 @@ mod tests {
     async fn transition_updates_status_and_emits_event() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -1511,7 +1511,8 @@ mod tests {
         let penalty_tx = alloy::primitives::b256!(
             "7777777777777777777777777777777777777777777777777777777777777777"
         );
-        let mut proposal = test_proposal(test_order_uid(), SOLVER_A, ProposalStatus::SettleFailed);
+        let mut proposal =
+            test_proposal(test_order_uid(), SUB_SOLVER_A, ProposalStatus::SettleFailed);
         proposal.settlement_tx_hash = Some(settlement_tx);
         let id = store.insert(proposal).await.expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -1528,7 +1529,7 @@ mod tests {
 
         let event = audit.try_recv().expect("penalty should emit an event");
         assert_eq!(event.proposal_id(), id);
-        assert_eq!(event.sub_solver(), SOLVER_A);
+        assert_eq!(event.sub_solver(), SUB_SOLVER_A);
         assert_eq!(event.event_type(), "penalized");
         assert_eq!(
             event.settlement_tx_hash(),
@@ -1551,7 +1552,7 @@ mod tests {
             "7777777777777777777777777777777777777777777777777777777777777777"
         );
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -1573,7 +1574,7 @@ mod tests {
 
         let event = audit.try_recv().expect("debit should emit an event");
         assert_eq!(event.proposal_id(), id);
-        assert_eq!(event.sub_solver(), SOLVER_A);
+        assert_eq!(event.sub_solver(), SUB_SOLVER_A);
         assert_eq!(*event.order_uid(), test_order_uid());
         assert_eq!(event.event_type(), "non_settlement_debited");
         let payload = event.payload();
@@ -1586,7 +1587,7 @@ mod tests {
     async fn stale_transition_emits_nothing() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -1617,7 +1618,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
@@ -1659,7 +1660,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
@@ -1693,7 +1694,7 @@ mod tests {
     #[tokio::test]
     async fn revalidation_of_active_updates_gas_without_an_event() {
         let (store, mut audit) = test_store().await;
-        let mut proposal = make_proposal(test_order_uid(), SOLVER_A);
+        let mut proposal = make_proposal(test_order_uid(), SUB_SOLVER_A);
         proposal.gas_used = Some(100_000);
         let id = store.insert(proposal).await.expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -1729,7 +1730,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Cancelled,
             ))
             .await
@@ -1756,7 +1757,7 @@ mod tests {
     #[tokio::test]
     async fn transition_nonexistent_fails_with_not_found() {
         let (store, _audit) = test_store().await;
-        let mut proposal = make_proposal(test_order_uid(), SOLVER_A);
+        let mut proposal = make_proposal(test_order_uid(), SUB_SOLVER_A);
         proposal.id = ProposalId(999);
         let err = store
             .transition(&proposal, ProposalStatus::Expired)
@@ -1770,19 +1771,22 @@ mod tests {
     async fn cancel_sets_status_and_emits_event() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
 
-        store.cancel(id, SOLVER_A).await.expect("cancel succeeds");
+        store
+            .cancel(id, SUB_SOLVER_A)
+            .await
+            .expect("cancel succeeds");
 
         let fetched = store.get(id).await.expect("get").expect("exists");
         assert_eq!(fetched.status, ProposalStatus::Cancelled);
 
         let event = audit.try_recv().expect("cancel should emit an audit event");
         assert_eq!(event.proposal_id(), id);
-        assert_eq!(event.sub_solver(), SOLVER_A);
+        assert_eq!(event.sub_solver(), SUB_SOLVER_A);
         assert_eq!(*event.order_uid(), test_order_uid());
         assert!(matches!(
             event.kind,
@@ -1795,12 +1799,12 @@ mod tests {
     async fn cancel_wrong_owner_fails_without_evidence() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
 
-        let err = store.cancel(id, SOLVER_B).await.unwrap_err();
+        let err = store.cancel(id, SUB_SOLVER_B).await.unwrap_err();
         assert!(matches!(err, StoreError::NotOwner(_, _)));
         assert!(
             audit.try_recv().is_err(),
@@ -1815,13 +1819,13 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Settled,
             ))
             .await
             .expect("insert");
 
-        let err = store.cancel(id, SOLVER_A).await.unwrap_err();
+        let err = store.cancel(id, SUB_SOLVER_A).await.unwrap_err();
         assert!(matches!(err, StoreError::StaleTransition { .. }));
         assert_eq!(
             store.get(id).await.expect("get").expect("exists").status,
@@ -1837,14 +1841,14 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
             .expect("insert");
 
         store
-            .cancel(id, SOLVER_A)
+            .cancel(id, SUB_SOLVER_A)
             .await
             .expect("cancel before verdict");
         assert_eq!(
@@ -1857,7 +1861,10 @@ mod tests {
     #[tokio::test]
     async fn cancel_nonexistent_fails() {
         let (store, _audit) = test_store().await;
-        let err = store.cancel(ProposalId(999), SOLVER_A).await.unwrap_err();
+        let err = store
+            .cancel(ProposalId(999), SUB_SOLVER_A)
+            .await
+            .unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
     }
 
@@ -1867,25 +1874,25 @@ mod tests {
         let (store, _audit) = test_store().await;
         let uid = test_order_uid();
         store
-            .insert(make_proposal(uid.clone(), SOLVER_A))
+            .insert(make_proposal(uid.clone(), SUB_SOLVER_A))
             .await
             .expect("insert");
         store
-            .insert(make_proposal(uid.clone(), SOLVER_A))
+            .insert(make_proposal(uid.clone(), SUB_SOLVER_A))
             .await
             .expect("insert");
         // Submitted on the same order: not yet gatekept, must not appear.
         store
             .insert(test_proposal(
                 uid.clone(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
             .expect("insert");
         // Active on a different order: must not appear.
         store
-            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
+            .insert(make_proposal(OrderUid([0xbb; 56]), SUB_SOLVER_A))
             .await
             .expect("insert");
 
@@ -1975,31 +1982,31 @@ mod tests {
         store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
             .expect("insert");
         store
-            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
+            .insert(make_proposal(OrderUid([0xbb; 56]), SUB_SOLVER_A))
             .await
             .expect("insert");
         store
             .insert(test_proposal(
                 OrderUid([0xcc; 56]),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Rejected,
             ))
             .await
             .expect("insert");
         store
-            .insert(make_proposal(test_order_uid(), SOLVER_B))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_B))
             .await
             .expect("insert");
 
-        let results = store.list_by_sub_solver(SOLVER_A).await.expect("list");
+        let results = store.list_by_sub_solver(SUB_SOLVER_A).await.expect("list");
         assert_eq!(results.len(), 2, "submitted + active, not the rejected one");
-        assert!(results.iter().all(|p| p.sub_solver == SOLVER_A));
+        assert!(results.iter().all(|p| p.sub_solver == SUB_SOLVER_A));
     }
 
     #[ignore]
@@ -2008,10 +2015,10 @@ mod tests {
         let (store, _audit) = test_store().await;
         let uid = test_order_uid();
         let id = store
-            .insert(make_proposal(uid.clone(), SOLVER_A))
+            .insert(make_proposal(uid.clone(), SUB_SOLVER_A))
             .await
             .expect("insert");
-        store.cancel(id, SOLVER_A).await.expect("cancel");
+        store.cancel(id, SUB_SOLVER_A).await.expect("cancel");
 
         assert!(
             store
@@ -2022,7 +2029,7 @@ mod tests {
         );
         assert!(
             store
-                .list_by_sub_solver(SOLVER_A)
+                .list_by_sub_solver(SUB_SOLVER_A)
                 .await
                 .expect("list")
                 .is_empty()
@@ -2036,19 +2043,19 @@ mod tests {
         store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
             .expect("insert");
         store
-            .insert(make_proposal(OrderUid([0xbb; 56]), SOLVER_A))
+            .insert(make_proposal(OrderUid([0xbb; 56]), SUB_SOLVER_A))
             .await
             .expect("insert");
         store
             .insert(test_proposal(
                 OrderUid([0xcc; 56]),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Expired,
             ))
             .await
@@ -2068,7 +2075,7 @@ mod tests {
     async fn driver_notification_note_leaves_evidence_without_touching_the_row() {
         let (store, mut audit) = test_store().await;
         let id = store
-            .insert(make_proposal(test_order_uid(), SOLVER_A))
+            .insert(make_proposal(test_order_uid(), SUB_SOLVER_A))
             .await
             .expect("insert");
         let _received = audit.try_recv().expect("insert event");
@@ -2097,7 +2104,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Executing,
             ))
             .await
@@ -2127,7 +2134,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Executing,
             ))
             .await
@@ -2168,7 +2175,7 @@ mod tests {
         {
             let uid = OrderUid([u8::try_from(i).expect("few statuses"); 56]);
             let id = store
-                .insert(test_proposal(uid, SOLVER_A, status))
+                .insert(test_proposal(uid, SUB_SOLVER_A, status))
                 .await
                 .expect("insert");
             backdate_status_change(&pool, id, 7200.0).await;
@@ -2196,7 +2203,7 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Rejected,
             ))
             .await
@@ -2231,7 +2238,7 @@ mod tests {
         .enumerate()
         {
             let id = store
-                .insert(test_proposal(OrderUid([i as u8; 56]), SOLVER_A, status))
+                .insert(test_proposal(OrderUid([i as u8; 56]), SUB_SOLVER_A, status))
                 .await
                 .expect("insert");
             backdate_status_change(&pool, id, 7200.0).await;
@@ -2263,7 +2270,7 @@ mod tests {
         let dropped = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Cancelled,
             ))
             .await
@@ -2271,7 +2278,7 @@ mod tests {
         let settled = store
             .insert(test_proposal(
                 OrderUid([0xbb; 56]),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Settled,
             ))
             .await
@@ -2316,13 +2323,16 @@ mod tests {
         let id = store
             .insert(test_proposal(
                 test_order_uid(),
-                SOLVER_A,
+                SUB_SOLVER_A,
                 ProposalStatus::Submitted,
             ))
             .await
             .expect("insert");
 
-        store.cancel(id, SOLVER_A).await.expect("cancel succeeds");
+        store
+            .cancel(id, SUB_SOLVER_A)
+            .await
+            .expect("cancel succeeds");
         let stale = store.resolve_verdict(id, Verdict::Accept(None)).await;
 
         // The variant matters, not just the failure: `is_err()` would also

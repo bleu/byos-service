@@ -62,7 +62,7 @@ async fn order_listing_is_owner_scoped_and_metadata_only() {
 
 #[ignore]
 #[tokio::test]
-async fn by_solver_listing_uses_the_signature_identity() {
+async fn by_sub_solver_listing_uses_the_signature_identity() {
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;
     let a = PrivateKeySigner::random();
@@ -90,8 +90,9 @@ async fn by_solver_listing_uses_the_signature_identity() {
     let proposals = listed["proposals"].as_array().unwrap();
     assert_eq!(proposals.len(), 2);
     for p in proposals {
-        let solver: alloy::primitives::Address = p["subSolver"].as_str().unwrap().parse().unwrap();
-        assert_eq!(solver, a.address());
+        let sub_solver: alloy::primitives::Address =
+            p["subSolver"].as_str().unwrap().parse().unwrap();
+        assert_eq!(sub_solver, a.address());
     }
 
     app.stop().await;

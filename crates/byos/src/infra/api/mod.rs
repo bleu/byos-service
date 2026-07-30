@@ -91,9 +91,13 @@ fn public_router(state: AppState) -> Router {
         .route("/proposal/{id}", get(routes::get_proposal))
         .route("/proposal/{id}", delete(routes::cancel_proposal))
         .route("/proposals/{order_uid}", get(routes::list_proposals))
+        // The path says `by-solver` where the glossary says `sub_solver`. It is
+        // the one place the drift is on the wire, so renaming it breaks every
+        // sub-solver client and `openapi.yml` with them — left as a deliberate
+        // exception rather than folded into an internal rename.
         .route(
             "/proposals/by-solver",
-            get(routes::list_proposals_by_solver),
+            get(routes::list_proposals_by_sub_solver),
         )
         .with_state(state)
 }
@@ -719,7 +723,7 @@ mod tests {
 
     #[ignore]
     #[tokio::test]
-    async fn list_by_solver_uses_signer_identity() {
+    async fn list_by_sub_solver_uses_signer_identity() {
         let state = test_state().await;
         let caller = alloy::signers::local::PrivateKeySigner::random();
         let competitor = address!("0000000000000000000000000000000000000002");
@@ -742,8 +746,8 @@ mod tests {
     #[tokio::test]
     async fn get_proposal_without_signature_is_rejected() {
         let state = test_state().await;
-        let solver = address!("0000000000000000000000000000000000000001");
-        let id = insert_proposal(&state, solver).await;
+        let sub_solver = address!("0000000000000000000000000000000000000001");
+        let id = insert_proposal(&state, sub_solver).await;
 
         let (status, _) = get(state, &format!("/proposal/{id}"), None).await;
 
