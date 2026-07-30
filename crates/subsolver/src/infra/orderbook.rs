@@ -2,15 +2,28 @@
 //! same discovery channel a production sub-solver uses — and converts the
 //! solvable batch to domain orders at the edge (ADR-0005).
 //!
-//! Eligibility is deliberately narrow for a reference implementation:
-//! fill-or-kill orders only, and only ones with the default (all-zero)
-//! `appData`, since non-default app data may declare pre/post hooks the
-//! sub-solver would be responsible for including in its route (ADR-0001) —
-//! hook decoding is out of scope for this testing tool.
+//! Eligibility mirrors the validation envelope BYOS enforces in
+//! `OrderRecord::check_envelope` (ADR-0012): fill-or-kill, no hooks, plain
+//! `erc20` balance locations. BYOS stays the authority on the envelope. This
+//! copy exists so the reference client states its limits where an integrator
+//! will read them, and so it does not spend a submission on a proposal
+//! certain to be rejected: `POST /proposals` only checks the signature, so
+//! an out-of-envelope order costs a stored row, an orderbook fetch, and a
+//! verdict poll before the sub-solver learns anything. Hook support is the
+//! gap tracked in COW-1197; closing it deletes the two interaction
+//! conditions here. Should the two definitions drift apart, the poll loop
+//! logs the resulting `UnsupportedOrder` verdict rather than absorbing it
+//! (see `run.rs`).
+//!
+//! Every condition reads a field the auction already carries, so none of it
+//! costs an extra request: an auction order has no `fullAppData`, but the
+//! orderbook expands app-data hooks into `preInteractions` and
+//! `postInteractions` before serving them. Missing fields fail open, since a
+//! filter that silently discovers nothing is the bug this one replaced.
 
 use {
     crate::domain::proposal::{Order, OrderKind},
-    alloy::primitives::{Address, B256, Bytes, U256},
+    alloy::primitives::{Address, Bytes, U256},
     reqwest::Url,
     serde::Deserialize,
     serde_with::{DisplayFromStr, serde_as},
@@ -48,7 +61,28 @@ struct AuctionOrder {
     buy_amount: U256,
     kind: Kind,
     partially_fillable: bool,
-    app_data: B256,
+    /// App-data hooks, already expanded into concrete calls by the orderbook
+    /// — the auction never carries `fullAppData`. Only emptiness matters, so
+    /// the elements are parsed and discarded.
+    #[serde(default)]
+    pre_interactions: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    post_interactions: Vec<serde::de::IgnoredAny>,
+    /// Balance locations. Deprecated in the orderbook's schema — only
+    /// `erc20` is accepted for new orders — so in practice these never
+    /// exclude anything; they are read so the filter states the whole
+    /// envelope rather than most of it.
+    #[serde(default = "erc20")]
+    sell_token_balance: String,
+    #[serde(default = "erc20")]
+    buy_token_balance: String,
+}
+
+/// The orderbook schema's own default for the balance-location fields, and
+/// the value that keeps an order inside the envelope when a deprecated field
+/// finally disappears from the response.
+fn erc20() -> String {
+    "erc20".to_owned()
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -84,7 +118,13 @@ impl OrderbookClient {
         Ok(auction
             .orders
             .into_iter()
-            .filter(|order| !order.partially_fillable && order.app_data == B256::ZERO)
+            .filter(|order| {
+                !order.partially_fillable
+                    && order.pre_interactions.is_empty()
+                    && order.post_interactions.is_empty()
+                    && order.sell_token_balance == "erc20"
+                    && order.buy_token_balance == "erc20"
+            })
             .map(|order| Order {
                 uid: order.uid,
                 sell_token: order.sell_token,
@@ -114,49 +154,123 @@ mod tests {
         },
     };
 
-    #[tokio::test]
-    async fn solvable_orders_keeps_default_app_data_fill_or_kill_orders_only() {
+    /// One auction order carrying every field the orderbook's `AuctionOrder`
+    /// schema marks required, with in-envelope values throughout. Cases
+    /// override only the field they exercise, so a schema drift in anything
+    /// else shows up here rather than against a live orderbook.
+    fn auction_order(uid_byte: u8) -> serde_json::Value {
+        json!({
+            "uid": format!("0x{}", format!("{uid_byte:02x}").repeat(56)),
+            "sellToken": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "buyToken": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "sellAmount": "1000",
+            "buyAmount": "900",
+            "created": "1750000000",
+            "validTo": 1_785_170_912_u32,
+            "kind": "sell",
+            "receiver": "0x0000000000000000000000000000000000000001",
+            "owner": "0x0000000000000000000000000000000000000001",
+            "partiallyFillable": false,
+            "executed": "0",
+            "preInteractions": [],
+            "postInteractions": [],
+            "sellTokenBalance": "erc20",
+            "buyTokenBalance": "erc20",
+            "class": "market",
+            // A real quote-derived app-data hash (the same mainnet order the
+            // service-side fixture in crates/byos/src/infra/orderbook.rs
+            // uses). Every order placed through a CoW orderbook carries one.
+            "appData": "0x06ebf0fd49ea441fbd174e445f37f792eb8ee8848c66c470f59d06a1c3e318a4",
+            "signature": format!("0x{}", "11".repeat(65)),
+            "protocolFees": [],
+        })
+    }
+
+    /// Serves `orders` as the current auction and returns what the
+    /// sub-solver is willing to route.
+    async fn solvable(orders: Vec<serde_json::Value>) -> Vec<Order> {
         let server = MockServer::start().await;
-        let order = |uid_byte: u8, kind: &str, partially_fillable: bool, app_data: &str| {
-            json!({
-                "uid": format!("0x{}", format!("{uid_byte:02x}").repeat(56)),
-                "sellToken": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-                "buyToken": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                "sellAmount": "1000",
-                "buyAmount": "900",
-                "kind": kind,
-                "partiallyFillable": partially_fillable,
-                "appData": app_data,
-                // Fields the reference sub-solver does not consume, present
-                // in real auction responses and required to be tolerated.
-                "owner": "0x0000000000000000000000000000000000000001",
-                "class": "market",
-            })
-        };
-        let zero_app_data = format!("0x{}", "00".repeat(32));
         Mock::given(method("GET"))
             .and(path("/api/v1/auction"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": 1,
                 "block": 100,
-                "orders": [
-                    order(0x11, "sell", false, &zero_app_data),
-                    order(0x22, "buy", false, &zero_app_data),
-                    order(0x33, "sell", true, &zero_app_data),
-                    order(0x44, "sell", false, &format!("0x{}", "aa".repeat(32))),
-                ],
+                "orders": orders,
             })))
             .mount(&server)
             .await;
 
-        let client = OrderbookClient::new(server.uri().parse().unwrap());
-        let orders = client.solvable_orders().await.unwrap();
+        OrderbookClient::new(server.uri().parse().unwrap())
+            .solvable_orders()
+            .await
+            .expect("auction should fetch")
+    }
 
-        assert_eq!(orders.len(), 2);
+    #[tokio::test]
+    async fn solvable_orders_keeps_in_envelope_fill_or_kill_orders() {
+        let mut partially_fillable = auction_order(0x22);
+        partially_fillable["partiallyFillable"] = json!(true);
+        // A pre-hook, as the orderbook expands it for the auction.
+        let mut pre_hooked = auction_order(0x33);
+        pre_hooked["preInteractions"] = json!([{
+            "target": "0x0000000000000000000000000000000000000002",
+            "value": "0",
+            "callData": "0xdeadbeef",
+        }]);
+
+        let mut post_hooked = auction_order(0x44);
+        post_hooked["postInteractions"] = json!([{
+            "target": "0x0000000000000000000000000000000000000003",
+            "value": "0",
+            "callData": "0xfeedface",
+        }]);
+
+        let mut vault_balance = auction_order(0x55);
+        vault_balance["sellTokenBalance"] = json!("external");
+
+        let orders = solvable(vec![
+            auction_order(0x11),
+            partially_fillable,
+            pre_hooked,
+            post_hooked,
+            vault_balance,
+        ])
+        .await;
+
+        assert_eq!(
+            orders.len(),
+            1,
+            "an ordinary quote-derived appData hash is inside the envelope"
+        );
         assert_eq!(orders[0].uid, Bytes::from(vec![0x11; 56]));
         assert_eq!(orders[0].kind, OrderKind::Sell);
         assert_eq!(orders[0].sell_amount, U256::from(1000));
-        assert_eq!(orders[1].uid, Bytes::from(vec![0x22; 56]));
-        assert_eq!(orders[1].kind, OrderKind::Buy);
+        assert_eq!(orders[0].buy_amount, U256::from(900));
+    }
+
+    #[tokio::test]
+    async fn an_order_missing_the_envelope_fields_is_still_solvable() {
+        // The balance fields are already deprecated upstream and the
+        // interaction arrays could be reshaped. When a field the filter
+        // depends on goes missing the sub-solver must submit and let BYOS
+        // judge — the opposite default would silently empty the auction,
+        // which is the failure this filter replaced.
+        let mut order = auction_order(0x11);
+        for field in [
+            "preInteractions",
+            "postInteractions",
+            "sellTokenBalance",
+            "buyTokenBalance",
+        ] {
+            order.as_object_mut().unwrap().remove(field);
+        }
+
+        let orders = solvable(vec![order]).await;
+
+        assert_eq!(
+            orders.len(),
+            1,
+            "a missing envelope field must not exclude the order"
+        );
     }
 }

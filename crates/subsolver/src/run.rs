@@ -23,6 +23,7 @@ use {
         sol_types::Eip712Domain,
     },
     byos_common::{contracts::Interaction, eip712},
+    proposal_dto::proposal::RejectionReason,
     reqwest::Url,
     std::{collections::HashMap, time::Duration},
 };
@@ -176,6 +177,17 @@ impl Subsolver {
         };
         match self.byos.proposal(live.id).await {
             Ok(view) if view.status.is_terminal() => {
+                // The auction filter already drops out-of-envelope orders,
+                // so this verdict means the filter and the service's
+                // envelope (ADR-0012) no longer agree.
+                if view.rejection_reason == Some(RejectionReason::UnsupportedOrder) {
+                    tracing::warn!(
+                        %order_uid,
+                        id = live.id,
+                        "order passed the auction filter but the service calls it \
+                         unsupported; the two envelope definitions have drifted"
+                    );
+                }
                 tracing::info!(
                     %order_uid,
                     id = live.id,
