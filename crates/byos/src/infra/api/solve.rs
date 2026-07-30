@@ -45,21 +45,26 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .as_secs(),
     );
 
+    // One lookup for the whole auction. Per-order queries cost a round trip
+    // each, nearly all of them returning nothing, and scaled with auction size
+    // rather than with how many proposals we hold (ADR-0002's 100ms p99).
+    let order_uids: Vec<OrderUid> = auction.orders.iter().map(|o| OrderUid(o.uid)).collect();
+    let by_order = match state.store().active_by_order_uids(&order_uids).await {
+        Ok(by_order) => by_order,
+        Err(e) => {
+            // Bid nothing rather than answer an error: losing this round is
+            // recoverable, and the driver retries next auction.
+            tracing::error!(%e, "solve: proposal lookup failed");
+            return Json(Solutions { solutions: vec![] });
+        }
+    };
+
     for order in &auction.orders {
         let order_uid = OrderUid(order.uid);
 
-        let proposals = match state.store().list_by_order_uid(&order_uid).await {
-            Ok(proposals) => proposals,
-            Err(e) => {
-                // Skip this order rather than fail the whole auction — a
-                // missing bid loses one round, a 500 loses them all.
-                tracing::error!(%e, order_uid = %order_uid, "solve: proposal lookup failed");
-                continue;
-            }
-        };
-        if proposals.is_empty() {
+        let Some(proposals) = by_order.get(&order_uid) else {
             continue;
-        }
+        };
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
 
