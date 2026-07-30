@@ -362,6 +362,41 @@ mod tests {
         }
     }
 
+    /// A `SettleFailed` proposal with no settlement tx must not be debited.
+    ///
+    /// `record_outcome` always writes the hash alongside `SettleFailed`, so a
+    /// missing one is a corrupt row — and the amount depends on the
+    /// settlement's on-chain cost, so there is nothing to charge. Every other
+    /// test sets the field, which left the guard uncovered: a change that
+    /// substituted a default hash would price the debit off an unrelated (or
+    /// zero) transaction and charge a real address for it.
+    #[ignore]
+    #[tokio::test]
+    async fn a_settle_failed_proposal_without_a_settlement_tx_is_not_debited() {
+        let store = test_store().await;
+        let proposal = test_proposal(
+            OrderUid([0xaa; 56]),
+            Address::repeat_byte(0x01),
+            ProposalStatus::SettleFailed,
+        );
+        // Deliberately no settlement_tx_hash.
+        let id = store.insert(proposal).await.expect("insert");
+
+        let operator = StubOperator::new(U256::from(6_000_000_000_000_000u64));
+        let mut attempts = DebitAttempts::default();
+        run_tick(&store, &operator, U256::from(C_L), &mut attempts).await;
+
+        assert!(
+            operator.debits.lock().is_empty(),
+            "no amount can be derived without the settlement, so nothing may be charged"
+        );
+        assert_eq!(
+            store.get(id).await.expect("get").expect("exists").status,
+            ProposalStatus::SettleFailed,
+            "the proposal stays put for a human rather than being marked penalized"
+        );
+    }
+
     #[ignore]
     #[tokio::test]
     async fn spawned_loop_debits_on_its_interval() {
