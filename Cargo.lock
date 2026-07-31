@@ -1833,6 +1833,7 @@ dependencies = [
  "anyhow",
  "byos",
  "byos-common",
+ "clap",
  "reqwest 0.12.28",
  "serde_json",
  "subsolver",

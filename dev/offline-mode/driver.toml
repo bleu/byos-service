@@ -1,0 +1,67 @@
+# Driver config for the offline-mode stack with BYOS plugged in.
+#
+# A copy of the submodule's `config/offline/driver.toml` with one `[[solver]]`
+# block added, because the driver takes a single `--config` file and TOML has no
+# include. It lives in this repo rather than in the submodule so the pin keeps
+# describing exactly what upstream ships (ADR-0009). The copy can drift: if the
+# stack starts behaving oddly after a submodule bump, diff this against
+# `offline-mode/config/offline/driver.toml` first.
+#
+# Baseline stays configured here on purpose. It serves quotes for the whole
+# stack (`PRICE_ESTIMATION_DRIVERS`), and leaving its route up means putting it
+# back into the auction is a one-variable change to the autopilot's `DRIVERS`
+# rather than an edit to this file.
+
+app-data-fetching-enabled = true
+orderbook-url = "http://orderbook"
+tx-gas-limit = "45000000"
+
+[[solver]]
+name = "baseline"
+endpoint = "http://baseline"
+absolute-slippage = "40000000000000000" # Denominated in wei, optional
+relative-slippage = "0.1"               # Percentage in the [0, 1] range
+# Anvil account 0, already whitelisted as a solver in the committed state.
+account = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+[[solver]]
+name = "byos"
+# byos runs on the host, not in a container, so `cargo run` is the whole edit
+# loop. That means reaching back out through the Docker network to the host's
+# internal listener — see the README on why byos has to be started with
+# `--internal-addr 0.0.0.0:9586` for this to resolve.
+endpoint = "http://host.docker.internal:9586"
+absolute-slippage = "40000000000000000"
+relative-slippage = "0.1"
+# Anvil account 3, whitelisted by `just stack-up`. Deliberately not account 0:
+# two settlement pipelines sharing one EOA can pick the same nonce when
+# auctions overlap, and the autopilot identifies solvers by this address, so
+# sharing it would make "BYOS won this auction" unprovable from the outside.
+account = "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
+
+[submission]
+gas-price-cap = "1000000000000"
+
+[[submission.mempool]]
+mempool = "public"
+url = "http://chain:8545"
+
+[contracts]
+gp-v2-settlement = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"
+weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+balances = "0x3e8C6De9510e7ECad902D005DE3Ab52f35cF4f1b" # GPv2TradeSimulator
+signatures = "0x8262d639c38470F38d2eff15926F7071c28057Af"
+
+[liquidity]
+base-tokens = [
+    "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", # WETH
+    "0x6B175474E89094C44Da98b954EedeAC495271d0F", # DAI
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", # USDC
+    "0xdAC17F958D2ee523a2206206994597C13D831ec7", # USDT
+    "0x6810e776880C02933D47DB1b9fc05908e5386b96", # GNO
+]
+
+[[liquidity.uniswap-v2]]
+router = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+pool-code = "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f" # Uniswap V2 init code hash
+missing-pool-cache-time = "1h"

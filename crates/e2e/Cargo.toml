@@ -22,3 +22,7 @@ subsolver.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# The `deploy-escrow` example's CLI. Not needed by the library or the tests.
+clap.workspace = true

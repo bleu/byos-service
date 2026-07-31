@@ -1,0 +1,50 @@
+# Compose overlay that puts BYOS in the auction instead of baseline.
+#
+# Applied on top of the submodule's compose file; `just stack-up` wires both
+# together. It changes two things and touches nothing else, which is ADR-0002's
+# claim made operational: BYOS is a vanilla solver engine behind a standard,
+# unmodified driver, so integration is configuration, not code.
+
+services:
+  driver:
+    # Replaces the submodule's `--config` path. Our driver.toml is a superset of
+    # offline-mode's, so the baseline route keeps working for quotes.
+    command: ["--config", "/workspace/byos/driver.toml"]
+    volumes:
+      # Absolute, passed in by the recipe. Relative paths in an override file
+      # resolve against the *first* `-f` file's directory (the submodule), not
+      # this file's, which silently mounts the wrong thing.
+      - ${BYOS_OVERLAY_DIR:?set by just stack-up}:/workspace/byos:ro
+    extra_hosts:
+      # Free on Docker Desktop, required on Linux. `extra_hosts` merges
+      # additively across compose files, so this adds rather than replaces.
+      - "host.docker.internal:host-gateway"
+
+  orderbook:
+    depends_on:
+      # db-migrations is a one-shot flyway job that exits 0. The submodule
+      # declares it with the short `depends_on` form, which means
+      # service_started, and `docker compose up --wait` then reports the exit as
+      # a failed service and returns 1. Saying "completed successfully" is what
+      # it actually means, and it makes the orderbook wait for the schema
+      # instead of racing it. Worth sending upstream.
+      db-migrations:
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      chain:
+        condition: service_started
+      coingecko-mock:
+        condition: service_started
+
+  autopilot:
+    environment:
+      # The whole competition switch. Anvil account 3 is how the autopilot
+      # identifies BYOS, so it has to match driver.toml's byos `account` and the
+      # address `stack-up` whitelisted.
+      #
+      # Baseline is dropped from this list, not from the stack: its container
+      # stays up and keeps serving quotes. Putting it back in the auction means
+      # appending `,baseline|http://driver/baseline|0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`
+      # here — one variable, no overlay changes.
+      - DRIVERS=byos|http://driver/byos|0x90F79bf6EB2c4f870365E785982E1f101E93b906

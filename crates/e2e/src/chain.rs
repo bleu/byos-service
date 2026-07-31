@@ -80,7 +80,13 @@ impl Chain {
             .connect_http(anvil.endpoint_url())
             .erased();
 
-        let escrow = deploy_escrow(&provider, anvil.addresses()).await?;
+        let accounts = anvil.addresses();
+        let roles = EscrowRoles {
+            admin: accounts[2],
+            operator: accounts[1],
+            submitters: vec![accounts[0]],
+        };
+        let escrow = deploy_escrow(&provider, &roles).await?;
         let trampoline_factory = byos_common::contracts::Escrow::new(escrow, &provider)
             .TRAMPOLINE_FACTORY()
             .call()
@@ -117,15 +123,32 @@ impl Chain {
     }
 }
 
+/// Who holds which role on a fresh Escrow. These are constructor arguments, so
+/// they are part of the CREATE2 init code: two deployments with different roles
+/// land at different addresses. Tier 1 uses anvil accounts 0/1/2 (see
+/// [`Chain::spawn`]); the offline-mode demo uses 3/1/2 so BYOS settles from its
+/// own account instead of baseline's.
+pub struct EscrowRoles {
+    pub admin: Address,
+    pub operator: Address,
+    /// Accounts granted `SUBMITTER_ROLE` — the ones allowed to settle.
+    pub submitters: Vec<Address>,
+}
+
 /// Deploy the Escrow through the CREATE2 singleton factory and return its
-/// deterministic address. Fixture roles map to anvil accounts: 0 the settling
-/// solver (submitter), 1 the operator, 2 the admin.
-async fn deploy_escrow(provider: &DynProvider, accounts: &[Address]) -> anyhow::Result<Address> {
+/// deterministic address.
+///
+/// Idempotent: with a fixed salt the address is a pure function of the init
+/// code, so a second call against a chain that already has the deployment
+/// returns the same address without sending a transaction. Tier 1 spawns a
+/// fresh anvil every time and never hits that path; the demo's boot recipe
+/// re-runs against a live stack and depends on it.
+pub async fn deploy_escrow(provider: &DynProvider, roles: &EscrowRoles) -> anyhow::Result<Address> {
     let constructor = EscrowArtifact::constructorCall {
         _adminTransferDelay: U48::from(2 * 24 * 60 * 60),
-        _admin: accounts[2],
-        _operator: accounts[1],
-        _submitters: vec![accounts[0]],
+        _admin: roles.admin,
+        _operator: roles.operator,
+        _submitters: roles.submitters.clone(),
         _cooldownPeriod: U256::from(24 * 60 * 60),
         _settlement: GPV2_SETTLEMENT,
         _name: "BYOS Escrow".into(),
@@ -134,6 +157,15 @@ async fn deploy_escrow(provider: &DynProvider, accounts: &[Address]) -> anyhow::
     let init_code = [EscrowArtifact::BYTECODE.to_vec(), constructor.abi_encode()].concat();
     let salt = B256::ZERO;
     let escrow = CREATE2_FACTORY.create2_from_code(salt, &init_code);
+
+    if !provider
+        .get_code_at(escrow)
+        .await
+        .context("checking whether the Escrow is already deployed")?
+        .is_empty()
+    {
+        return Ok(escrow);
+    }
 
     // The singleton factory takes `salt ++ init_code` as raw calldata.
     let calldata = [salt.as_slice(), &init_code].concat();
