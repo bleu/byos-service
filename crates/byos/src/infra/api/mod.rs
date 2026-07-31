@@ -250,7 +250,7 @@ mod tests {
             http::{Request, StatusCode},
         },
         byos_common::{contracts, eip712},
-        std::sync::atomic::AtomicU64,
+        std::sync::atomic::{AtomicU64, Ordering},
         tower::ServiceExt,
     };
 
@@ -1112,6 +1112,42 @@ mod tests {
             executed + fee,
             1_000_000_000,
             "executed + fee must equal the order's sell amount",
+        );
+    }
+
+    /// `/solve` publishes the auction's gas price for the background escrow
+    /// validator to use instead of the startup fallback.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_publishes_the_auction_gas_price() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "7");
+        post_solve(&app, &auction).await;
+
+        assert_eq!(state.gas_price().load(Ordering::Relaxed), 7);
+    }
+
+    /// COW-1168: a gas price too large for `u64` must leave the previous value
+    /// alone. Saturating to `u64::MAX` would put every sub-solver under the
+    /// escrow threshold and reject the entire live book on the next validation
+    /// tick, and `Rejected` is terminal (ADR-0013).
+    #[ignore]
+    #[tokio::test]
+    async fn solve_keeps_the_previous_gas_price_when_the_auction_price_does_not_fit() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        state.gas_price().store(11, Ordering::Relaxed);
+
+        let too_big = (U256::from(u64::MAX) + U256::from(1)).to_string();
+        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", &too_big);
+        post_solve(&app, &auction).await;
+
+        assert_eq!(
+            state.gas_price().load(Ordering::Relaxed),
+            11,
+            "an unusable price must not disturb the last good one",
         );
     }
 
