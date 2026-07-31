@@ -1,4 +1,4 @@
-//! Track A penalty loop (ADR-0003, ADR-0013, COW-1205): turns `SettleFailed`
+//! Track A penalty loop (ADR-0003, ADR-0013): turns `SettleFailed`
 //! proposals into landed escrow debits. Each tick scans the pending work and
 //! drives the [`crate::domain::penalty::DebitEscrow`] chain edge; a failed
 //! debit is retried next tick, up to [`MAX_DEBIT_ATTEMPTS`] times, and the
@@ -431,7 +431,7 @@ mod tests {
         }
     }
 
-    /// Acceptance (COW-1205): a queued non-settlement charge is debited at
+    /// Acceptance: a queued non-settlement charge is debited at
     /// 0.1 × c_l with the order UID hash as the on-chain reason (no
     /// settlement tx exists), exactly once — and the proposal itself stays
     /// `Active`, still competing (losses are events, not states, ADR-0013).
@@ -483,7 +483,7 @@ mod tests {
         );
     }
 
-    /// Acceptance (COW-1205): a failed debit leaves the proposal queryable
+    /// Acceptance: a failed debit leaves the proposal queryable
     /// in `SettleFailed`; the next tick retries and lands it.
     #[ignore]
     #[tokio::test]
@@ -642,7 +642,7 @@ mod tests {
         );
     }
 
-    /// Acceptance (COW-1205): a `SettleFailed` proposal ends `Penalized`
+    /// Acceptance: a `SettleFailed` proposal ends `Penalized`
     /// with the debit tx recorded once the escrow debit lands.
     #[ignore]
     #[tokio::test]
@@ -676,7 +676,7 @@ mod tests {
             *operator.debits.lock(),
             vec![(
                 Address::repeat_byte(0x01),
-                // Acceptance (COW-1205): receipt gas cost + c_l.
+                // Acceptance: receipt gas cost + c_l.
                 U256::from(16_000_000_000_000_000u64),
                 SETTLEMENT_TX,
             )],

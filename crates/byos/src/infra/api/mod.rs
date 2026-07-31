@@ -1,5 +1,5 @@
 //! HTTP API, served as two listeners with opposite trust boundaries
-//! (COW-1174): the public one carries the proposal CRUD endpoints for
+//! the public one carries the proposal CRUD endpoints for
 //! sub-solvers, the internal one carries `/solve` for the co-deployed driver.
 
 pub mod dto;
@@ -83,7 +83,7 @@ impl AppState {
 /// Internet-facing router: proposal CRUD + health check. `/solve` must never
 /// be mounted here — the proposal book it returns (amounts, routes,
 /// signatures) is MEV-relevant, so only the co-deployed driver may read it
-/// (COW-1174).
+/// itself.
 fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(routes::healthz))
@@ -100,7 +100,7 @@ fn public_router(state: AppState) -> Router {
 
 /// Driver-facing router: `/solve` + `/notify` + health check, served on an
 /// internal bind address that only the co-deployed driver reaches
-/// (COW-1174). When `solve_bearer_token` is set, both endpoints require
+/// itself. When `solve_bearer_token` is set, both endpoints require
 /// `Authorization: Bearer <token>` — the driver sends its configured
 /// `[solver.request-headers]` on every request, notifications included.
 /// `/healthz` stays open for probes.
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(second.status(), StatusCode::CONFLICT);
     }
 
-    /// Acceptance (COW-1204): a settlement is in flight — the owner cannot
+    /// Acceptance: a settlement is in flight — the owner cannot
     /// pull the proposal out from under it. `DELETE` conflicts.
     #[ignore]
     #[tokio::test]
@@ -647,7 +647,7 @@ mod tests {
         assert_eq!(json["buyAmount"], "990000");
     }
 
-    /// Acceptance (COW-1205): once the Track A debit lands, the owner's GET
+    /// Acceptance: once the Track A debit lands, the owner's GET
     /// shows `penalized` and cites the debit tx.
     #[ignore]
     #[tokio::test]
@@ -1368,7 +1368,7 @@ mod tests {
         assert_eq!(attributed[0].order_uid, OrderUid(ORDER_UID));
     }
 
-    /// Acceptance (COW-1204): an `Executing` proposal is frozen out of
+    /// Acceptance: an `Executing` proposal is frozen out of
     /// `/solve` — its balances are about to be consumed by the in-flight
     /// settlement.
     #[ignore]

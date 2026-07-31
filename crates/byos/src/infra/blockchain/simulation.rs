@@ -13,8 +13,8 @@
 //! - **Escrow** → `state_diff` granting `SUBMITTER_ROLE` to the dummy
 //!   (`tx.origin`). The Escrow inherits NON-upgradeable OpenZeppelin v5
 //!   `AccessControl`, so `_roles` lives at plain storage slot 5 — not the
-//!   ERC-7201 namespaced slot. Verified on a mainnet fork (COW-1181 spike) and
-//!   pinned by `forge inspect Escrow storage-layout` in byos-contracts.
+//!   ERC-7201 namespaced slot. Verified on a mainnet fork and pinned by `forge
+//!   inspect Escrow storage-layout` in byos-contracts.
 
 use {
     alloy::{
@@ -132,8 +132,8 @@ mod tests {
     #[test]
     fn submitter_role_slot_matches_forge_computation() {
         // Pinned against `cast keccak` over the same concatenations; the
-        // formula itself was verified on a mainnet fork by the COW-1181
-        // spike (vm.store at this slot made hasRole pass).
+        // formula itself was verified on a mainnet fork (vm.store at this
+        // slot made hasRole pass).
         assert_eq!(
             submitter_role_slot(DUMMY_SUBMITTER),
             b256!("4eb8c5e0e8f6947fc61867e46604b89f6f2511c7f24d1be62be922d32b056655"),

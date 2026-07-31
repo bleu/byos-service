@@ -1,4 +1,4 @@
-//! Escrow operator (ADR-0003, COW-1205): the transaction-sending chain edge
+//! Escrow operator (ADR-0003): the transaction-sending chain edge
 //! behind [`DebitEscrow`]. The only place in the service that signs and
 //! submits transactions — everything else is read-only RPC. Costs come from
 //! `eth_getTransactionReceipt` on the reverted settlement; debits go out as
@@ -221,7 +221,7 @@ mod tests {
         EscrowOperator::new(provider, ESCROW)
     }
 
-    /// Acceptance (COW-1205): the debit prices the revert from the real
+    /// Acceptance: the debit prices the revert from the real
     /// receipt — `gas_used × effective_gas_price`.
     #[tokio::test]
     async fn settlement_cost_is_gas_used_times_effective_gas_price() {

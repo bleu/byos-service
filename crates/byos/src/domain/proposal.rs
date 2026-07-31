@@ -90,7 +90,7 @@ pub enum ProposalStatus {
     /// The settlement transaction reverted on-chain; the Track A escrow
     /// debit follows (ADR-0010).
     SettleFailed,
-    /// The Track A debit landed (COW-1205 wires this transition).
+    /// The Track A debit landed; the penalty loop drives this transition.
     Penalized,
     SimFailed,
     Cancelled,

@@ -1,4 +1,4 @@
-//! COW-1174: `/solve` is driver-only. It lives on the internal listener,
+//! `/solve` is driver-only. It lives on the internal listener,
 //! never on the public one, and can additionally demand a bearer token.
 
 use {

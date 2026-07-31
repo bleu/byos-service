@@ -228,10 +228,11 @@ async fn rejects_malformed_signature_bytes() {
 #[tokio::test]
 async fn tampered_body_is_accepted_under_a_different_sub_solver() {
     // A well-formed signature over *different* data still recovers — just to
-    // some other address, which the handler stores as the sub-solver. That is
-    // the intended M1 contract: the escrow balance check (COW-1162) is the
-    // layer that rejects proposals whose recovered address has no deposit.
-    // When COW-1162 lands, flip this test to expect that rejection.
+    // some other address, which the handler stores as the sub-solver. Accepting
+    // it here is the design, not a gap: ingestion only verifies the signature
+    // (ADR-0013), and the escrow check that rejects a recovered address with no
+    // deposit runs in the background validator, which answers
+    // `InsufficientEscrow` on the next tick.
     let db = TestDb::create().await;
     let app = TestApp::spawn(&db.url).await;
     let signer = PrivateKeySigner::random();

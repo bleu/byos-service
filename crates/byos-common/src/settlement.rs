@@ -263,7 +263,7 @@ mod tests {
     fn same_token_order_still_pays_the_proposal_buy_amount() {
         // CoW carries sellToken == buyToken orders, submitted mainly to run
         // hooks, where sellAmount always exceeds buyAmount. The Trampoline
-        // sweeps the shared token once (contracts COW-1194).
+        // sweeps the shared token once.
         let mut order = fixture_order();
         order.buy_token = order.sell_token;
         order.buy_amount = U256::from(19_000_000_000_000_000_000_u128);
