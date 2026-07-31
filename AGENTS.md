@@ -39,6 +39,12 @@ Justfile              The command surface — same recipes locally and in CI
 - New service code uses **thiserror**; anyhow only in `run.rs`/test setup ([ADR-0007](docs/adr/0007-error-handling.md)).
 - Wire types: camelCase JSON, 256-bit amounts as decimal strings, addresses/order UIDs as hex strings ([ADR-0005](docs/adr/0005-crate-anatomy-and-layering.md)).
 
+## Comments and doc comments
+
+- **Short.** A comment earns its place by saying something the code cannot: why this way, what breaks otherwise, which upstream behaviour forced it. Restating the signature, narrating the next line, or re-deriving a rationale that already lives in an ADR is noise. Link the ADR instead.
+- **No ticket ids for work that is finished.** A `COW-` reference in a comment is only for something still open — a `TODO`, a known gap, a follow-up the reader might need to find. Once the work ships, the comment has to stand on its own: a reader hitting that line needs the reason, not an archaeology trail into the tracker. Commit messages and PR descriptions are where ticket ids belong.
+- Cite ADRs freely — they are in the repo and stay readable. Cite upstream source paths (`driver/src/...`) when behaviour depends on them.
+
 ## Domain language
 
 The glossary lives in [`CONTEXT.md`](CONTEXT.md) — sub-solver, proposal, ingestion, proposal store, audit trail, gatekeeping, attribution, Track A/B, `c_l`, operator. Use those terms exactly in issue titles, test names, metric names, and code; don't drift to synonyms (it's `sub_solver`, never plain `solver`, for the external party — `solver` means BYOS itself in CoW's vocabulary). If a concept you need isn't in the glossary, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (flag it).
