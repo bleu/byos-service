@@ -33,6 +33,13 @@ pub fn surplus_token(is_sell_order: bool, sell_token: Address, buy_token: Addres
     if is_sell_order { buy_token } else { sell_token }
 }
 
+/// The auction's reference price for the [`surplus_token`]: wei per 10^18
+/// atoms. Its own type because the gas cut takes the sell token's price
+/// instead ([`SellTokenPrice`](super::gas_cut::SellTokenPrice)), and on a sell
+/// order those are two different numbers one argument apart.
+#[derive(Clone, Copy, Debug)]
+pub struct SurplusPrice(pub U256);
+
 /// A proposal weighed against its order at this auction's gas price. Shared by
 /// [`score_proposal`] and [`gas_cut::size`](super::gas_cut::size), which ask
 /// different questions of the same pair and take different prices to do it.
@@ -40,9 +47,9 @@ pub fn surplus_token(is_sell_order: bool, sell_token: Address, buy_token: Addres
 /// Assumes the pair passed the validation envelope
 /// ([`OrderRecord::check_envelope`](super::order::OrderRecord::check_envelope)):
 /// a sell order's `proposal_sell` equals its `order_sell`, a buy order's
-/// `proposal_buy` its `order_buy`. The cut's sell-side scaling reads the
-/// route's rate off that equality. `/solve` does not re-check it — an `Active`
-/// proposal is one that passed.
+/// `proposal_buy` its `order_buy`. The cut's buy-side limit check leans on that
+/// second equality. `/solve` does not re-check it — an `Active` proposal is one
+/// that passed.
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate {
     pub order_sell: U256,
@@ -61,15 +68,16 @@ pub struct Candidate {
 ///  - Sell order: `proposal_buy - order_buy` (more buy tokens for the user)
 ///  - Buy order: `order_sell - proposal_sell` (fewer sell tokens from the user)
 ///
-/// `native_price` is the auction's reference price for the [`surplus_token`]:
-/// wei per 10^18 atoms. Not the token the gas cut is denominated in.
-///
 /// No fee term, deliberately. CoW's score is surplus plus protocol fees and
 /// nothing else (CIP-38), the protocol fee cancels out of any ranking, and the
 /// [gas cut](super::gas_cut) reaches the score as a subtraction from surplus.
-/// So `surplus - gas` is already the score the autopilot computes for our bid,
-/// and reading per-order fee policies would buy nothing.
-pub fn score_proposal(candidate: &Candidate, native_price: U256) -> Option<U256> {
+/// So `surplus - gas` is the autopilot's score for our bid, give or take the
+/// route's price improvement over the auction's reference ratio: the cut is a
+/// fixed number of sell-token atoms, and it displaces exactly its own worth in
+/// surplus only when the route trades at that ratio. Reading per-order fee
+/// policies would still buy nothing.
+pub fn score_proposal(candidate: &Candidate, surplus_price: SurplusPrice) -> Option<U256> {
+    let SurplusPrice(native_price) = surplus_price;
     let surplus = if candidate.is_sell_order {
         // Sell order: user offers sell_amount, wants at least buy_amount.
         // Surplus = how much more buyToken the proposal provides.
@@ -109,7 +117,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::ZERO,
             },
-            Unit::ETHER.wei() / U256::from(2),
+            SurplusPrice(Unit::ETHER.wei() / U256::from(2)),
         );
         // surplus = 950 - 900 = 50
         // surplus_eth = 50 * 0.5e18 / 1e18 = 25
@@ -127,7 +135,7 @@ mod tests {
                 is_sell_order: false,
                 gas_cost: U256::ZERO,
             },
-            Unit::ETHER.wei() / U256::from(2),
+            SurplusPrice(Unit::ETHER.wei() / U256::from(2)),
         );
         // surplus = 1000 - 950 = 50
         // surplus_eth = 50 * 0.5e18 / 1e18 = 25
@@ -145,7 +153,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::ZERO,
             },
-            Unit::ETHER.wei(),
+            SurplusPrice(Unit::ETHER.wei()),
         );
         assert_eq!(score, None);
     }
@@ -162,7 +170,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::from(20u64), // gas = 20 > surplus_eth (10)
             },
-            Unit::ETHER.wei(),
+            SurplusPrice(Unit::ETHER.wei()),
         );
         assert_eq!(score, None);
     }
@@ -181,7 +189,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::ZERO,
             },
-            U256::from(2),
+            SurplusPrice(U256::from(2)),
         );
         assert_eq!(score, None);
     }
@@ -197,7 +205,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::ZERO,
             },
-            Unit::ETHER.wei(),
+            SurplusPrice(Unit::ETHER.wei()),
         );
         assert_eq!(score, Some(U256::ZERO));
     }

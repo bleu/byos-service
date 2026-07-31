@@ -5,9 +5,9 @@
 use {
     super::AppState,
     crate::domain::{
-        gas_cut::{self, GasCut},
+        gas_cut::{self, GasCut, SellTokenPrice},
         proposal::{OrderUid, Proposal},
-        scoring::{Candidate, effective_gas, score_proposal, surplus_token},
+        scoring::{Candidate, SurplusPrice, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -76,10 +76,14 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                 .and_then(|t| t.reference_price)
                 .unwrap_or(U256::ZERO)
         };
-        let native_price = price_of(surplus_token(is_sell, order.sell_token, order.buy_token));
+        let surplus_price = SurplusPrice(price_of(surplus_token(
+            is_sell,
+            order.sell_token,
+            order.buy_token,
+        )));
         // A second lookup, not the same one: the cut is in the sell token, which
         // for a sell order is not where the surplus is.
-        let sell_token_price = price_of(order.sell_token);
+        let sell_token_price = SellTokenPrice(price_of(order.sell_token));
 
         // Score and select the best proposal for this order. Only proposals
         // with simulation gas are eligible — proposals that haven't been
@@ -99,7 +103,7 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                     is_sell_order: is_sell,
                     gas_cost,
                 };
-                let score = score_proposal(&candidate, native_price)?;
+                let score = score_proposal(&candidate, surplus_price)?;
                 // Can rule out a proposal the score accepts: the score converts
                 // surplus at the auction's price, the limit is enforced on the
                 // route's own amounts, and a stale price makes them disagree.

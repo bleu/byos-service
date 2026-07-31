@@ -9,6 +9,13 @@ use {
     alloy::primitives::{U256, utils::Unit},
 };
 
+/// The auction's reference price for the order's sell token: wei per 10^18
+/// atoms. Its own type because on a sell order the surplus lands in the buy
+/// token, so [`SurplusPrice`](super::scoring::SurplusPrice) is a different
+/// number for the same trade and the two are one argument apart.
+#[derive(Clone, Copy, Debug)]
+pub struct SellTokenPrice(pub U256);
+
 /// A proposal's gas cut, sized against one order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GasCut {
@@ -24,15 +31,10 @@ pub struct GasCut {
 
 /// Size the cut for one proposal and shape the fulfillment amounts around it.
 ///
-/// `sell_token_price` is the auction's reference price for the order's sell
-/// token: wei per 10^18 atoms. Not the price [`score_proposal`] takes, which is
-/// the surplus token's.
-///
 /// `None` when the sell token has no price, or when taking the cut would push
 /// the user past the limit they signed.
-///
-/// [`score_proposal`]: super::scoring::score_proposal
-pub fn size(candidate: &Candidate, sell_token_price: U256) -> Option<GasCut> {
+pub fn size(candidate: &Candidate, sell_token_price: SellTokenPrice) -> Option<GasCut> {
+    let SellTokenPrice(sell_token_price) = sell_token_price;
     if sell_token_price.is_zero() {
         return None;
     }
@@ -43,8 +45,10 @@ pub fn size(candidate: &Candidate, sell_token_price: U256) -> Option<GasCut> {
         .checked_mul(Unit::ETHER.wei())?
         .div_ceil(sell_token_price);
 
-    // Both branches mirror what the driver encodes from these amounts, so the
-    // comparisons below are the ones the settlement's limit check will make.
+    // The executed amount is the order's, because that is what the driver
+    // checks it against. What the chain then derives from it runs through the
+    // clearing prices, which are the proposal's amounts — so the sell-side
+    // scaling divides by those.
     let executed_amount = if candidate.is_sell_order {
         let executed = candidate.order_sell.checked_sub(amount)?;
         // Declaring only `executed` of the full sell amount scales what the user
@@ -53,13 +57,15 @@ pub fn size(candidate: &Candidate, sell_token_price: U256) -> Option<GasCut> {
         let received = candidate
             .proposal_buy
             .checked_mul(executed)?
-            .checked_div(candidate.order_sell)?;
+            .checked_div(candidate.proposal_sell)?;
         if received < candidate.order_buy {
             return None;
         }
         executed
     } else {
         // The route's input plus the cut is what leaves the user's wallet.
+        // Exact only because the envelope pins `proposal_buy` to `order_buy`;
+        // otherwise the chain would scale this by the ratio between them.
         if candidate.proposal_sell.checked_add(amount)? > candidate.order_sell {
             return None;
         }
@@ -88,7 +94,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::from(gas_cost),
             },
-            Unit::ETHER.wei() / U256::from(2),
+            SellTokenPrice(Unit::ETHER.wei() / U256::from(2)),
         )
     }
 
@@ -131,7 +137,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::from(3u64),
             },
-            Unit::ETHER.wei() * U256::from(2),
+            SellTokenPrice(Unit::ETHER.wei() * U256::from(2)),
         );
 
         assert_eq!(cut.map(|c| c.amount), Some(U256::from(2u64)));
@@ -150,7 +156,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::from(100u64),
             },
-            U256::ZERO,
+            SellTokenPrice(U256::ZERO),
         );
 
         assert_eq!(cut, None);
@@ -169,7 +175,7 @@ mod tests {
                 is_sell_order: true,
                 gas_cost: U256::MAX,
             },
-            U256::from(1u64),
+            SellTokenPrice(U256::from(1u64)),
         );
 
         assert_eq!(cut, None);
@@ -188,7 +194,7 @@ mod tests {
                 is_sell_order: false,
                 gas_cost: U256::from(100u64),
             },
-            Unit::ETHER.wei() / U256::from(2),
+            SellTokenPrice(Unit::ETHER.wei() / U256::from(2)),
         );
 
         assert_eq!(
@@ -213,7 +219,7 @@ mod tests {
                 is_sell_order: false,
                 gas_cost: U256::from(100u64),
             },
-            Unit::ETHER.wei() / U256::from(2),
+            SellTokenPrice(Unit::ETHER.wei() / U256::from(2)),
         );
 
         assert_eq!(cut, None);

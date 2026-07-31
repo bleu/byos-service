@@ -119,10 +119,14 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
     /// order (`score = surplus - gas`, ADR-0002) with the simulated gas and the
     /// last-seen gas price.
     ///
-    /// No fee term and no gas-cut check, and it could not have one: fee
-    /// policies reach us only in the `/solve` payload, never on the
-    /// orderbook's order. Gas headroom is the whole question this gate can
-    /// ask — see [`score_proposal`](scoring::score_proposal).
+    /// No fee term, and it could not have one: fee policies reach us only in
+    /// the `/solve` payload, never on the orderbook's order — see
+    /// [`score_proposal`](scoring::score_proposal).
+    ///
+    /// No gas-cut limit check either, and that one is a choice rather than a
+    /// limitation: the sell token's price is one more `native_price` call per
+    /// proposal per tick. Ingestion stays cheap instead, and `/solve` skips a
+    /// proposal whose cut breaches the limit when it comes to bid.
     ///
     /// - `Some(Ok(()))` — score exceeds the minimum, proposal may activate.
     /// - `Some(Err(Unprofitable))` — score too low, or the orderbook cannot
@@ -171,7 +175,7 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
                 is_sell_order: record.order.kind == OrderKind::Sell,
                 gas_cost,
             },
-            native_price,
+            scoring::SurplusPrice(native_price),
         );
         if score.is_none_or(|s| s <= self.min_score) {
             tracing::info!(
