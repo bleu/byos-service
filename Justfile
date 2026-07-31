@@ -31,9 +31,9 @@ lint-openapi:
     npx --yes @apidevtools/swagger-cli@4 validate crates/byos/openapi.yml
     npx --yes @stoplight/spectral-cli@6 lint crates/byos/openapi.yml
 
-# Unit tests. Drop --no-tests=pass once the first test lands.
+# Unit tests.
 test-unit:
-    cargo nextest run --no-tests=pass
+    cargo nextest run
 
 # DB-backed service-level tests (proposal API + audit trail). Needs the
 # compose Postgres: `docker compose up -d postgres`.
