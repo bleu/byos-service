@@ -766,19 +766,15 @@ mod tests {
     const BUY_TOKEN: Address = address!("2222222222222222222222222222222222222222");
     const ORDER_UID: [u8; 56] = [0xaa; 56];
 
-    /// Builds a minimal valid auction JSON with one order and a zero gas
-    /// price, so nothing but surplus moves the score.
-    fn auction_json(kind: &str, sell_amount: &str, buy_amount: &str) -> serde_json::Value {
-        auction_json_with_gas_price(kind, sell_amount, buy_amount, "0")
-    }
-
-    /// Same auction with a gas price, for the tests where gas has to bite: the
-    /// gas cut on every fulfillment and the score's gas term.
-    fn auction_json_with_gas_price(
+    /// Builds a minimal valid auction JSON with one order.
+    /// `gas_price` is the auction's `effectiveGasPrice` as a decimal string,
+    /// not a `u64`: `/solve` has to cope with a value that does not fit one,
+    /// and only the wire type can express that.
+    fn auction_json(
         kind: &str,
         sell_amount: &str,
         buy_amount: &str,
-        effective_gas_price: &str,
+        gas_price: &str,
     ) -> serde_json::Value {
         serde_json::json!({
             "tokens": {
@@ -815,7 +811,7 @@ mod tests {
                 "signature": "0x"
             }],
             "liquidity": [],
-            "effectiveGasPrice": effective_gas_price,
+            "effectiveGasPrice": gas_price,
             "deadline": "2099-01-01T00:00:00Z",
             "surplusCapturingJitOrderOwners": []
         })
@@ -865,7 +861,7 @@ mod tests {
         let state = test_state().await;
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = raw_post_solve(&public_router(state), &auction).await;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -920,7 +916,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = raw_post_solve(&app, &auction).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -938,7 +934,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "Bearer driver-secret").await;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -953,7 +949,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "bearer driver-secret").await;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -966,7 +962,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "Bearer not-the-secret").await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -983,7 +979,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "Bearer DRIVER-SECRET").await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1037,7 +1033,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let solutions = result["solutions"].as_array().unwrap();
@@ -1057,7 +1053,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let trade = &result["solutions"][0]["trades"][0];
@@ -1071,7 +1067,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 950, 900).await;
 
-        let auction = auction_json("buy", "1000", "900");
+        let auction = auction_json("buy", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let trade = &result["solutions"][0]["trades"][0];
@@ -1095,7 +1091,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
 
-        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
         let result = post_solve(&app, &auction).await;
 
         let trade = &result["solutions"][0]["trades"][0];
@@ -1126,7 +1122,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 950_000_000, 900_000_000).await;
 
-        let auction = auction_json_with_gas_price("buy", "1000000000", "900000000", "1");
+        let auction = auction_json("buy", "1000000000", "900000000", "1");
         let result = post_solve(&app, &auction).await;
 
         let trade = &result["solutions"][0]["trades"][0];
@@ -1144,7 +1140,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
 
-        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
         let result = post_solve(&app, &auction).await;
 
         let prices = &result["solutions"][0]["prices"];
@@ -1168,14 +1164,14 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 2_000_000_000).await;
 
-        let thin = auction_json_with_gas_price("sell", "1000000000", "1999700000", "1");
+        let thin = auction_json("sell", "1000000000", "1999700000", "1");
         let result = post_solve(&app, &thin).await;
         assert!(
             result["solutions"].as_array().unwrap().is_empty(),
             "a cut that breaches the signed buy amount must not be bid",
         );
 
-        let fat = auction_json_with_gas_price("sell", "1000000000", "1990000000", "1");
+        let fat = auction_json("sell", "1000000000", "1990000000", "1");
         let result = post_solve(&app, &fat).await;
         assert_eq!(
             result["solutions"].as_array().unwrap().len(),
@@ -1194,7 +1190,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
 
-        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
         let result = post_solve(&app, &auction).await;
 
         assert_eq!(result["solutions"][0]["gas"], CUT_AT_PARITY);
@@ -1216,7 +1212,7 @@ mod tests {
         proposal.trampoline = Some(Address::ZERO);
         state.store().insert(proposal).await.expect("insert");
 
-        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
         let result = post_solve(&app, &auction).await;
 
         assert!(result["solutions"].as_array().unwrap().is_empty());
@@ -1232,7 +1228,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
 
         // Sell order: the surplus is in the buy token.
-        let mut auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let mut auction = auction_json("sell", "1000000000", "900000000", "1");
         auction["tokens"][BUY_TOKEN.to_string()]["referencePrice"] = serde_json::Value::Null;
         let result = post_solve(&app, &auction).await;
 
@@ -1249,7 +1245,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
 
-        let mut auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let mut auction = auction_json("sell", "1000000000", "900000000", "1");
         auction["tokens"][SELL_TOKEN.to_string()]["referencePrice"] = serde_json::Value::Null;
         let result = post_solve(&app, &auction).await;
 
@@ -1270,7 +1266,7 @@ mod tests {
         // Surplus at parity pricing is 230_000 wei, the same as the gas bill.
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 900_230_000).await;
 
-        let auction = auction_json_with_gas_price("sell", "1000000000", "900000000", "1");
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
         let result = post_solve(&app, &auction).await;
 
         assert!(result["solutions"].as_array().unwrap().is_empty());
@@ -1286,7 +1282,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 920).await;
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let solutions = result["solutions"].as_array().unwrap();
@@ -1302,7 +1298,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let mut auction = auction_json("sell", "1000", "900");
+        let mut auction = auction_json("sell", "1000", "900", "0");
         auction["id"] = serde_json::json!("77");
         let result = post_solve(&app, &auction).await;
         assert_eq!(result["solutions"].as_array().unwrap().len(), 1);
@@ -1337,7 +1333,7 @@ mod tests {
         proposal.trampoline = Some(Address::ZERO);
         state.store().insert(proposal).await.expect("insert");
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         assert!(result["solutions"].as_array().unwrap().is_empty());
@@ -1350,7 +1346,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         // No proposals inserted.
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let solutions = result["solutions"].as_array().unwrap();
