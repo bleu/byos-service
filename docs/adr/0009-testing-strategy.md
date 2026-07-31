@@ -33,7 +33,7 @@ What tier 2 can assert depends on which sub-solver is driving it. With the refer
 
 The reference `subsolver` discovers orders from the stack's real orderbook API — the same discovery channel it uses in production.
 
-COW-1236 makes this tier human-drivable before the tests exist: a `driver.toml` and compose overlay in `dev/offline-mode/`, and `just` recipes that boot the stack and read the settling solver back off the chain. See the README.
+The tier is human-drivable before the tests exist: a `driver.toml` and compose overlay in `dev/offline-mode/`, and `just` recipes that boot the stack and read the settling solver back off the chain. See the README.
 
 Vehicle: offline-mode is pinned as a git submodule; this repo carries a small overlay (compose override, `driver.toml` with the byos block, and the state-regeneration step below). Changes generally useful to offline-mode (e.g. a generic "deploy extra contracts" hook) are PR'd upstream — bleu maintains it.
 

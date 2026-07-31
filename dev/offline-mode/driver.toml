@@ -1,4 +1,4 @@
-# Driver config for the offline-mode stack with BYOS plugged in (COW-1236).
+# Driver config for the offline-mode stack with BYOS plugged in.
 #
 # A copy of the submodule's `config/offline/driver.toml` with one `[[solver]]`
 # block added, because the driver takes a single `--config` file and TOML has no

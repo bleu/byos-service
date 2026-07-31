@@ -1,4 +1,4 @@
-# Reference sub-solver config for the offline-mode demo stack (COW-1236).
+# Reference sub-solver config for the offline-mode demo stack.
 #
 # Same shape as crates/subsolver/config/example.toml. The Uniswap V2 addresses
 # are unchanged from it because offline-mode places its contracts at their real

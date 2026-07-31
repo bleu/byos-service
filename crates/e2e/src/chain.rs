@@ -127,7 +127,7 @@ impl Chain {
 /// they are part of the CREATE2 init code: two deployments with different roles
 /// land at different addresses. Tier 1 uses anvil accounts 0/1/2 (see
 /// [`Chain::spawn`]); the offline-mode demo uses 3/1/2 so BYOS settles from its
-/// own account instead of baseline's (COW-1236).
+/// own account instead of baseline's.
 pub struct EscrowRoles {
     pub admin: Address,
     pub operator: Address,

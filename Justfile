@@ -80,7 +80,7 @@ build:
 # constants drift and a drifted domain fails in a way that looks like the
 # service's fault: the POST is accepted and the read then 404s. The factory
 # is the visibly-fake one from the sub-solver tests; the key is anvil
-# account 4, matching COW-1236's account map.
+# account 4, matching the demo stack's account map.
 local-chain-id := "31337"
 local-factory := "0x00000000000000000000000000000000000fac70"
 local-subsolver-key := "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
@@ -135,7 +135,7 @@ propose:
 # ---------------------------------------------------------------------------
 # The offline-mode demo stack: BYOS as the only solver in the auction
 # ---------------------------------------------------------------------------
-# COW-1236. A full CoW stack (real orderbook, autopilot, driver, baseline) from
+# A full CoW stack (real orderbook, autopilot, driver, baseline) from
 # the pinned offline-mode submodule, with `byos` and `subsolver` running on the
 # host. See README.md for the walkthrough; docs/adr/0009-testing-strategy.md
 # for why the overlay lives here rather than in the submodule.

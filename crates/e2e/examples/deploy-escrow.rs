@@ -2,7 +2,7 @@
 //! the addresses the rest of the stack needs.
 //!
 //! Tier-1 e2e gets its Escrow from [`e2e::chain::Chain::spawn`], which owns its
-//! anvil. The offline-mode demo (COW-1236) cannot: anvil lives in a container
+//! anvil. The offline-mode demo cannot: anvil lives in a container
 //! the compose stack started, and the deploy has to happen from outside. This
 //! wraps the same [`e2e::chain::deploy_escrow`] helper in a CLI so `just
 //! stack-up` can call it.
