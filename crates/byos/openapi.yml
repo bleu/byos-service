@@ -374,7 +374,7 @@ components:
         - `OrderNotFound` — the orderbook does not know the proposal's
           order UID.
         - `Unprofitable` — the first simulation scored the proposal at or
-          below the minimum (`score = surplus + fee - gas`), so it could
+          below the minimum (`score = surplus - gas`), so it could
           never win an auction. Fix: improve the price or
           resubmit when gas is cheaper.
       type: string
