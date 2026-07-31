@@ -1,4 +1,4 @@
-//! Write-behind audit trail against a real Postgres (COW-1172).
+//! Write-behind audit trail against a real Postgres.
 
 use {
     crate::tests::setup::{self, TestApp, TestDb},

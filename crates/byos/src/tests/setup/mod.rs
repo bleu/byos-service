@@ -223,7 +223,7 @@ impl TestDb {
 pub struct TestApp {
     /// Public listener (proposal CRUD).
     pub addr: SocketAddr,
-    /// Internal listener (`/solve`, driver-only — COW-1174).
+    /// Internal listener (`/solve`, driver-only).
     pub internal_addr: SocketAddr,
     client: reqwest::Client,
     shutdown: oneshot::Sender<()>,

@@ -1,4 +1,4 @@
-//! Track A penalty policy (ADR-0003, COW-1205): the debit amounts and the
+//! Track A penalty policy (ADR-0003): the debit amounts and the
 //! chain seam the penalty loop drives. A reverted settlement costs the
 //! sub-solver `gas + c_l`; winning an auction and never settling costs
 //! `0.1 × c_l`. `c_l` is the configured `--min-collateral`.

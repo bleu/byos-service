@@ -2,7 +2,7 @@
 //!
 //! Two listeners share the Postgres proposal store (ADR-0013):
 //! - **Public** (`/proposals`): sub-solver-facing CRUD
-//! - **Internal** (`/solve`): driver-facing solver engine (COW-1163)
+//! - **Internal** (`/solve`): driver-facing solver engine
 //!
 //! Internal split: `domain/` is pure logic, `infra/` owns IO (ADR-0005).
 

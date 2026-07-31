@@ -314,7 +314,7 @@ mod tests {
         );
     }
 
-    /// Acceptance (COW-1204): `settlementStarted` → `success` ends with the
+    /// Acceptance: `settlementStarted` → `success` ends with the
     /// proposal `Settled` and the tx hash readable on the owner's GET.
     #[ignore]
     #[tokio::test]
@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(body["settlementTxHash"], tx);
     }
 
-    /// Acceptance (COW-1204): `revert` ends `SettleFailed` with the
+    /// Acceptance: `revert` ends `SettleFailed` with the
     /// reverted tx hash recorded on the proposal.
     #[ignore]
     #[tokio::test]
@@ -376,7 +376,7 @@ mod tests {
         );
     }
 
-    /// Acceptance (COW-1204): `cancelled`/`expired`/`fail` mean no tx landed
+    /// Acceptance: `cancelled`/`expired`/`fail` mean no tx landed
     /// — the proposal returns to `Active` and re-enters competition.
     #[ignore]
     #[tokio::test]
@@ -402,7 +402,7 @@ mod tests {
         }
     }
 
-    /// Acceptance (COW-1205): a driver-confirmed abandonment ("won but never
+    /// Acceptance: a driver-confirmed abandonment ("won but never
     /// settled", ADR-0003) queues the 0.1 × c_l non-settlement debit — the
     /// proposal itself re-enters competition, so the pending charge lives in
     /// the `penalties` queue, not in proposal state.
@@ -482,7 +482,7 @@ mod tests {
         }
     }
 
-    /// Acceptance (COW-1204): a notification with no matching `solutions`
+    /// Acceptance: a notification with no matching `solutions`
     /// row is acknowledged, not errored — outcome kinds additionally alert
     /// via the log (not observable here).
     #[ignore]

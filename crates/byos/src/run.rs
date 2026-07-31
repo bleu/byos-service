@@ -43,7 +43,7 @@ pub(crate) struct Args {
 
     /// Internal API listener address (`/solve`). Only our co-deployed driver
     /// may call `/solve` — the proposal book it returns is MEV-relevant — so
-    /// keep this address unreachable from the internet (COW-1174). Defaults
+    /// keep this address unreachable from the internet. Defaults
     /// to loopback.
     #[arg(long, env, default_value = "127.0.0.1:9586")]
     internal_addr: SocketAddr,
@@ -144,8 +144,8 @@ pub(crate) struct Args {
     min_proposal_score: u128,
 
     /// Private key of the escrow operator account (`OPERATOR_ROLE` on the
-    /// Escrow contract), enabling the Track A penalty loop (ADR-0003,
-    /// COW-1205). When omitted, debits are disabled and `SettleFailed`
+    /// Escrow contract), enabling the Track A penalty loop (ADR-0003).
+    /// When omitted, debits are disabled and `SettleFailed`
     /// proposals wait. Prefer the OPERATOR_PRIVATE_KEY env var — CLI
     /// arguments are visible to other users via `ps`.
     #[arg(long, env, requires = "rpc_url")]
@@ -323,7 +323,7 @@ async fn run_with(
             .await
             .context("RPC unreachable at startup (--rpc-url)")?;
 
-        // Track A penalty loop (ADR-0003, COW-1205): debits SettleFailed
+        // Track A penalty loop (ADR-0003): debits SettleFailed
         // reverts and queued non-settlement charges from escrow. Without the
         // operator key the service still observes outcomes; the debits just
         // wait for an operator-enabled instance.

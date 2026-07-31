@@ -309,7 +309,7 @@ mod tests {
 
     /// The executing-timeout release is not a driver-confirmed abandonment —
     /// the notification may simply be lost — so it must not queue the
-    /// non-settlement charge (COW-1205); only `/notify` does.
+    /// non-settlement charge; only `/notify` does.
     #[ignore]
     #[tokio::test]
     async fn timeout_release_queues_no_non_settlement_penalty() {
@@ -326,7 +326,7 @@ mod tests {
         );
     }
 
-    /// Acceptance (COW-1204): while `Executing`, a proposal is neither
+    /// Acceptance: while `Executing`, a proposal is neither
     /// re-simulated nor expired — its exit is a driver notification or the
     /// executing timeout, not the validation tick (ADR-0013).
     #[ignore]

@@ -207,7 +207,7 @@ impl ProposalStore {
         Ok(())
     }
 
-    /// Record a landed Track A escrow debit (ADR-0003, COW-1205):
+    /// Record a landed Track A escrow debit (ADR-0003):
     /// `SettleFailed` → `Penalized`, citing the debit transaction and its
     /// amount as evidence. Same compare-and-swap semantics as
     /// [`Self::transition`].
@@ -766,7 +766,7 @@ impl ProposalStore {
     }
 
     /// Queue the 0.1 × c_l non-settlement charge for a proposal whose won
-    /// settlement was abandoned (ADR-0003, COW-1205). Called by `/notify`
+    /// settlement was abandoned (ADR-0003). Called by `/notify`
     /// after the `Executing` → `Active` transition commits — the CAS there
     /// is what makes one lost settlement queue exactly one charge.
     pub async fn queue_non_settlement_penalty(
@@ -1498,7 +1498,7 @@ mod tests {
         );
     }
 
-    /// Acceptance (COW-1205): the audit trail records the debit with its
+    /// Acceptance: the audit trail records the debit with its
     /// amount and both transaction hashes — the dispute evidence for a
     /// Track A charge.
     #[ignore]
@@ -1542,7 +1542,7 @@ mod tests {
         assert_eq!(payload["settlementTxHash"], format!("{settlement_tx:#x}"));
     }
 
-    /// Acceptance (COW-1205): the non-settlement charge is audited with its
+    /// Acceptance: the non-settlement charge is audited with its
     /// amount and debit tx, attributed to the proposal and sub-solver.
     #[ignore]
     #[tokio::test]
@@ -2094,7 +2094,7 @@ mod tests {
         assert_eq!(event.payload()["kind"], "emptySolution");
     }
 
-    /// Acceptance (COW-1204): an `Executing` proposal older than the
+    /// Acceptance: an `Executing` proposal older than the
     /// executing timeout falls back to `Active` without a notification —
     /// the backstop for lost notifications and restarts mid-settlement.
     #[ignore]
@@ -2161,8 +2161,8 @@ mod tests {
         // Every dropped-tier status, not just one: the money-state test
         // already loops over all six it must spare, and asserting only
         // `Cancelled` here meant a status quietly dropped from `DROPPED` would
-        // leave the table growing without failing anything — the COW-1177 leak
-        // ADR-0013 set out to close.
+        // leave the table growing without failing anything — the leak ADR-0013
+        // set out to close.
         let mut ids = Vec::new();
         for (i, status) in [
             ProposalStatus::Rejected,
@@ -2219,7 +2219,7 @@ mod tests {
     }
 
     /// The money states (`Settled`/`SettleFailed`/`Penalized`) are never
-    /// swept (ADR-0013, COW-1204), and neither are live or in-flight
+    /// swept (ADR-0013), and neither are live or in-flight
     /// proposals.
     #[ignore]
     #[tokio::test]
@@ -2262,7 +2262,7 @@ mod tests {
     /// A swept proposal takes its auction-participation rows with it;
     /// settled proposals are never swept, so their rows survive — that is
     /// how "solutions rows tied to settlements are never swept" holds
-    /// (COW-1204).
+    /// (ADR-0013).
     #[ignore]
     #[tokio::test]
     async fn sweep_cascades_solutions_rows_of_dropped_proposals_only() {
@@ -2315,7 +2315,7 @@ mod tests {
 
     /// The owner cancels after the validator snapshotted the proposal but
     /// before the verdict lands: applying the verdict must fail and the
-    /// cancellation must stick (COW-1202 acceptance criterion).
+    /// cancellation must stick.
     #[ignore]
     #[tokio::test]
     async fn cancellation_during_validation_wins_over_the_verdict() {

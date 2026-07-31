@@ -55,7 +55,7 @@ pub enum AuditKind {
         /// (ADR-0010).
         settlement_tx_hash: Option<B256>,
     },
-    /// The Track A escrow debit landed (ADR-0003, COW-1205): `SettleFailed`
+    /// The Track A escrow debit landed (ADR-0003): `SettleFailed`
     /// → `Penalized`. Richer than a plain [`AuditKind::StatusChanged`]
     /// because the charge itself is the evidence — the amount and the debit
     /// tx must survive any dispute.
@@ -71,7 +71,7 @@ pub enum AuditKind {
         /// The landed debit transaction.
         penalty_tx_hash: B256,
     },
-    /// A landed non-settlement debit (ADR-0003, COW-1205): the sub-solver
+    /// A landed non-settlement debit (ADR-0003): the sub-solver
     /// won an auction and the settlement was abandoned. No transition — the
     /// proposal is `Active` again — so the charge is its own event.
     NonSettlementDebited {
