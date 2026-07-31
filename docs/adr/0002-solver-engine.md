@@ -51,7 +51,7 @@ Before returning solutions, BYOS filters and ranks proposals, selecting **one wi
 
 A winner with non-positive score is not returned: settling a trade expected to cost more in gas than it earns in surplus is worse than skipping the order.
 
-This matches the RFP requirement: "the engine selects the one yielding the greatest surplus after any configured BYOS fee." Nothing is configured any more — the only fee BYOS charges is the gas cut, always on and sized at cost (§Fee mechanism) — and ranking on `surplus - gas` is what "after the fee" reduces to once the cut equals the gas. BYOS's score is a pre-ranking approximation of the driver's effective scoring; the driver still performs its own scoring after encoding.
+This satisfies the RFP's selection requirement, with one wrinkle: the RFP asks for the greatest surplus "after any configured BYOS fee", and there is no configured fee. The only one BYOS charges is the gas cut, always on and sized at cost (§Fee mechanism), which is why ranking on `surplus - gas` is already surplus after the fee. BYOS's score is a pre-ranking approximation of the driver's effective scoring; the driver still performs its own scoring after encoding.
 
 ### Validation split: ingestion vs `/solve`
 
