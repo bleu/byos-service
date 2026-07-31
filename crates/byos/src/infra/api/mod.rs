@@ -823,10 +823,20 @@ mod tests {
         sell_amount: u64,
         buy_amount: u64,
     ) {
+        insert_active_proposal_with_gas(state, sub_solver, sell_amount, buy_amount, 200_000).await;
+    }
+
+    async fn insert_active_proposal_with_gas(
+        state: &AppState,
+        sub_solver: Address,
+        sell_amount: u64,
+        buy_amount: u64,
+        gas_used: u64,
+    ) {
         let mut proposal = test_proposal(OrderUid(ORDER_UID), sub_solver, ProposalStatus::Active);
         proposal.sell_amount = U256::from(sell_amount);
         proposal.buy_amount = U256::from(buy_amount);
-        proposal.gas_used = Some(200_000);
+        proposal.gas_used = Some(gas_used);
         proposal.trampoline = Some(Address::ZERO);
         state
             .store()
@@ -1171,6 +1181,58 @@ mod tests {
             1,
             "the same proposal against a limit with room for the cut must bid",
         );
+    }
+
+    /// The cut is checked per proposal, before the winner is picked, so a
+    /// breach costs us that proposal and not the whole order. Moving the check
+    /// after the ranking would pass every other test and silently start
+    /// skipping orders that had a perfectly good second choice.
+    ///
+    /// The top scorer can only be the one that breaches when the two differ in
+    /// gas: at equal gas, more `buy_amount` means both a higher score and more
+    /// room for the cut. So the fat route here rides an expensive path.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_falls_back_to_the_runner_up_when_the_best_cut_breaches() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        // Cut 530_000, score 470_000, delivers 1_998_940_000 — under the limit.
+        insert_active_proposal_with_gas(
+            &state,
+            Address::ZERO,
+            1_000_000_000,
+            2_000_000_000,
+            500_000,
+        )
+        .await;
+        // Cut 130_000, score 270_000, delivers 1_999_140_078 — over it.
+        insert_active_proposal_with_gas(
+            &state,
+            Address::ZERO,
+            1_000_000_000,
+            1_999_400_000,
+            100_000,
+        )
+        .await;
+
+        let tight = auction_json("sell", "1000000000", "1999000000", "1");
+        let result = post_solve(&app, &tight).await;
+
+        let solutions = result["solutions"].as_array().unwrap();
+        assert_eq!(solutions.len(), 1, "the runner-up still deserves a bid");
+        assert_eq!(
+            solutions[0]["trades"][0]["fee"], "130000",
+            "the surviving bid must be the runner-up, not the higher-scoring proposal",
+        );
+        assert_eq!(solutions[0]["trades"][0]["executedAmount"], "999870000");
+
+        // Same two proposals, a limit with room for both cuts. The fat route
+        // wins on score here, which is what makes the run above a fallback and
+        // not the ranking picking the cheap proposal on its own merits.
+        let loose = auction_json("sell", "1000000000", "1990000000", "1");
+        let result = post_solve(&app, &loose).await;
+
+        assert_eq!(result["solutions"][0]["trades"][0]["fee"], "530000");
     }
 
     /// The driver's settlement budget: simulated gas plus the scoring buffer,
