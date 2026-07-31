@@ -5,9 +5,9 @@
 use {
     super::AppState,
     crate::domain::{
-        fee::{Cut, CutInput, gas_cut},
+        fee::{Cut, gas_cut},
         proposal::{OrderUid, Proposal},
-        scoring::{ScoreInput, effective_gas, score_proposal, surplus_token},
+        scoring::{Candidate, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -91,30 +91,22 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                 let gas_used = p.gas_used?;
                 let gas_cost =
                     U256::from(effective_gas(gas_used)).saturating_mul(auction.effective_gas_price);
-                let score = score_proposal(&ScoreInput {
+                let candidate = Candidate {
                     order_sell: order.sell_amount,
                     order_buy: order.buy_amount,
                     proposal_sell: p.sell_amount,
                     proposal_buy: p.buy_amount,
                     is_sell_order: is_sell,
                     gas_cost,
-                    native_price,
-                })?;
+                };
+                let score = score_proposal(&candidate, native_price)?;
                 // Sizing the cut can rule a proposal out where the score cannot:
                 // the score converts surplus at the auction's price for the
                 // surplus token, while the user's limit is enforced on the
                 // route's own amounts. A stale auction price makes the two
                 // disagree. Drop it here so a runner-up can still take the
                 // order.
-                let cut = gas_cut(&CutInput {
-                    order_sell: order.sell_amount,
-                    order_buy: order.buy_amount,
-                    proposal_sell: p.sell_amount,
-                    proposal_buy: p.buy_amount,
-                    is_sell_order: is_sell,
-                    gas_cost,
-                    sell_token_price,
-                })?;
+                let cut = gas_cut(&candidate, sell_token_price)?;
                 (score > U256::ZERO).then_some((p, gas_used, cut, score))
             })
             .max_by_key(|(_, _, _, score)| *score);

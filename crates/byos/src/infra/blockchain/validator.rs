@@ -164,15 +164,17 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
 
         let gas_cost = U256::from(scoring::effective_gas(gas))
             .saturating_mul(U256::from(self.gas_price.load(Ordering::Relaxed)));
-        let score = scoring::score_proposal(&scoring::ScoreInput {
-            order_sell: record.order.sell_amount,
-            order_buy: record.order.buy_amount,
-            proposal_sell: proposal.sell_amount,
-            proposal_buy: proposal.buy_amount,
-            is_sell_order: record.order.kind == OrderKind::Sell,
-            gas_cost,
+        let score = scoring::score_proposal(
+            &scoring::Candidate {
+                order_sell: record.order.sell_amount,
+                order_buy: record.order.buy_amount,
+                proposal_sell: proposal.sell_amount,
+                proposal_buy: proposal.buy_amount,
+                is_sell_order: record.order.kind == OrderKind::Sell,
+                gas_cost,
+            },
             native_price,
-        });
+        );
         if score.is_none_or(|s| s <= self.min_score) {
             tracing::info!(
                 id = %proposal.id,

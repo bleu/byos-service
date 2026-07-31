@@ -33,17 +33,29 @@ pub fn surplus_token(is_sell_order: bool, sell_token: Address, buy_token: Addres
     if is_sell_order { buy_token } else { sell_token }
 }
 
-pub struct ScoreInput {
+/// A proposal weighed against its order at this auction's gas price.
+///
+/// Built once per proposal and shared by [`score_proposal`] and
+/// [`gas_cut`](super::fee::gas_cut), which ask different questions of the same
+/// pair and take different prices to do it. One value means they cannot drift
+/// apart on the pair itself.
+///
+/// Assumes the pair already passed the validation envelope
+/// ([`OrderRecord::check_envelope`](super::order::OrderRecord::check_envelope)):
+/// a sell order's `proposal_sell` equals its `order_sell`, a buy order's
+/// `proposal_buy` equals its `order_buy`. The gas cut's sell-side scaling reads
+/// the route's rate off that equality, so a mismatched pair would be priced
+/// wrong. `/solve` does not re-check it — an `Active` proposal is one that
+/// passed.
+#[derive(Clone, Copy, Debug)]
+pub struct Candidate {
     pub order_sell: U256,
     pub order_buy: U256,
     pub proposal_sell: U256,
     pub proposal_buy: U256,
     pub is_sell_order: bool,
-    /// Gas cost in wei (`gas_estimate × effective_gas_price`).
+    /// Gas cost in wei (`effective_gas(gas_used) × effective_gas_price`).
     pub gas_cost: U256,
-    /// Auction reference price for the surplus token: how much wei buys 10^18
-    /// atoms of that token. Converts surplus to native-token units.
-    pub native_price: U256,
 }
 
 /// Score a proposal against an order. Returns `None` when the proposal is
@@ -53,6 +65,10 @@ pub struct ScoreInput {
 ///  - Sell order: `proposal_buy - order_buy` (more buy tokens for the user)
 ///  - Buy order: `order_sell - proposal_sell` (fewer sell tokens from the user)
 ///
+/// `native_price` is the auction's reference price for the **surplus** token
+/// ([`surplus_token`]): how much wei buys 10^18 atoms of it. Not the same token
+/// the gas cut is denominated in.
+///
 /// There is deliberately no fee term. CoW's own score is surplus plus protocol
 /// fees and nothing else (CIP-38) — gas never appears as a subtraction there.
 /// The protocol fee cancels out of any ranking, because it is carved out of
@@ -61,23 +77,23 @@ pub struct ScoreInput {
 /// receives. So once the cut equals the gas cost, `surplus - gas` is exactly
 /// the score the autopilot will compute for our bid, and reading per-order fee
 /// policies would buy nothing.
-pub fn score_proposal(input: &ScoreInput) -> Option<U256> {
-    let surplus = if input.is_sell_order {
+pub fn score_proposal(candidate: &Candidate, native_price: U256) -> Option<U256> {
+    let surplus = if candidate.is_sell_order {
         // Sell order: user offers sell_amount, wants at least buy_amount.
         // Surplus = how much more buyToken the proposal provides.
-        input.proposal_buy.checked_sub(input.order_buy)?
+        candidate.proposal_buy.checked_sub(candidate.order_buy)?
     } else {
         // Buy order: user wants buy_amount, offers at most sell_amount.
         // Surplus = how much less sellToken the proposal consumes.
-        input.order_sell.checked_sub(input.proposal_sell)?
+        candidate.order_sell.checked_sub(candidate.proposal_sell)?
     };
 
     // Convert surplus from token units to native-token (wei) units.
     let surplus_eth = surplus
-        .checked_mul(input.native_price)?
+        .checked_mul(native_price)?
         .checked_div(Unit::ETHER.wei())?;
 
-    surplus_eth.checked_sub(input.gas_cost)
+    surplus_eth.checked_sub(candidate.gas_cost)
 }
 
 #[cfg(test)]
@@ -92,15 +108,17 @@ mod tests {
     #[test]
     fn sell_order_positive_surplus() {
         // Surplus token (buy token) is worth 0.5 ETH per 10^18 atoms.
-        let score = score_proposal(&ScoreInput {
-            order_sell: U256::from(1_000u64),
-            order_buy: U256::from(900u64),
-            proposal_sell: U256::from(1_000u64),
-            proposal_buy: U256::from(950u64),
-            is_sell_order: true,
-            gas_cost: U256::ZERO,
-            native_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let score = score_proposal(
+            &Candidate {
+                order_sell: U256::from(1_000u64),
+                order_buy: U256::from(900u64),
+                proposal_sell: U256::from(1_000u64),
+                proposal_buy: U256::from(950u64),
+                is_sell_order: true,
+                gas_cost: U256::ZERO,
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
         // surplus = 950 - 900 = 50
         // surplus_eth = 50 * 0.5e18 / 1e18 = 25
         assert_eq!(score, Some(U256::from(25u64)));
@@ -108,15 +126,17 @@ mod tests {
 
     #[test]
     fn buy_order_positive_surplus() {
-        let score = score_proposal(&ScoreInput {
-            order_sell: U256::from(1_000u64),
-            order_buy: U256::from(900u64),
-            proposal_sell: U256::from(950u64),
-            proposal_buy: U256::from(900u64),
-            is_sell_order: false,
-            gas_cost: U256::ZERO,
-            native_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let score = score_proposal(
+            &Candidate {
+                order_sell: U256::from(1_000u64),
+                order_buy: U256::from(900u64),
+                proposal_sell: U256::from(950u64),
+                proposal_buy: U256::from(900u64),
+                is_sell_order: false,
+                gas_cost: U256::ZERO,
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
         // surplus = 1000 - 950 = 50
         // surplus_eth = 50 * 0.5e18 / 1e18 = 25
         assert_eq!(score, Some(U256::from(25u64)));
@@ -124,30 +144,34 @@ mod tests {
 
     #[test]
     fn proposal_below_minimum_returns_none() {
-        let score = score_proposal(&ScoreInput {
-            order_sell: U256::from(1_000u64),
-            order_buy: U256::from(900u64),
-            proposal_sell: U256::from(1_000u64),
-            proposal_buy: U256::from(800u64), // below order's buy minimum
-            is_sell_order: true,
-            gas_cost: U256::ZERO,
-            native_price: Unit::ETHER.wei(),
-        });
+        let score = score_proposal(
+            &Candidate {
+                order_sell: U256::from(1_000u64),
+                order_buy: U256::from(900u64),
+                proposal_sell: U256::from(1_000u64),
+                proposal_buy: U256::from(800u64), // below order's buy minimum
+                is_sell_order: true,
+                gas_cost: U256::ZERO,
+            },
+            Unit::ETHER.wei(),
+        );
         assert_eq!(score, None);
     }
 
     #[test]
     fn gas_exceeds_surplus_returns_none() {
         // Native price = 1:1 so surplus_eth equals surplus in token units.
-        let score = score_proposal(&ScoreInput {
-            order_sell: U256::from(1_000u64),
-            order_buy: U256::from(900u64),
-            proposal_sell: U256::from(1_000u64),
-            proposal_buy: U256::from(910u64), // surplus = 10
-            is_sell_order: true,
-            gas_cost: U256::from(20u64), // gas = 20 > surplus_eth (10)
-            native_price: Unit::ETHER.wei(),
-        });
+        let score = score_proposal(
+            &Candidate {
+                order_sell: U256::from(1_000u64),
+                order_buy: U256::from(900u64),
+                proposal_sell: U256::from(1_000u64),
+                proposal_buy: U256::from(910u64), // surplus = 10
+                is_sell_order: true,
+                gas_cost: U256::from(20u64), // gas = 20 > surplus_eth (10)
+            },
+            Unit::ETHER.wei(),
+        );
         assert_eq!(score, None);
     }
 
@@ -156,29 +180,33 @@ mod tests {
     /// checks, so a wrapped product would rank an absurd proposal first.
     #[test]
     fn surplus_that_overflows_the_conversion_returns_none() {
-        let score = score_proposal(&ScoreInput {
-            order_sell: U256::ZERO,
-            order_buy: U256::ZERO,
-            proposal_sell: U256::ZERO,
-            proposal_buy: U256::MAX,
-            is_sell_order: true,
-            gas_cost: U256::ZERO,
-            native_price: U256::from(2),
-        });
+        let score = score_proposal(
+            &Candidate {
+                order_sell: U256::ZERO,
+                order_buy: U256::ZERO,
+                proposal_sell: U256::ZERO,
+                proposal_buy: U256::MAX,
+                is_sell_order: true,
+                gas_cost: U256::ZERO,
+            },
+            U256::from(2),
+        );
         assert_eq!(score, None);
     }
 
     #[test]
     fn zero_surplus_minus_zero_gas() {
-        let score = score_proposal(&ScoreInput {
-            order_sell: U256::from(1_000u64),
-            order_buy: U256::from(900u64),
-            proposal_sell: U256::from(1_000u64),
-            proposal_buy: U256::from(900u64), // exactly at minimum
-            is_sell_order: true,
-            gas_cost: U256::ZERO,
-            native_price: Unit::ETHER.wei(),
-        });
+        let score = score_proposal(
+            &Candidate {
+                order_sell: U256::from(1_000u64),
+                order_buy: U256::from(900u64),
+                proposal_sell: U256::from(1_000u64),
+                proposal_buy: U256::from(900u64), // exactly at minimum
+                is_sell_order: true,
+                gas_cost: U256::ZERO,
+            },
+            Unit::ETHER.wei(),
+        );
         assert_eq!(score, Some(U256::ZERO));
     }
 }

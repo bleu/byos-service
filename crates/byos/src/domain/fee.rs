@@ -30,7 +30,10 @@
 //! dashboard of gas paid against gas collected per solver is better feedback
 //! than anything computed here.
 
-use alloy::primitives::{U256, utils::Unit};
+use {
+    super::scoring::Candidate,
+    alloy::primitives::{U256, utils::Unit},
+};
 
 /// A proposal's gas cut, sized against one order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,73 +47,57 @@ pub struct Cut {
     pub executed_amount: U256,
 }
 
-/// Assumes the pair already passed the validation envelope
-/// ([`OrderRecord::check_envelope`](super::order::OrderRecord::check_envelope)):
-/// a sell order's `proposal_sell` equals its `order_sell`, a buy order's
-/// `proposal_buy` equals its `order_buy`. The sell-side scaling below reads the
-/// route's rate off that equality, so a mismatched pair would be priced wrong.
-/// `/solve` does not re-check it — an `Active` proposal is one that passed.
-pub struct CutInput {
-    pub order_sell: U256,
-    pub order_buy: U256,
-    pub proposal_sell: U256,
-    pub proposal_buy: U256,
-    pub is_sell_order: bool,
-    /// Gas cost in wei
-    /// ([`effective_gas`](super::scoring::effective_gas)` ×
-    /// effective_gas_price`).
-    pub gas_cost: U256,
-    /// Auction reference price for the *sell* token: how much wei buys 10^18
-    /// atoms of it. The cut is denominated in the sell token, which for a sell
-    /// order is not the token the surplus is in.
-    pub sell_token_price: U256,
-}
-
 /// Size the gas cut for one proposal and shape the fulfillment amounts around
 /// it.
+///
+/// `sell_token_price` is the auction's reference price for the order's **sell**
+/// token: how much wei buys 10^18 atoms of it. The cut is denominated in the
+/// sell token, which for a sell order is not the token the surplus is in, so
+/// this is a different price from the one
+/// [`score_proposal`](super::scoring::score_proposal) takes.
 ///
 /// `None` when the cut cannot be sized (the auction gives the sell token no
 /// price) or when taking it would push the user past the limit they signed.
 /// That limit check is ours to make because the price is ours; it needs no fee
 /// policies, which the auction only ever delivers per-`/solve` anyway.
-pub fn gas_cut(input: &CutInput) -> Option<Cut> {
-    if input.sell_token_price.is_zero() {
+pub fn gas_cut(candidate: &Candidate, sell_token_price: U256) -> Option<Cut> {
+    if sell_token_price.is_zero() {
         return None;
     }
     // Round up: a cut an atom short of the gas bill is a loss, an atom over
     // costs the user a rounding error.
-    let fee = input
+    let fee = candidate
         .gas_cost
         .checked_mul(Unit::ETHER.wei())?
-        .div_ceil(input.sell_token_price);
+        .div_ceil(sell_token_price);
 
     // Both branches reproduce what the driver will encode. It builds per-trade
     // clearing prices as `{sell: buy_amount(), buy: sell_amount()}` and GPv2
     // pays out `order.sellAmount × sell ÷ buy` for a fill-or-kill order, so the
     // amounts below are the ones the settlement's limit check will see
     // (`driver/src/domain/competition/solution/trade.rs:219-249`).
-    let executed_amount = if input.is_sell_order {
-        let executed = input.order_sell.checked_sub(fee)?;
+    let executed_amount = if candidate.is_sell_order {
+        let executed = candidate.order_sell.checked_sub(fee)?;
         // We route the full sell amount but declare only `executed` of it, so
         // the user receives the route's output scaled by the same ratio:
         // `R × (S − f) / S`. Below the signed buy amount the settlement reverts,
         // so drop the proposal here. The chain rounds this up and we round it
         // down, which leaves us strictly on the safe side of the check.
-        let received = input
+        let received = candidate
             .proposal_buy
             .checked_mul(executed)?
-            .checked_div(input.order_sell)?;
-        if received < input.order_buy {
+            .checked_div(candidate.order_sell)?;
+        if received < candidate.order_buy {
             return None;
         }
         executed
     } else {
         // Buy orders: the route's input plus the cut is what leaves the user's
         // wallet, and it cannot exceed the sell amount they signed.
-        if input.proposal_sell.checked_add(fee)? > input.order_sell {
+        if candidate.proposal_sell.checked_add(fee)? > candidate.order_sell {
             return None;
         }
-        input.order_buy
+        candidate.order_buy
     };
 
     Some(Cut {
@@ -127,15 +114,17 @@ mod tests {
     /// 200 atoms of it.
     #[test]
     fn sell_order_cut_is_the_gas_cost_in_sell_token_atoms() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(900_000u64),
-            proposal_sell: U256::from(1_000_000u64),
-            proposal_buy: U256::from(1_000_000u64),
-            is_sell_order: true,
-            gas_cost: U256::from(100u64),
-            sell_token_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(900_000u64),
+                proposal_sell: U256::from(1_000_000u64),
+                proposal_buy: U256::from(1_000_000u64),
+                is_sell_order: true,
+                gas_cost: U256::from(100u64),
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
 
         assert_eq!(
             cut,
@@ -151,15 +140,17 @@ mod tests {
     /// signed for. Bidding it would revert the settlement's limit check.
     #[test]
     fn sell_order_cut_that_breaches_the_signed_limit_is_skipped() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(899_900u64),
-            proposal_sell: U256::from(1_000_000u64),
-            proposal_buy: U256::from(900_000u64),
-            is_sell_order: true,
-            gas_cost: U256::from(100u64),
-            sell_token_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(899_900u64),
+                proposal_sell: U256::from(1_000_000u64),
+                proposal_buy: U256::from(900_000u64),
+                is_sell_order: true,
+                gas_cost: U256::from(100u64),
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
 
         assert_eq!(cut, None);
     }
@@ -168,15 +159,17 @@ mod tests {
     /// on-chain check is "at least", so the boundary belongs on the keep side.
     #[test]
     fn sell_order_cut_that_lands_exactly_on_the_limit_is_kept() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(999_800u64),
-            proposal_sell: U256::from(1_000_000u64),
-            proposal_buy: U256::from(1_000_000u64),
-            is_sell_order: true,
-            gas_cost: U256::from(100u64),
-            sell_token_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(999_800u64),
+                proposal_sell: U256::from(1_000_000u64),
+                proposal_buy: U256::from(1_000_000u64),
+                is_sell_order: true,
+                gas_cost: U256::from(100u64),
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
 
         assert_eq!(cut.map(|c| c.executed_amount), Some(U256::from(999_800u64)));
     }
@@ -187,15 +180,17 @@ mod tests {
     /// not move it.
     #[test]
     fn buy_order_executes_the_signed_buy_amount() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(900_000u64),
-            proposal_sell: U256::from(950_000u64),
-            proposal_buy: U256::from(900_000u64),
-            is_sell_order: false,
-            gas_cost: U256::from(100u64),
-            sell_token_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(900_000u64),
+                proposal_sell: U256::from(950_000u64),
+                proposal_buy: U256::from(900_000u64),
+                is_sell_order: false,
+                gas_cost: U256::from(100u64),
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
 
         assert_eq!(
             cut,
@@ -211,15 +206,17 @@ mod tests {
     /// 200-atom cut.
     #[test]
     fn buy_order_cut_over_the_signed_sell_amount_is_skipped() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(900_000u64),
-            proposal_sell: U256::from(999_900u64),
-            proposal_buy: U256::from(900_000u64),
-            is_sell_order: false,
-            gas_cost: U256::from(100u64),
-            sell_token_price: Unit::ETHER.wei() / U256::from(2),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(900_000u64),
+                proposal_sell: U256::from(999_900u64),
+                proposal_buy: U256::from(900_000u64),
+                is_sell_order: false,
+                gas_cost: U256::from(100u64),
+            },
+            Unit::ETHER.wei() / U256::from(2),
+        );
 
         assert_eq!(cut, None);
     }
@@ -228,15 +225,17 @@ mod tests {
     /// 1.5 atoms, and we take 2.
     #[test]
     fn a_cut_that_does_not_divide_evenly_rounds_up() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(900_000u64),
-            proposal_sell: U256::from(1_000_000u64),
-            proposal_buy: U256::from(1_000_000u64),
-            is_sell_order: true,
-            gas_cost: U256::from(3u64),
-            sell_token_price: Unit::ETHER.wei() * U256::from(2),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(900_000u64),
+                proposal_sell: U256::from(1_000_000u64),
+                proposal_buy: U256::from(1_000_000u64),
+                is_sell_order: true,
+                gas_cost: U256::from(3u64),
+            },
+            Unit::ETHER.wei() * U256::from(2),
+        );
 
         assert_eq!(cut.map(|c| c.fee), Some(U256::from(2u64)));
     }
@@ -246,15 +245,17 @@ mod tests {
     /// hand the driver a `fee: None` it rejects, so skip the proposal.
     #[test]
     fn an_unpriced_sell_token_cannot_be_cut() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(900_000u64),
-            proposal_sell: U256::from(1_000_000u64),
-            proposal_buy: U256::from(1_000_000u64),
-            is_sell_order: true,
-            gas_cost: U256::from(100u64),
-            sell_token_price: U256::ZERO,
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(900_000u64),
+                proposal_sell: U256::from(1_000_000u64),
+                proposal_buy: U256::from(1_000_000u64),
+                is_sell_order: true,
+                gas_cost: U256::from(100u64),
+            },
+            U256::ZERO,
+        );
 
         assert_eq!(cut, None);
     }
@@ -263,15 +264,17 @@ mod tests {
     /// expensive trade.
     #[test]
     fn a_cut_that_overflows_the_scaling_is_skipped() {
-        let cut = gas_cut(&CutInput {
-            order_sell: U256::from(1_000_000u64),
-            order_buy: U256::from(900_000u64),
-            proposal_sell: U256::from(1_000_000u64),
-            proposal_buy: U256::from(1_000_000u64),
-            is_sell_order: true,
-            gas_cost: U256::MAX,
-            sell_token_price: U256::from(1u64),
-        });
+        let cut = gas_cut(
+            &Candidate {
+                order_sell: U256::from(1_000_000u64),
+                order_buy: U256::from(900_000u64),
+                proposal_sell: U256::from(1_000_000u64),
+                proposal_buy: U256::from(1_000_000u64),
+                is_sell_order: true,
+                gas_cost: U256::MAX,
+            },
+            U256::from(1u64),
+        );
 
         assert_eq!(cut, None);
     }
