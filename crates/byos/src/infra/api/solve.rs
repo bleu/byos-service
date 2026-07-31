@@ -5,7 +5,7 @@
 use {
     super::AppState,
     crate::domain::{
-        fee::{Cut, gas_cut},
+        gas_cut::{self, GasCut},
         proposal::{OrderUid, Proposal},
         scoring::{Candidate, effective_gas, score_proposal, surplus_token},
     },
@@ -77,8 +77,8 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                 .unwrap_or(U256::ZERO)
         };
         let native_price = price_of(surplus_token(is_sell, order.sell_token, order.buy_token));
-        // The cut is denominated in the sell token, which for a sell order is
-        // not the token the surplus is in — a second lookup, not the same one.
+        // A second lookup, not the same one: the cut is in the sell token, which
+        // for a sell order is not where the surplus is.
         let sell_token_price = price_of(order.sell_token);
 
         // Score and select the best proposal for this order. Only proposals
@@ -100,13 +100,11 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                     gas_cost,
                 };
                 let score = score_proposal(&candidate, native_price)?;
-                // Sizing the cut can rule a proposal out where the score cannot:
-                // the score converts surplus at the auction's price for the
-                // surplus token, while the user's limit is enforced on the
-                // route's own amounts. A stale auction price makes the two
-                // disagree. Drop it here so a runner-up can still take the
-                // order.
-                let cut = gas_cut(&candidate, sell_token_price)?;
+                // Can rule out a proposal the score accepts: the score converts
+                // surplus at the auction's price, the limit is enforced on the
+                // route's own amounts, and a stale price makes them disagree.
+                // Dropping it here leaves the order to a runner-up.
+                let cut = gas_cut::size(&candidate, sell_token_price)?;
                 (score > U256::ZERO).then_some((p, gas_used, cut, score))
             })
             .max_by_key(|(_, _, _, score)| *score);
@@ -150,7 +148,7 @@ fn build_solution(
     order: &auction::Order,
     proposal: &Proposal,
     gas_used: u64,
-    cut: Cut,
+    cut: GasCut,
 ) -> Option<solution::Solution> {
     let Some(trampoline) = proposal.trampoline else {
         tracing::error!(
@@ -192,21 +190,18 @@ fn build_solution(
         .collect();
 
     // Clearing prices: cross-multiplied from the proposal amounts, and left
-    // alone by the cut. The cut is a declared fee, not a price shade, so the
-    // price vector stays the one the sub-solver signed a route against and
-    // `encode_settle` keeps producing the transaction we simulated.
+    // alone by the cut, so `encode_settle` keeps producing the transaction we
+    // simulated.
     let mut prices = HashMap::new();
     prices.insert(order.sell_token, proposal.buy_amount);
     prices.insert(order.buy_token, proposal.sell_amount);
 
-    // Trade fulfillment. Every live order is limit class — since the 2023 fee
-    // model every order signs `feeAmount = 0`, and `order_validation.rs`
-    // classifies those as `Limit` — so the driver requires a solver-determined
-    // fee here and rejects `Fee::Static`. See [`crate::domain::fee`].
+    // The cut is never omitted: every live order is limit class, and the driver
+    // rejects a solution that leaves the fee to the protocol on one of those.
     let trade = solution::Trade::Fulfillment(solution::Fulfillment {
         order: solution::OrderUid(order.uid),
         executed_amount: cut.executed_amount,
-        fee: Some(cut.fee),
+        fee: Some(cut.amount),
     });
 
     Some(solution::Solution {

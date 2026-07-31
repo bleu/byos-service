@@ -1074,19 +1074,15 @@ mod tests {
         assert_eq!(trade["executedAmount"], "900");
     }
 
-    /// The fixture prices both tokens at parity (10^18 wei per 10^18 atoms) and
-    /// the auction charges 1 wei per gas, so the cut in sell-token atoms is
-    /// just the effective gas: 200_000 simulated + the 30_000 buffer.
+    /// Both tokens priced at parity and 1 wei per gas, so the cut in sell-token
+    /// atoms is just the effective gas: 200_000 simulated plus the buffer.
     const CUT_AT_PARITY: u64 = 230_000;
 
-    /// COW-1189: every fulfillment carries a fee, and for a sell order the
-    /// driver checks `executed + fee == order.sellAmount`
-    /// (`driver/src/domain/competition/solution/trade.rs:157`). A `fee: None`
-    /// here is rejected for every live order, and one bad trade discards the
-    /// whole `/solve` response.
+    /// The driver checks `executed + fee == order.sellAmount` on a sell order,
+    /// and rejects a solution that declares no fee at all.
     #[ignore]
     #[tokio::test]
-    async fn solve_declares_the_gas_cut_as_the_fee_on_a_sell_order() {
+    async fn solve_declares_the_gas_cut_on_a_sell_order() {
         let state = test_state().await;
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
@@ -1111,13 +1107,12 @@ mod tests {
         );
     }
 
-    /// A buy order's fee rides alongside an unchanged execution: the driver
-    /// leaves it out of the `executed + fee == target` check for buy orders, so
-    /// the user's protection is on the paying side instead — the route's input
-    /// plus the cut against the sell amount they signed.
+    /// A buy order's cut rides alongside an unchanged execution: it sits
+    /// outside the driver's check, so the user is protected on the paying
+    /// side instead.
     #[ignore]
     #[tokio::test]
-    async fn solve_declares_the_gas_cut_as_the_fee_on_a_buy_order() {
+    async fn solve_declares_the_gas_cut_on_a_buy_order() {
         let state = test_state().await;
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 950_000_000, 900_000_000).await;
@@ -1130,9 +1125,8 @@ mod tests {
         assert_eq!(trade["fee"], CUT_AT_PARITY.to_string());
     }
 
-    /// The cut is a declared fee, not a price shade. If it ever moved the price
-    /// vector, `encode_settle` would stop producing the transaction ADR-0012
-    /// simulated.
+    /// If the cut ever moved the price vector, `encode_settle` would stop
+    /// producing the transaction ADR-0012 simulated.
     #[ignore]
     #[tokio::test]
     async fn solve_clearing_prices_are_unchanged_by_the_cut() {
@@ -1148,12 +1142,11 @@ mod tests {
         assert_eq!(prices[BUY_TOKEN.to_string()], "1000000000");
     }
 
-    /// COW-1189: taking the cut must not drop the user under the buy amount
-    /// they signed, and the score alone will not catch it. Here the auction
-    /// prices both tokens at parity while the route trades them 1:2, so the
-    /// score sees 300_000 wei of surplus against a 230_000 wei gas bill and
-    /// says yes — but the cut costs the user 460_000 buy-token atoms, which
-    /// breaks their limit and would revert the settlement.
+    /// The score alone will not catch a breach. Here the auction prices both
+    /// tokens at parity while the route trades them 1:2, so the score sees
+    /// 300_000 wei of surplus against a 230_000 wei gas bill and says yes,
+    /// while the cut costs the user 460_000 buy-token atoms and breaks
+    /// their limit.
     ///
     /// The fat-surplus half proves the fixture can bid at all, so the thin half
     /// is failing on the limit and not on some unrelated filter.
@@ -1180,9 +1173,8 @@ mod tests {
         );
     }
 
-    /// The driver uses this to budget the settlement, so it is the simulated
-    /// gas plus the scoring buffer — the same number the cut is priced
-    /// from.
+    /// The driver's settlement budget: simulated gas plus the scoring buffer,
+    /// the same number the cut is priced from.
     #[ignore]
     #[tokio::test]
     async fn solve_reports_the_effective_gas_on_the_solution() {
@@ -1196,9 +1188,8 @@ mod tests {
         assert_eq!(result["solutions"][0]["gas"], CUT_AT_PARITY);
     }
 
-    /// An `Active` proposal with no simulated gas cannot be priced, so it is
-    /// not biddable. Reachable in practice: `AcceptAll` activates without
-    /// simulating.
+    /// An `Active` proposal with no simulated gas cannot be priced. Reachable:
+    /// `AcceptAll` activates without simulating.
     #[ignore]
     #[tokio::test]
     async fn solve_skips_a_proposal_that_has_not_been_simulated() {
@@ -1235,9 +1226,8 @@ mod tests {
         assert!(result["solutions"].as_array().unwrap().is_empty());
     }
 
-    /// The cut is denominated in the sell token, so an unpriced sell token
-    /// cannot be cut — and bidding without a cut means paying the gas out of
-    /// our own pocket.
+    /// The cut is in the sell token, so an unpriced sell token cannot be cut,
+    /// and bidding without one means paying the gas ourselves.
     #[ignore]
     #[tokio::test]
     async fn solve_does_not_bid_when_the_sell_token_is_unpriced() {
@@ -1255,9 +1245,9 @@ mod tests {
         );
     }
 
-    /// The `score > 0` boundary lives in two files — here and the ingestion
-    /// gate's `score <= min_score` (`blockchain/validator.rs`). Gas exactly
-    /// equal to the surplus scores zero, and zero does not bid.
+    /// The `score > 0` boundary lives here and in the ingestion gate's
+    /// `score <= min_score`, so it can drift. Gas equal to surplus scores zero,
+    /// and zero does not bid.
     #[ignore]
     #[tokio::test]
     async fn solve_does_not_bid_when_gas_exactly_equals_the_surplus() {

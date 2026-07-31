@@ -33,20 +33,16 @@ pub fn surplus_token(is_sell_order: bool, sell_token: Address, buy_token: Addres
     if is_sell_order { buy_token } else { sell_token }
 }
 
-/// A proposal weighed against its order at this auction's gas price.
+/// A proposal weighed against its order at this auction's gas price. Shared by
+/// [`score_proposal`] and [`gas_cut::size`](super::gas_cut::size), which ask
+/// different questions of the same pair and take different prices to do it.
 ///
-/// Built once per proposal and shared by [`score_proposal`] and
-/// [`gas_cut`](super::fee::gas_cut), which ask different questions of the same
-/// pair and take different prices to do it. One value means they cannot drift
-/// apart on the pair itself.
-///
-/// Assumes the pair already passed the validation envelope
+/// Assumes the pair passed the validation envelope
 /// ([`OrderRecord::check_envelope`](super::order::OrderRecord::check_envelope)):
 /// a sell order's `proposal_sell` equals its `order_sell`, a buy order's
-/// `proposal_buy` equals its `order_buy`. The gas cut's sell-side scaling reads
-/// the route's rate off that equality, so a mismatched pair would be priced
-/// wrong. `/solve` does not re-check it — an `Active` proposal is one that
-/// passed.
+/// `proposal_buy` its `order_buy`. The cut's sell-side scaling reads the
+/// route's rate off that equality. `/solve` does not re-check it — an `Active`
+/// proposal is one that passed.
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate {
     pub order_sell: U256,
@@ -65,18 +61,14 @@ pub struct Candidate {
 ///  - Sell order: `proposal_buy - order_buy` (more buy tokens for the user)
 ///  - Buy order: `order_sell - proposal_sell` (fewer sell tokens from the user)
 ///
-/// `native_price` is the auction's reference price for the **surplus** token
-/// ([`surplus_token`]): how much wei buys 10^18 atoms of it. Not the same token
-/// the gas cut is denominated in.
+/// `native_price` is the auction's reference price for the [`surplus_token`]:
+/// wei per 10^18 atoms. Not the token the gas cut is denominated in.
 ///
-/// There is deliberately no fee term. CoW's own score is surplus plus protocol
-/// fees and nothing else (CIP-38) — gas never appears as a subtraction there.
-/// The protocol fee cancels out of any ranking, because it is carved out of
-/// surplus and added straight back. Our gas cut ([`crate::domain::fee`]) does
-/// reach the score, but as a subtraction from surplus: it lowers what the user
-/// receives. So once the cut equals the gas cost, `surplus - gas` is exactly
-/// the score the autopilot will compute for our bid, and reading per-order fee
-/// policies would buy nothing.
+/// No fee term, deliberately. CoW's score is surplus plus protocol fees and
+/// nothing else (CIP-38), the protocol fee cancels out of any ranking, and the
+/// [gas cut](super::gas_cut) reaches the score as a subtraction from surplus.
+/// So `surplus - gas` is already the score the autopilot computes for our bid,
+/// and reading per-order fee policies would buy nothing.
 pub fn score_proposal(candidate: &Candidate, native_price: U256) -> Option<U256> {
     let surplus = if candidate.is_sell_order {
         // Sell order: user offers sell_amount, wants at least buy_amount.

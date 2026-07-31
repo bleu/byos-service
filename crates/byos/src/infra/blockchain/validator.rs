@@ -119,12 +119,10 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
     /// order (`score = surplus - gas`, ADR-0002) with the simulated gas and the
     /// last-seen gas price.
     ///
-    /// The arithmetic needs no fee term and no gas-cut check. It cannot have
-    /// one: fee policies are built per auction by the autopilot and delivered
-    /// only in the `/solve` payload, so the orderbook's order model carries
-    /// nothing to read here. Gas headroom is all this gate can check, and once
-    /// the cut exists that is the right question — see
-    /// [`score_proposal`](scoring::score_proposal).
+    /// No fee term and no gas-cut check, and it could not have one: fee
+    /// policies reach us only in the `/solve` payload, never on the
+    /// orderbook's order. Gas headroom is the whole question this gate can
+    /// ask — see [`score_proposal`](scoring::score_proposal).
     ///
     /// - `Some(Ok(()))` — score exceeds the minimum, proposal may activate.
     /// - `Some(Err(Unprofitable))` — score too low, or the orderbook cannot
