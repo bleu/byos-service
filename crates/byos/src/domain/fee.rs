@@ -44,6 +44,12 @@ pub struct Cut {
     pub executed_amount: U256,
 }
 
+/// Assumes the pair already passed the validation envelope
+/// ([`OrderRecord::check_envelope`](super::order::OrderRecord::check_envelope)):
+/// a sell order's `proposal_sell` equals its `order_sell`, a buy order's
+/// `proposal_buy` equals its `order_buy`. The sell-side scaling below reads the
+/// route's rate off that equality, so a mismatched pair would be priced wrong.
+/// `/solve` does not re-check it — an `Active` proposal is one that passed.
 pub struct CutInput {
     pub order_sell: U256,
     pub order_buy: U256,
