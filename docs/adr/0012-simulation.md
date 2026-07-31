@@ -36,6 +36,10 @@ Because the order is real, the user has genuinely approved the vault relayer and
 
 Using `eth_estimateGas` (rather than `eth_call` + a separate gas estimation step) gives both the success/revert verdict and the gas consumed in a single RPC call.
 
+**What the simulation does not model.** "The transaction the driver would actually submit" is true of the trade, the interactions and the addresses, but not literally of three calldata words. `byos_common::settlement::encode_settle` fixes `executedAmount` at the full order amount and `clearingPrices` at the raw proposal amounts. The driver's real transaction declares `executedAmount = sellAmount − gasCut` ([ADR-0002](0002-solver-engine.md) §Gas cut) and then substitutes its own per-trade prices (`Trade::custom_prices`), which for a sell order come out as `{sell: (sellAmount − cut) × proposal.buyAmount / proposal.sellAmount, buy: sellAmount}`. It also applies protocol fees, which depend on policies that only exist in the `/solve` payload.
+
+Neither is threaded through the encoder, for two reasons. The gas is the same: same tokens, same interactions, same trade, same storage touched, only three word values differ. And the divergence is one-directional — the real transaction pays the user less than the simulated one, never more — so a proposal that simulates successfully cannot fail the settlement's limit check because of the cut. Threading it would also mean giving the encoder the auction's gas price, which the validation loop holds only as a last-seen value, so the estimate would gain a dependency on auction state without changing.
+
 The two overrides stand in for permissions the dummy sender lacks:
 
 - **Authenticator** (resolved once via `settlement.authenticator()`, cached): code override with `AnyoneAuthenticator`, so any `from` passes the solver allowlist.

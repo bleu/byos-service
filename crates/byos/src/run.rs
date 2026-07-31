@@ -138,7 +138,7 @@ pub(crate) struct Args {
     executing_timeout: std::time::Duration,
 
     /// Profitability floor in wei (ADR-0013): the first simulation rejects
-    /// proposals whose score (`surplus + fee - gas`, ADR-0002) does not
+    /// proposals whose score (`surplus - gas`, ADR-0002) does not
     /// exceed this. The default 0 mirrors /solve's own score > 0 rule.
     #[arg(long, env, default_value_t = 0)]
     min_proposal_score: u128,

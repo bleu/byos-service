@@ -116,8 +116,17 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
     }
 
     /// The profitability gate (ADR-0013): scores the proposal against its
-    /// order (`score = surplus + fee - gas`, ADR-0002) with the simulated gas
-    /// and the last-seen gas price.
+    /// order (`score = surplus - gas`, ADR-0002) with the simulated gas and the
+    /// last-seen gas price.
+    ///
+    /// No fee term, and it could not have one: fee policies reach us only in
+    /// the `/solve` payload, never on the orderbook's order — see
+    /// [`score_proposal`](scoring::score_proposal).
+    ///
+    /// No gas-cut limit check either, and that one is a choice rather than a
+    /// limitation: the sell token's price is one more `native_price` call per
+    /// proposal per tick. Ingestion stays cheap instead, and `/solve` skips a
+    /// proposal whose cut breaches the limit when it comes to bid.
     ///
     /// - `Some(Ok(()))` — score exceeds the minimum, proposal may activate.
     /// - `Some(Err(Unprofitable))` — score too low, or the orderbook cannot
@@ -157,15 +166,17 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
 
         let gas_cost = U256::from(scoring::effective_gas(gas))
             .saturating_mul(U256::from(self.gas_price.load(Ordering::Relaxed)));
-        let score = scoring::score_proposal(&scoring::ScoreInput {
-            order_sell: record.order.sell_amount,
-            order_buy: record.order.buy_amount,
-            proposal_sell: proposal.sell_amount,
-            proposal_buy: proposal.buy_amount,
-            is_sell_order: record.order.kind == OrderKind::Sell,
-            gas_cost,
-            native_price,
-        });
+        let score = scoring::score_proposal(
+            &scoring::Candidate {
+                order_sell: record.order.sell_amount,
+                order_buy: record.order.buy_amount,
+                proposal_sell: proposal.sell_amount,
+                proposal_buy: proposal.buy_amount,
+                is_sell_order: record.order.kind == OrderKind::Sell,
+                gas_cost,
+            },
+            scoring::SurplusPrice(native_price),
+        );
         if score.is_none_or(|s| s <= self.min_score) {
             tracing::info!(
                 id = %proposal.id,

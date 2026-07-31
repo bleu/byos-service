@@ -5,8 +5,9 @@
 use {
     super::AppState,
     crate::domain::{
+        gas_cut::{self, GasCut, SellTokenPrice},
         proposal::{OrderUid, Proposal},
-        scoring::{ScoreInput, effective_gas, score_proposal, surplus_token},
+        scoring::{Candidate, SurplusPrice, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -68,11 +69,21 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         let is_sell = matches!(order.kind, auction::Kind::Sell);
 
-        let native_price = auction
-            .tokens
-            .get(&surplus_token(is_sell, order.sell_token, order.buy_token))
-            .and_then(|t| t.reference_price)
-            .unwrap_or(U256::ZERO);
+        let price_of = |token| {
+            auction
+                .tokens
+                .get(&token)
+                .and_then(|t| t.reference_price)
+                .unwrap_or(U256::ZERO)
+        };
+        let surplus_price = SurplusPrice(price_of(surplus_token(
+            is_sell,
+            order.sell_token,
+            order.buy_token,
+        )));
+        // A second lookup, not the same one: the cut is in the sell token, which
+        // for a sell order is not where the surplus is.
+        let sell_token_price = SellTokenPrice(price_of(order.sell_token));
 
         // Score and select the best proposal for this order. Only proposals
         // with simulation gas are eligible — proposals that haven't been
@@ -84,26 +95,31 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                 let gas_used = p.gas_used?;
                 let gas_cost =
                     U256::from(effective_gas(gas_used)).saturating_mul(auction.effective_gas_price);
-                let score = score_proposal(&ScoreInput {
+                let candidate = Candidate {
                     order_sell: order.sell_amount,
                     order_buy: order.buy_amount,
                     proposal_sell: p.sell_amount,
                     proposal_buy: p.buy_amount,
                     is_sell_order: is_sell,
                     gas_cost,
-                    native_price,
-                })?;
-                (score > U256::ZERO).then_some((p, gas_used, score))
+                };
+                let score = score_proposal(&candidate, surplus_price)?;
+                // Can rule out a proposal the score accepts: the score converts
+                // surplus at the auction's price, the limit is enforced on the
+                // route's own amounts, and a stale price makes them disagree.
+                // Dropping it here leaves the order to a runner-up.
+                let cut = gas_cut::size(&candidate, sell_token_price)?;
+                (score > U256::ZERO).then_some((p, gas_used, cut, score))
             })
-            .max_by_key(|(_, _, score)| *score);
+            .max_by_key(|(_, _, _, score)| *score);
 
-        let Some((proposal, gas_used, _score)) = best else {
+        let Some((proposal, gas_used, cut, _score)) = best else {
             continue;
         };
 
         // Build the solution using solvers-dto types.
         let id = solutions.len() as u64 + 1;
-        let Some(sol) = build_solution(id, order, proposal, gas_used) else {
+        let Some(sol) = build_solution(id, order, proposal, gas_used, cut) else {
             continue;
         };
 
@@ -136,6 +152,7 @@ fn build_solution(
     order: &auction::Order,
     proposal: &Proposal,
     gas_used: u64,
+    cut: GasCut,
 ) -> Option<solution::Solution> {
     let Some(trampoline) = proposal.trampoline else {
         tracing::error!(
@@ -176,22 +193,19 @@ fn build_solution(
         })
         .collect();
 
-    // Clearing prices: cross-multiplied from the proposal amounts.
+    // Clearing prices: cross-multiplied from the proposal amounts, and left
+    // alone by the cut, so `encode_settle` keeps producing the transaction we
+    // simulated.
     let mut prices = HashMap::new();
     prices.insert(order.sell_token, proposal.buy_amount);
     prices.insert(order.buy_token, proposal.sell_amount);
 
-    // Trade fulfillment.
-    let executed_amount = if matches!(order.kind, auction::Kind::Sell) {
-        proposal.sell_amount
-    } else {
-        proposal.buy_amount
-    };
-
+    // The cut is never omitted: every live order is limit class, and the driver
+    // rejects a solution that leaves the fee to the protocol on one of those.
     let trade = solution::Trade::Fulfillment(solution::Fulfillment {
         order: solution::OrderUid(order.uid),
-        executed_amount,
-        fee: None,
+        executed_amount: cut.executed_amount,
+        fee: Some(cut.amount),
     });
 
     Some(solution::Solution {

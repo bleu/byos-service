@@ -767,7 +767,15 @@ mod tests {
     const ORDER_UID: [u8; 56] = [0xaa; 56];
 
     /// Builds a minimal valid auction JSON with one order.
-    fn auction_json(kind: &str, sell_amount: &str, buy_amount: &str) -> serde_json::Value {
+    /// `gas_price` is the auction's `effectiveGasPrice` as a decimal string,
+    /// not a `u64`: `/solve` has to cope with a value that does not fit one,
+    /// and only the wire type can express that.
+    fn auction_json(
+        kind: &str,
+        sell_amount: &str,
+        buy_amount: &str,
+        gas_price: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "tokens": {
                 SELL_TOKEN.to_string(): {
@@ -803,7 +811,7 @@ mod tests {
                 "signature": "0x"
             }],
             "liquidity": [],
-            "effectiveGasPrice": "0",
+            "effectiveGasPrice": gas_price,
             "deadline": "2099-01-01T00:00:00Z",
             "surplusCapturingJitOrderOwners": []
         })
@@ -815,10 +823,20 @@ mod tests {
         sell_amount: u64,
         buy_amount: u64,
     ) {
+        insert_active_proposal_with_gas(state, sub_solver, sell_amount, buy_amount, 200_000).await;
+    }
+
+    async fn insert_active_proposal_with_gas(
+        state: &AppState,
+        sub_solver: Address,
+        sell_amount: u64,
+        buy_amount: u64,
+        gas_used: u64,
+    ) {
         let mut proposal = test_proposal(OrderUid(ORDER_UID), sub_solver, ProposalStatus::Active);
         proposal.sell_amount = U256::from(sell_amount);
         proposal.buy_amount = U256::from(buy_amount);
-        proposal.gas_used = Some(200_000);
+        proposal.gas_used = Some(gas_used);
         proposal.trampoline = Some(Address::ZERO);
         state
             .store()
@@ -853,7 +871,7 @@ mod tests {
         let state = test_state().await;
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = raw_post_solve(&public_router(state), &auction).await;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -908,7 +926,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = raw_post_solve(&app, &auction).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -926,7 +944,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "Bearer driver-secret").await;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -941,7 +959,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "bearer driver-secret").await;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -954,7 +972,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "Bearer not-the-secret").await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -971,7 +989,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
         let app = internal_router(state, Some("driver-secret"));
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let response = post_solve_with_auth(&app, &auction, "Bearer DRIVER-SECRET").await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1025,7 +1043,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let solutions = result["solutions"].as_array().unwrap();
@@ -1045,7 +1063,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let trade = &result["solutions"][0]["trades"][0];
@@ -1059,11 +1077,251 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 950, 900).await;
 
-        let auction = auction_json("buy", "1000", "900");
+        let auction = auction_json("buy", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let trade = &result["solutions"][0]["trades"][0];
         assert_eq!(trade["executedAmount"], "900");
+    }
+
+    /// Both tokens priced at parity and 1 wei per gas, so the cut in sell-token
+    /// atoms is just the effective gas: 200_000 simulated plus the buffer.
+    const CUT_AT_PARITY: u64 = 230_000;
+
+    /// The driver checks `executed + fee == order.sellAmount` on a sell order,
+    /// and rejects a solution that declares no fee at all.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_declares_the_gas_cut_on_a_sell_order() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        let trade = &result["solutions"][0]["trades"][0];
+        assert_eq!(trade["fee"], CUT_AT_PARITY.to_string());
+        assert_eq!(
+            trade["executedAmount"],
+            (1_000_000_000 - CUT_AT_PARITY).to_string()
+        );
+
+        // The invariant in the driver's own words, read back off the wire.
+        let fee: u64 = trade["fee"].as_str().unwrap().parse().unwrap();
+        let executed: u64 = trade["executedAmount"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            executed + fee,
+            1_000_000_000,
+            "executed + fee must equal the order's sell amount",
+        );
+    }
+
+    /// A buy order's cut rides alongside an unchanged execution: it sits
+    /// outside the driver's check, so the user is protected on the paying
+    /// side instead.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_declares_the_gas_cut_on_a_buy_order() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 950_000_000, 900_000_000).await;
+
+        let auction = auction_json("buy", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        let trade = &result["solutions"][0]["trades"][0];
+        assert_eq!(trade["executedAmount"], "900000000");
+        assert_eq!(trade["fee"], CUT_AT_PARITY.to_string());
+    }
+
+    /// If the cut ever moved the price vector, `encode_settle` would stop
+    /// producing the transaction ADR-0012 simulated.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_clearing_prices_are_unchanged_by_the_cut() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        let prices = &result["solutions"][0]["prices"];
+        assert_eq!(prices[SELL_TOKEN.to_string()], "1000000000");
+        assert_eq!(prices[BUY_TOKEN.to_string()], "1000000000");
+    }
+
+    /// The score alone will not catch a breach. Here the auction prices both
+    /// tokens at parity while the route trades them 1:2, so the score sees
+    /// 300_000 wei of surplus against a 230_000 wei gas bill and says yes,
+    /// while the cut costs the user 460_000 buy-token atoms and breaks
+    /// their limit.
+    ///
+    /// The fat-surplus half proves the fixture can bid at all, so the thin half
+    /// is failing on the limit and not on some unrelated filter.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_skips_a_proposal_whose_cut_breaches_the_signed_limit() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 2_000_000_000).await;
+
+        let thin = auction_json("sell", "1000000000", "1999700000", "1");
+        let result = post_solve(&app, &thin).await;
+        assert!(
+            result["solutions"].as_array().unwrap().is_empty(),
+            "a cut that breaches the signed buy amount must not be bid",
+        );
+
+        let fat = auction_json("sell", "1000000000", "1990000000", "1");
+        let result = post_solve(&app, &fat).await;
+        assert_eq!(
+            result["solutions"].as_array().unwrap().len(),
+            1,
+            "the same proposal against a limit with room for the cut must bid",
+        );
+    }
+
+    /// The cut is checked per proposal, before the winner is picked, so a
+    /// breach costs us that proposal and not the whole order. Moving the check
+    /// after the ranking would pass every other test and silently start
+    /// skipping orders that had a perfectly good second choice.
+    ///
+    /// The top scorer can only be the one that breaches when the two differ in
+    /// gas: at equal gas, more `buy_amount` means both a higher score and more
+    /// room for the cut. So the fat route here rides an expensive path.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_falls_back_to_the_runner_up_when_the_best_cut_breaches() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        // Cut 530_000, score 470_000, delivers 1_998_940_000 — under the limit.
+        insert_active_proposal_with_gas(
+            &state,
+            Address::ZERO,
+            1_000_000_000,
+            2_000_000_000,
+            500_000,
+        )
+        .await;
+        // Cut 130_000, score 270_000, delivers 1_999_140_078 — over it.
+        insert_active_proposal_with_gas(
+            &state,
+            Address::ZERO,
+            1_000_000_000,
+            1_999_400_000,
+            100_000,
+        )
+        .await;
+
+        let tight = auction_json("sell", "1000000000", "1999000000", "1");
+        let result = post_solve(&app, &tight).await;
+
+        let solutions = result["solutions"].as_array().unwrap();
+        assert_eq!(solutions.len(), 1, "the runner-up still deserves a bid");
+        assert_eq!(
+            solutions[0]["trades"][0]["fee"], "130000",
+            "the surviving bid must be the runner-up, not the higher-scoring proposal",
+        );
+        assert_eq!(solutions[0]["trades"][0]["executedAmount"], "999870000");
+
+        // Same two proposals, a limit with room for both cuts. The fat route
+        // wins on score here, which is what makes the run above a fallback and
+        // not the ranking picking the cheap proposal on its own merits.
+        let loose = auction_json("sell", "1000000000", "1990000000", "1");
+        let result = post_solve(&app, &loose).await;
+
+        assert_eq!(result["solutions"][0]["trades"][0]["fee"], "530000");
+    }
+
+    /// The driver's settlement budget: simulated gas plus the scoring buffer,
+    /// the same number the cut is priced from.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_reports_the_effective_gas_on_the_solution() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        assert_eq!(result["solutions"][0]["gas"], CUT_AT_PARITY);
+    }
+
+    /// An `Active` proposal with no simulated gas cannot be priced. Reachable:
+    /// `AcceptAll` activates without simulating.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_skips_a_proposal_that_has_not_been_simulated() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        let mut proposal =
+            test_proposal(OrderUid(ORDER_UID), Address::ZERO, ProposalStatus::Active);
+        proposal.sell_amount = U256::from(1_000_000_000u64);
+        proposal.buy_amount = U256::from(1_000_000_000u64);
+        proposal.gas_used = None;
+        proposal.trampoline = Some(Address::ZERO);
+        state.store().insert(proposal).await.expect("insert");
+
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
+    }
+
+    /// Without a price for the surplus token there is no score to compare, and
+    /// the auction that omitted it could not rank our bid either.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_does_not_bid_when_the_surplus_token_is_unpriced() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        // Sell order: the surplus is in the buy token.
+        let mut auction = auction_json("sell", "1000000000", "900000000", "1");
+        auction["tokens"][BUY_TOKEN.to_string()]["referencePrice"] = serde_json::Value::Null;
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
+    }
+
+    /// The cut is in the sell token, so an unpriced sell token cannot be cut,
+    /// and bidding without one means paying the gas ourselves.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_does_not_bid_when_the_sell_token_is_unpriced() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 1_000_000_000).await;
+
+        let mut auction = auction_json("sell", "1000000000", "900000000", "1");
+        auction["tokens"][SELL_TOKEN.to_string()]["referencePrice"] = serde_json::Value::Null;
+        let result = post_solve(&app, &auction).await;
+
+        assert!(
+            result["solutions"].as_array().unwrap().is_empty(),
+            "the surplus token is still priced, so only the missing cut can stop this bid",
+        );
+    }
+
+    /// The `score > 0` boundary lives here and in the ingestion gate's
+    /// `score <= min_score`, so it can drift. Gas equal to surplus scores zero,
+    /// and zero does not bid.
+    #[ignore]
+    #[tokio::test]
+    async fn solve_does_not_bid_when_gas_exactly_equals_the_surplus() {
+        let state = test_state().await;
+        let app = internal_router(state.clone(), None);
+        // Surplus at parity pricing is 230_000 wei, the same as the gas bill.
+        insert_active_proposal(&state, Address::ZERO, 1_000_000_000, 900_230_000).await;
+
+        let auction = auction_json("sell", "1000000000", "900000000", "1");
+        let result = post_solve(&app, &auction).await;
+
+        assert!(result["solutions"].as_array().unwrap().is_empty());
     }
 
     #[ignore]
@@ -1076,7 +1334,7 @@ mod tests {
         insert_active_proposal(&state, Address::ZERO, 1_000, 920).await;
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let solutions = result["solutions"].as_array().unwrap();
@@ -1092,7 +1350,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         insert_active_proposal(&state, Address::ZERO, 1_000, 950).await;
 
-        let mut auction = auction_json("sell", "1000", "900");
+        let mut auction = auction_json("sell", "1000", "900", "0");
         auction["id"] = serde_json::json!("77");
         let result = post_solve(&app, &auction).await;
         assert_eq!(result["solutions"].as_array().unwrap().len(), 1);
@@ -1127,7 +1385,7 @@ mod tests {
         proposal.trampoline = Some(Address::ZERO);
         state.store().insert(proposal).await.expect("insert");
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         assert!(result["solutions"].as_array().unwrap().is_empty());
@@ -1140,7 +1398,7 @@ mod tests {
         let app = internal_router(state.clone(), None);
         // No proposals inserted.
 
-        let auction = auction_json("sell", "1000", "900");
+        let auction = auction_json("sell", "1000", "900", "0");
         let result = post_solve(&app, &auction).await;
 
         let solutions = result["solutions"].as_array().unwrap();

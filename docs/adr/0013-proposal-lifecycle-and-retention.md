@@ -108,7 +108,7 @@ Unchanged from ADR-0012, now with the lifecycle rationale written down: the firs
 
 ### Profitability gate: first simulation, not re-validation
 
-Settles ADR-0002 Q7 (decided in the 2026-07 review). On the first simulation (the `Submitted → Active` gate), the proposal is scored (`score = surplus + fee − gas`, ADR-0002) with the simulated gas and current gas price. A score of zero or less rejects with the new `RejectionReason::Unprofitable` — matching `/solve`'s own `score > 0` inclusion rule, so one invariant holds: an `Active` proposal is one that could win an auction right now.
+Settles ADR-0002 Q7 (decided in the 2026-07 review). On the first simulation (the `Submitted → Active` gate), the proposal is scored (`score = surplus − gas`, ADR-0002) with the simulated gas and current gas price. A score of zero or less rejects with the new `RejectionReason::Unprofitable` — matching `/solve`'s own `score > 0` inclusion rule, so one invariant holds: an `Active` proposal is one that could win an auction right now.
 
 The gate is **not re-applied on re-validation**. Gas prices wobble; rejecting an `Active` proposal on a spike would churn proposals that are profitable again two blocks later. `/solve` re-scores with fresh gas at auction time, so an unprofitable-right-now proposal cannot leak into a solution — it just idles, bounded by the lifetime cap below.
 

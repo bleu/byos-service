@@ -76,7 +76,7 @@ This is the async pipeline after `POST /proposals` returns the proposal ID to th
 | Escrow balance check (cached or RPC) | ~50-100ms |
 | Interactions hash verification | ~5ms |
 | Simulation (RPC call via DRPC) | ~500ms |
-| Scoring (surplus + fee - gas) + the row insert | ~10ms |
+| Scoring (surplus - gas) + the row insert | ~10ms |
 | **Total expected** | **~600-650ms** |
 
 The simulation RPC call is the main bottleneck (~500ms on DRPC). The 1s target gives ~50% headroom over the expected ~650ms for slow RPC responses, retries, or GC pauses.
