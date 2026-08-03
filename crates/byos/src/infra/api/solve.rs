@@ -198,16 +198,17 @@ fn build_solution(
 
     // Encode order hooks as pre/post interactions via HooksTrampoline.
     let (pre_raw, post_raw) = proposal.hooks.encode_interactions(hooks_trampoline);
-    let to_calls = |encoded: Vec<byos_common::contracts::GPv2InteractionData>| -> Vec<solution::Call> {
-        encoded
-            .into_iter()
-            .map(|i| solution::Call {
-                target: i.target,
-                value: i.value,
-                calldata: i.callData.to_vec(),
-            })
-            .collect()
-    };
+    let to_calls =
+        |encoded: Vec<byos_common::contracts::GPv2InteractionData>| -> Vec<solution::Call> {
+            encoded
+                .into_iter()
+                .map(|i| solution::Call {
+                    target: i.target,
+                    value: i.value,
+                    calldata: i.callData.to_vec(),
+                })
+                .collect()
+        };
     let pre_interactions = to_calls(pre_raw);
     let post_interactions = to_calls(post_raw);
 

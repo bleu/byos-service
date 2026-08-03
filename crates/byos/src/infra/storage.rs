@@ -128,8 +128,8 @@ impl ProposalStore {
             "INSERT INTO proposals (sub_solver, order_uid, order_uid_hash, sell_amount, \
              buy_amount, sell_token, buy_token, interactions, interactions_hash, valid_until, \
              nonce, signature, status, rejection_reason, gas_used, trampoline, \
-             settlement_tx_hash, penalty_tx_hash, hooks) VALUES ($1, $2, $3, $4, $5, $6, $7, \
-             $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
+             settlement_tx_hash, penalty_tx_hash, hooks) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
+             $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
         )
         .bind(format!("{:#x}", proposal.sub_solver))
         .bind(proposal.order_uid.to_string())
@@ -301,9 +301,9 @@ impl ProposalStore {
             Verdict::SimFailed => (ProposalStatus::SimFailed, None, None),
         };
 
-        let hooks_json = sim.as_ref().map(|s| {
-            serde_json::to_value(&s.hooks).expect("hooks serialize")
-        });
+        let hooks_json = sim
+            .as_ref()
+            .map(|s| serde_json::to_value(&s.hooks).expect("hooks serialize"));
 
         sqlx::query(
             "UPDATE proposals SET status = $2, rejection_reason = $3, gas_used = COALESCE($4, \

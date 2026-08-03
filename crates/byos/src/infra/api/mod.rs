@@ -1688,16 +1688,12 @@ mod tests {
             .expect("preInteractions must be an array");
         assert_eq!(pre.len(), 1, "one pre-hook → one HooksTrampoline call");
         assert_eq!(
-            pre[0]["target"]
-                .as_str()
-                .unwrap()
-                .to_lowercase(),
+            pre[0]["target"].as_str().unwrap().to_lowercase(),
             format!("{HOOKS_TRAMPOLINE:#x}"),
         );
-        let pre_execute = byos_common::contracts::HooksTrampoline::executeCall::abi_decode(
-            &calldata_of(&pre[0]),
-        )
-        .expect("pre-interaction must decode as HooksTrampoline.execute()");
+        let pre_execute =
+            byos_common::contracts::HooksTrampoline::executeCall::abi_decode(&calldata_of(&pre[0]))
+                .expect("pre-interaction must decode as HooksTrampoline.execute()");
         assert_eq!(pre_execute.hooks.len(), 1);
         assert_eq!(pre_execute.hooks[0].target, pre_hook.target);
         assert_eq!(pre_execute.hooks[0].callData, pre_hook.call_data);
@@ -1709,10 +1705,7 @@ mod tests {
             .expect("postInteractions must be an array");
         assert_eq!(post.len(), 1, "one post-hook → one HooksTrampoline call");
         assert_eq!(
-            post[0]["target"]
-                .as_str()
-                .unwrap()
-                .to_lowercase(),
+            post[0]["target"].as_str().unwrap().to_lowercase(),
             format!("{HOOKS_TRAMPOLINE:#x}"),
         );
         let post_execute = byos_common::contracts::HooksTrampoline::executeCall::abi_decode(

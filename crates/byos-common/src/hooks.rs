@@ -3,7 +3,10 @@
 
 use {
     crate::contracts::{GPv2InteractionData, HooksTrampoline},
-    alloy::{primitives::{Address, Bytes, U256}, sol_types::SolCall},
+    alloy::{
+        primitives::{Address, Bytes, U256},
+        sol_types::SolCall,
+    },
     serde::{Deserialize, Serialize},
 };
 

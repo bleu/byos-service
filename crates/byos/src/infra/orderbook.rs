@@ -607,7 +607,10 @@ mod tests {
         let server = MockServer::start().await;
         let mut body = real_order_json();
         body["fullAppData"] = json!(
-            "{\"appCode\":\"CoW Swap\",\"metadata\":{\"hooks\":{\"pre\":[{\"target\":\"0x0000000000000000000000000000000000005678\",\"callData\":\"0xabcd\",\"gasLimit\":\"100000\"}],\"post\":[]}}}"
+            "{\"appCode\":\"CoW \
+             Swap\",\"metadata\":{\"hooks\":{\"pre\":[{\"target\":\"\
+             0x0000000000000000000000000000000000005678\",\"callData\":\"0xabcd\",\"gasLimit\":\"\
+             100000\"}],\"post\":[]}}}"
         );
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))

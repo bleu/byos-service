@@ -1,7 +1,10 @@
 //! Proposal domain types. The store itself is Postgres
 //! ([`crate::infra::storage::ProposalStore`], ADR-0013).
 
-use {alloy::primitives::{Address, B256, Bytes, U256}, byos_common::hooks::Hooks};
+use {
+    alloy::primitives::{Address, B256, Bytes, U256},
+    byos_common::hooks::Hooks,
+};
 
 /// Server-assigned proposal identifier (newtype for type safety — a
 /// `ProposalId` cannot be accidentally confused with any other `u64`).
