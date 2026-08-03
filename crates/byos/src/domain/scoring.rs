@@ -44,13 +44,11 @@ pub struct SurplusPrice(pub U256);
 /// [`score_proposal`] and [`gas_cut::size`](super::gas_cut::size), which ask
 /// different questions of the same pair and take different prices to do it.
 ///
-/// Assumes the pair passed the validation envelope
-/// ([`OrderRecord::check_envelope`](super::order::OrderRecord::check_envelope)):
-/// a sell order's `proposal_sell` equals its `order_sell`, a buy order's
-/// `proposal_buy` its `order_buy`. The cut's buy-side limit check leans on that
-/// second equality. `/solve` does not re-check it — an `Active` proposal is one
-/// that passed.
-#[derive(Clone, Copy, Debug)]
+/// For fill-or-kill orders, `order_sell`/`order_buy` are the signed order
+/// amounts. For partially fillable orders, they are **scaled to the fill
+/// fraction** via [`build_candidate`] so that existing formulas produce
+/// correct results without modification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub order_sell: U256,
     pub order_buy: U256,
@@ -59,6 +57,62 @@ pub struct Candidate {
     pub is_sell_order: bool,
     /// Gas cost in wei (`effective_gas(gas_used) × effective_gas_price`).
     pub gas_cost: U256,
+}
+
+/// Builds a [`Candidate`] with order limits scaled to the proposal's fill
+/// fraction for partially fillable orders. For fill-or-kill orders the
+/// amounts pass through unchanged.
+///
+/// Returns `None` on arithmetic overflow.
+pub fn build_candidate(
+    order_sell: U256,
+    order_buy: U256,
+    proposal_sell: U256,
+    proposal_buy: U256,
+    is_sell_order: bool,
+    partially_fillable: bool,
+    gas_cost: U256,
+) -> Option<Candidate> {
+    if !partially_fillable {
+        return Some(Candidate {
+            order_sell,
+            order_buy,
+            proposal_sell,
+            proposal_buy,
+            is_sell_order,
+            gas_cost,
+        });
+    }
+    if is_sell_order {
+        // The fill side is sell: scale buy limit proportionally.
+        // Ceil div matches GPv2Settlement's rounding for the minimum buy
+        // amount the user receives on a partial sell fill.
+        let scaled_buy = order_buy
+            .checked_mul(proposal_sell)?
+            .div_ceil(order_sell);
+        Some(Candidate {
+            order_sell: proposal_sell,
+            order_buy: scaled_buy,
+            proposal_sell,
+            proposal_buy,
+            is_sell_order: true,
+            gas_cost,
+        })
+    } else {
+        // The fill side is buy: scale sell limit proportionally.
+        // Floor div matches Solidity's default integer division.
+        let scaled_sell = order_sell
+            .checked_mul(proposal_buy)?
+            .checked_div(order_buy)?;
+        Some(Candidate {
+            order_sell: scaled_sell,
+            order_buy: proposal_buy,
+            proposal_sell,
+            proposal_buy,
+            is_sell_order: false,
+            gas_cost,
+        })
+    }
 }
 
 /// Score a proposal against an order. Returns `None` when the proposal is
@@ -192,6 +246,129 @@ mod tests {
             SurplusPrice(U256::from(2)),
         );
         assert_eq!(score, None);
+    }
+
+    // -- build_candidate --
+
+    #[test]
+    fn build_candidate_fill_or_kill_passes_through() {
+        let c = build_candidate(
+            U256::from(1000u64),
+            U256::from(900u64),
+            U256::from(1000u64),
+            U256::from(950u64),
+            true,
+            false, // fill-or-kill
+            U256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(c.order_sell, U256::from(1000u64));
+        assert_eq!(c.order_buy, U256::from(900u64));
+    }
+
+    #[test]
+    fn build_candidate_partial_sell_scales_buy_limit() {
+        // Order: sell 1000, buy 900 (limit price 0.9)
+        // Proposal fills half: sell 500
+        // Scaled buy limit = ceil(900 * 500 / 1000) = 450
+        let c = build_candidate(
+            U256::from(1000u64),
+            U256::from(900u64),
+            U256::from(500u64),
+            U256::from(480u64),
+            true,
+            true,
+            U256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(c.order_sell, U256::from(500u64)); // = proposal_sell
+        assert_eq!(c.order_buy, U256::from(450u64)); // scaled
+    }
+
+    #[test]
+    fn build_candidate_partial_sell_ceil_div() {
+        // Order: sell 1000, buy 901
+        // Proposal fills 500
+        // Scaled buy = ceil(901 * 500 / 1000) = ceil(450500 / 1000) = 451
+        let c = build_candidate(
+            U256::from(1000u64),
+            U256::from(901u64),
+            U256::from(500u64),
+            U256::from(460u64),
+            true,
+            true,
+            U256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(c.order_buy, U256::from(451u64)); // ceil, not 450
+    }
+
+    #[test]
+    fn build_candidate_partial_buy_scales_sell_limit() {
+        // Order: sell 1000, buy 900 (limit ratio 1000/900 ≈ 1.111)
+        // Proposal fills half: buy 450
+        // Scaled sell limit = floor(1000 * 450 / 900) = 500
+        let c = build_candidate(
+            U256::from(1000u64),
+            U256::from(900u64),
+            U256::from(480u64),
+            U256::from(450u64),
+            false,
+            true,
+            U256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(c.order_sell, U256::from(500u64)); // scaled
+        assert_eq!(c.order_buy, U256::from(450u64)); // = proposal_buy
+    }
+
+    #[test]
+    fn build_candidate_partial_buy_floor_div() {
+        // Order: sell 1001, buy 900
+        // Proposal fills 450
+        // Scaled sell = floor(1001 * 450 / 900) = floor(450450 / 900) = 500
+        let c = build_candidate(
+            U256::from(1001u64),
+            U256::from(900u64),
+            U256::from(480u64),
+            U256::from(450u64),
+            false,
+            true,
+            U256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(c.order_sell, U256::from(500u64)); // floor, not 501
+    }
+
+    #[test]
+    fn build_candidate_full_fill_partial_order_is_noop() {
+        // Filling the entire remaining amount: scaling collapses to identity.
+        let c = build_candidate(
+            U256::from(1000u64),
+            U256::from(900u64),
+            U256::from(1000u64),
+            U256::from(950u64),
+            true,
+            true,
+            U256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(c.order_sell, U256::from(1000u64));
+        assert_eq!(c.order_buy, U256::from(900u64));
+    }
+
+    #[test]
+    fn build_candidate_overflow_returns_none() {
+        let result = build_candidate(
+            U256::MAX,
+            U256::MAX,
+            U256::MAX / U256::from(2),
+            U256::MAX / U256::from(2),
+            true,
+            true,
+            U256::ZERO,
+        );
+        assert_eq!(result, None);
     }
 
     #[test]

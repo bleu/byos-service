@@ -71,11 +71,13 @@ pub fn encode_settle(
         appData: order.app_data,
         feeAmount: order.fee_amount,
         flags: trade_flags(order),
-        // Ignored by GPv2 for fill-or-kill orders; set to the order amount
-        // the trade executes in full.
+        // For fill-or-kill orders GPv2 ignores this field (the full order
+        // amount is used). For partially fillable orders it is the actual
+        // fill size. Using the proposal amounts is correct for both: the
+        // envelope check guarantees proposal == order for fill-or-kill.
         executedAmount: match order.kind {
-            OrderKind::Sell => order.sell_amount,
-            OrderKind::Buy => order.buy_amount,
+            OrderKind::Sell => proposal.sellAmount,
+            OrderKind::Buy => proposal.buyAmount,
         },
         signature: order.signature.clone(),
     };
@@ -220,7 +222,10 @@ mod tests {
         let trade = &decoded.trades[0];
         // bit 0 = buy, bits 5-6 = eip1271 (0b10).
         assert_eq!(trade.flags, U256::from(1u64 | (2 << 5)));
-        assert_eq!(trade.executedAmount, order.buy_amount);
+        // executedAmount comes from the proposal, not the order. In this
+        // fixture they are equal (fill-or-kill envelope), but the source
+        // is the proposal.
+        assert_eq!(trade.executedAmount, fixture_proposal().buyAmount);
     }
 
     /// GPv2's pseudo-token for orders buying native ETH. The Trampoline reads

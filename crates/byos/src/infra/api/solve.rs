@@ -7,7 +7,7 @@ use {
     crate::domain::{
         gas_cut::{self, GasCut, SellTokenPrice},
         proposal::{OrderUid, Proposal},
-        scoring::{Candidate, SurplusPrice, effective_gas, score_proposal, surplus_token},
+        scoring::{SurplusPrice, build_candidate, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -92,17 +92,32 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .iter()
             .filter(|p| p.valid_until > now)
             .filter_map(|p| {
+                // For partially fillable orders, skip proposals whose fill
+                // exceeds the remaining auction amount. The remaining amount
+                // is dynamic across auctions, so no terminal state change.
+                if order.partially_fillable {
+                    let exceeds = if is_sell {
+                        p.sell_amount > order.sell_amount
+                    } else {
+                        p.buy_amount > order.buy_amount
+                    };
+                    if exceeds {
+                        return None;
+                    }
+                }
+
                 let gas_used = p.gas_used?;
                 let gas_cost =
                     U256::from(effective_gas(gas_used)).saturating_mul(auction.effective_gas_price);
-                let candidate = Candidate {
-                    order_sell: order.sell_amount,
-                    order_buy: order.buy_amount,
-                    proposal_sell: p.sell_amount,
-                    proposal_buy: p.buy_amount,
-                    is_sell_order: is_sell,
+                let candidate = build_candidate(
+                    order.sell_amount,
+                    order.buy_amount,
+                    p.sell_amount,
+                    p.buy_amount,
+                    is_sell,
+                    order.partially_fillable,
                     gas_cost,
-                };
+                )?;
                 let score = score_proposal(&candidate, surplus_price)?;
                 // Can rule out a proposal the score accepts: the score converts
                 // surplus at the auction's price, the limit is enforced on the
