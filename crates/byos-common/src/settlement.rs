@@ -311,4 +311,68 @@ mod tests {
         let paid = order.sell_amount * settle.clearingPrices[0] / settle.clearingPrices[1];
         assert_eq!(paid, proposal.buyAmount);
     }
+
+    /// Non-empty pre/post hooks land in `interactions[0]` and `interactions[2]`,
+    /// alongside the two trampoline intra-interactions in `interactions[1]`.
+    #[test]
+    fn pre_and_post_hook_interactions_are_spliced_into_the_settlement() {
+        let hooks_trampoline = address!("0000000000000000000000000000000000009999");
+
+        let pre = vec![GPv2InteractionData {
+            target: address!("000000000000000000000000000000000000aaaa"),
+            value: U256::ZERO,
+            callData: hex!("11111111").into(),
+        }];
+        let post = vec![
+            GPv2InteractionData {
+                target: address!("000000000000000000000000000000000000bbbb"),
+                value: U256::ZERO,
+                callData: hex!("22222222").into(),
+            },
+            GPv2InteractionData {
+                target: address!("000000000000000000000000000000000000cccc"),
+                value: U256::ZERO,
+                callData: hex!("33333333").into(),
+            },
+        ];
+
+        let calldata = encode_settle(
+            &fixture_order(),
+            &fixture_proposal(),
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+            &pre,
+            &post,
+        );
+
+        let settle = decode_settle(&calldata);
+
+        // interactions[0] = pre-hooks
+        assert_eq!(
+            settle.interactions[0].len(),
+            1,
+            "one pre-hook interaction expected",
+        );
+        assert_eq!(settle.interactions[0][0].target, pre[0].target);
+        assert_eq!(settle.interactions[0][0].callData, pre[0].callData);
+
+        // interactions[1] = the two trampoline intra-interactions (unchanged)
+        assert_eq!(
+            settle.interactions[1].len(),
+            2,
+            "two trampoline intra-interactions expected",
+        );
+
+        // interactions[2] = post-hooks
+        assert_eq!(
+            settle.interactions[2].len(),
+            2,
+            "two post-hook interactions expected",
+        );
+        assert_eq!(settle.interactions[2][0].target, post[0].target);
+        assert_eq!(settle.interactions[2][0].callData, post[0].callData);
+        assert_eq!(settle.interactions[2][1].target, post[1].target);
+        assert_eq!(settle.interactions[2][1].callData, post[1].callData);
+    }
 }
