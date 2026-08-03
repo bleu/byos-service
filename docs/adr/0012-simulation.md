@@ -57,10 +57,10 @@ Orders are immutable once placed, so fetches are cached for the process lifetime
 
 Before simulating, the order/proposal pair must pass the envelope (cheap, no RPC):
 
-- **Fill-or-kill only** — partially fillable orders reject (`UnsupportedOrder`).
 - **No hooks** — orders whose `fullAppData` declares `metadata.hooks` (or `metadata.bridging`, which implies hooks) reject (`UnsupportedOrder`). The check must parse fullAppData: essentially every real order has a non-zero `appData` hash (appCode/referrer metadata), so filtering on `appData == 0` would reject the whole orderbook. Hook support is a capability gap tracked in COW-1197.
 - **erc20 balance flavors only** — `external`/`internal` balance orders reject (`UnsupportedOrder`).
-- **Amounts consistent** — sell fill-or-kill needs `proposal.sellAmount == order.sellAmount`; buy needs `proposal.buyAmount == order.buyAmount` (`AmountMismatch`). Fill-or-kill executes the order amount in full; a proposal quoting anything else would simulate a different trade than the one the driver settles.
+- **Fill-or-kill amounts consistent** — sell fill-or-kill needs `proposal.sellAmount == order.sellAmount`; buy needs `proposal.buyAmount == order.buyAmount` (`AmountMismatch`). Fill-or-kill executes the order amount in full; a proposal quoting anything else would simulate a different trade than the one the driver settles.
+- **Partial fill amounts within limits** — the fill must be non-zero, must not exceed the signed order amount, and must respect the order's limit price. The limit price is checked via cross-multiplication to avoid division (`proposal_buy * order_sell >= proposal_sell * order_buy` for sell orders, reversed for buy orders). Overflow in the cross-multiplication rejects the proposal. The `executedAmount` in the simulation's trade encoding uses the proposal amounts (correct for both partial and full fills — the envelope guarantees proposal == order for fill-or-kill).
 
 All four signature schemes (eip712, ethsign, eip1271, presign) are supported: the scheme is encoded into the trade's `flags` word and GPv2 verifies the signature for real during the simulation. Sell and buy orders are both supported, including native-ETH buys.
 

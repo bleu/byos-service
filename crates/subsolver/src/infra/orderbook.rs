@@ -3,8 +3,9 @@
 //! solvable batch to domain orders at the edge (ADR-0005).
 //!
 //! Eligibility mirrors the validation envelope BYOS enforces in
-//! `OrderRecord::check_envelope` (ADR-0012): fill-or-kill, no hooks, plain
-//! `erc20` balance locations. BYOS stays the authority on the envelope. This
+//! `OrderRecord::check_envelope` (ADR-0012): no hooks, plain `erc20` balance
+//! locations. Both fill-or-kill and partially fillable orders are accepted.
+//! BYOS stays the authority on the envelope. This
 //! copy exists so the reference client states its limits where an integrator
 //! will read them, and so it does not spend a submission on a proposal
 //! certain to be rejected: `POST /proposals` only checks the signature, so

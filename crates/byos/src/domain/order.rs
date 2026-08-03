@@ -70,6 +70,7 @@ impl OrderRecord {
             }
             OrderKind::Buy => {
                 if proposal.buy_amount.is_zero()
+                    || proposal.sell_amount.is_zero()
                     || proposal.buy_amount > self.order.buy_amount
                 {
                     return Err(RejectionReason::AmountMismatch);
@@ -196,6 +197,20 @@ mod tests {
         let mut record = sample_order();
         record.order.partially_fillable = true;
         let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::ZERO;
+        assert_eq!(
+            record.check_envelope(&proposal),
+            Err(RejectionReason::AmountMismatch),
+        );
+    }
+
+    #[test]
+    fn partial_fill_buy_order_zero_sell_amount_rejected() {
+        let mut record = sample_order();
+        record.order.kind = OrderKind::Buy;
+        record.order.partially_fillable = true;
+        let mut proposal = matching_proposal();
+        proposal.buy_amount = U256::from(490_000_u64);
         proposal.sell_amount = U256::ZERO;
         assert_eq!(
             record.check_envelope(&proposal),

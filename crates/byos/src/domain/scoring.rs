@@ -87,6 +87,9 @@ pub fn build_candidate(
         // The fill side is sell: scale buy limit proportionally.
         // Ceil div matches GPv2Settlement's rounding for the minimum buy
         // amount the user receives on a partial sell fill.
+        if order_sell.is_zero() {
+            return None;
+        }
         let scaled_buy = order_buy
             .checked_mul(proposal_sell)?
             .div_ceil(order_sell);
@@ -355,6 +358,20 @@ mod tests {
         .unwrap();
         assert_eq!(c.order_sell, U256::from(1000u64));
         assert_eq!(c.order_buy, U256::from(900u64));
+    }
+
+    #[test]
+    fn build_candidate_partial_sell_zero_order_sell_returns_none() {
+        let result = build_candidate(
+            U256::ZERO, // order_sell = 0
+            U256::from(900u64),
+            U256::ZERO,
+            U256::from(450u64),
+            true,
+            true,
+            U256::ZERO,
+        );
+        assert_eq!(result, None);
     }
 
     #[test]

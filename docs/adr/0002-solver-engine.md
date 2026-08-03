@@ -108,7 +108,7 @@ Every field, and why:
 | `prices` | `{sell_token: proposal.buy_amount, buy_token: proposal.sell_amount}` | Cross-multiplied from the proposal amounts. Unaffected by the cut, which is a declared fee rather than a price shade |
 | `trades` | exactly one `Fulfillment` | One order per solution (§Selection granularity) |
 | `trades[0].fee` | the gas cut, in sell-token atoms | **Never `None`.** Every live order is limit class, so the driver requires a solver-determined fee and rejects `Fee::Static` |
-| `trades[0].executed_amount` | sell order: `order.sellAmount - fee`. Buy order: `order.buyAmount` | The driver requires `executed + fee == order.target()` for sell orders and leaves the fee out of that check for buy orders |
+| `trades[0].executed_amount` | sell order: `candidate.order_sell - fee`. Buy order: `candidate.order_buy` | For fill-or-kill, `candidate.order_sell` equals the signed order amount. For partial fills, it equals the proposal's fill amount (`build_candidate` scales order limits to the fill fraction). The driver requires `executed + fee == target` for sell orders and leaves the fee out of that check for buy orders |
 | `interactions` | two `Custom` entries, `internalize: false` | The transfer and the Trampoline `execute` (§Settlement crafting) |
 | `pre_interactions`, `post_interactions`, `wrappers` | empty | Hook-carrying orders are outside the simulation envelope (ADR-0012) |
 | `gas` | simulated gas + 30k buffer | The driver's settlement budget; the same number the cut is priced from |
@@ -118,12 +118,12 @@ Every field, and why:
 
 Quote requests invert this: the driver's synthetic quote order is `Market` class unless `quote_using_limit_orders` is set, so there a solver-determined fee is what gets rejected. Unreachable today — the synthetic order carries the all-zero uid, which can never have an `Active` proposal, and a quote auction prices no tokens so the cut cannot be sized — but it is a trap for anyone adding quoting deliberately.
 
-### Order amount matching: strict, no clamping
+### Order amount matching
 
 At `/solve` time, BYOS validates proposal amounts against the auction's order state:
 
-- **Fill-or-kill orders** — proposal amounts must satisfy the order's limit price. Mismatches are rejected.
-- **Partially fillable orders** — proposal's `sell_amount` must be <= remaining fillable amount. If it exceeds (order was partially filled since proposal submission), the proposal is rejected.
+- **Fill-or-kill orders** — proposal amounts must exactly match the order's target amount (sell amount for sell orders, buy amount for buy orders). Mismatches are rejected.
+- **Partially fillable orders** — the proposal may fill any fraction of the order. A pre-fill guard skips proposals whose fill exceeds the remaining auction amount (which shrinks as other solvers fill the order across auctions). This is a non-terminal filter: the proposal stays `Active` and may be selected in a future auction where the remaining amount is larger (e.g. the order was not filled as much as expected). Scoring and gas-cut computation use a `build_candidate` helper that scales the order's limits to the fill fraction — ceil-div for buy-side limits on sell orders (matching GPv2Settlement's rounding), floor-div for sell-side limits on buy orders (matching Solidity's default integer division) — so `score_proposal` and `gas_cut::size` work unchanged for both order types.
 
 BYOS does **not** clamp or adapt proposal amounts. The sub-solver computed a route for specific amounts; changing them would invalidate the route. Sub-solvers resubmit with updated amounts via their polling loop when order state changes.
 
@@ -176,7 +176,7 @@ reasonable `/solve` SLO.
 - **Revert-rate discounting (reliability oracle).** Rejected for v1 — tempting to discount surplus by historical revert probability, but the sub-solver set is small, calibration is uncertain, and escrow debits already penalize unreliable sub-solvers economically. Premature optimization.
 - **Enable driver `SolutionMerging`.** Rejected — the driver merges blindly by token pair without sub-solver awareness. Would silently break the one-sub-solver-per-settlement-tx attribution rule ([ADR-0003](0003-slash-attribution-flow.md)).
 - **Top-N per order UID (return 3–5 candidates).** Return multiple proposals per order and let the driver break scoring ties after encoding. Rejected — the RFP specifies "selects the one yielding the greatest surplus," and BYOS's pre-ranking is close enough to the driver's effective scoring that picking one is reliable. Sending multiple wastes encoding budget on proposals BYOS already ranked lower. The marginal fallback benefit (if the top pick fails re-simulation) does not justify the divergence from the RFP or the encoding cost.
-- **Clamp proposal amounts to remaining fill.** Rejected — changing amounts invalidates the sub-solver's computed route. Sub-solvers resubmit with updated amounts via their polling loop.
+- **Clamp proposal amounts to remaining fill.** Rejected — changing amounts invalidates the sub-solver's computed route. Instead, proposals that exceed the remaining fillable amount are silently skipped at `/solve` time (non-terminal) and sub-solvers resubmit with updated amounts via their polling loop.
 
 ## Consequences
 
