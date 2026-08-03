@@ -3,7 +3,7 @@
 
 use {
     crate::contracts::{GPv2InteractionData, HooksTrampoline},
-    alloy::primitives::{Address, Bytes, U256},
+    alloy::{primitives::{Address, Bytes, U256}, sol_types::SolCall},
     serde::{Deserialize, Serialize},
 };
 
@@ -19,6 +19,22 @@ pub struct Hooks {
 impl Hooks {
     pub fn is_empty(&self) -> bool {
         self.pre.is_empty() && self.post.is_empty()
+    }
+
+    /// Encodes pre- and post-hooks as `HooksTrampoline.execute()` interactions.
+    /// Returns empty vecs when `hooks_trampoline` is `None` or when hooks are
+    /// empty.
+    pub fn encode_interactions(
+        &self,
+        hooks_trampoline: Option<Address>,
+    ) -> (Vec<GPv2InteractionData>, Vec<GPv2InteractionData>) {
+        match hooks_trampoline {
+            Some(ht) => (
+                encode_hooks_interaction(&self.pre, ht),
+                encode_hooks_interaction(&self.post, ht),
+            ),
+            None => (vec![], vec![]),
+        }
     }
 }
 
@@ -53,7 +69,6 @@ pub fn encode_hooks_interaction(
 
     let calldata = HooksTrampoline::executeCall { hooks: abi_hooks };
 
-    use alloy::sol_types::SolCall;
     vec![GPv2InteractionData {
         target: hooks_trampoline,
         value: U256::ZERO,
@@ -88,7 +103,6 @@ mod tests {
         assert_eq!(result[0].value, U256::ZERO);
 
         // Verify the calldata decodes back to the same hooks.
-        use alloy::sol_types::SolCall;
         let decoded = HooksTrampoline::executeCall::abi_decode(&result[0].callData)
             .expect("should decode as execute()");
         assert_eq!(decoded.hooks.len(), 1);

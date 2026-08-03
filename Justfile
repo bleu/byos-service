@@ -415,7 +415,7 @@ sync-abis:
         git submodule update --init --recursive byos-contracts
     fi
     (cd byos-contracts && forge build -q)
-    for contract in Trampoline TrampolineFactory Escrow; do
+    for contract in Trampoline TrampolineFactory Escrow HooksTrampoline; do
         jq '.abi' "byos-contracts/out/$contract.sol/$contract.json" \
             > "crates/byos-common/abis/$contract.json"
     done

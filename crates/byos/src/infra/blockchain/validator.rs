@@ -59,8 +59,9 @@ pub struct SimulationValidator<P, O> {
     escrow_address: Address,
     trampoline_factory: Address,
     /// `HooksTrampoline` contract address for encoding order hooks.
-    /// When `None`, hooked orders still pass the envelope but hooks are not
-    /// encoded into the simulation (they would be no-ops).
+    /// When `None`, hooked orders are rejected at validation time — hooks
+    /// cannot be silently omitted because they may be required for the order
+    /// to settle correctly (e.g. pre-hooks that set up token approvals).
     hooks_trampoline: Option<Address>,
     /// Last-seen auction gas price, shared with `/solve` — the "current gas
     /// price" of the profitability gate (ADR-0013).
@@ -236,6 +237,18 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             return Some(Verdict::Reject(reason));
         }
 
+        // Reject hooked orders when the HooksTrampoline address is not configured:
+        // hooks cannot be silently omitted because pre-hooks may be required for
+        // the order to settle (e.g. token approvals), and post-hooks are part of
+        // the user's intent.
+        if self.hooks_trampoline.is_none() && !record.hooks.is_empty() {
+            tracing::info!(
+                id = %proposal.id,
+                "order has hooks but --hooks-trampoline is not set, rejecting",
+            );
+            return Some(Verdict::Reject(RejectionReason::UnsupportedOrder));
+        }
+
         // 2. Resolve trampoline address. If already stored on the proposal
         //    (re-validation), skip the RPC call; otherwise resolve from the factory (or
         //    its cache).
@@ -287,12 +300,8 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             nonce: proposal.nonce,
         };
 
-        let pre_interactions = self.hooks_trampoline.map_or_else(Vec::new, |ht| {
-            byos_common::hooks::encode_hooks_interaction(&record.hooks.pre, ht)
-        });
-        let post_interactions = self.hooks_trampoline.map_or_else(Vec::new, |ht| {
-            byos_common::hooks::encode_hooks_interaction(&record.hooks.post, ht)
-        });
+        let (pre_interactions, post_interactions) =
+            record.hooks.encode_interactions(self.hooks_trampoline);
 
         let sim = simulation::build_simulation(&simulation::SimulationParams {
             settlement: self.settlement_address,
@@ -784,6 +793,28 @@ mod tests {
         let server = rpc_server().await;
         let mut record = test_order_record();
         record.has_bridging = true;
+        let validator = validator_with(server.uri(), StubOrders::Found(Box::new(record)));
+
+        let verdict = validator.validate(&submitted_proposal()).await;
+        assert_eq!(
+            verdict,
+            Some(Verdict::Reject(RejectionReason::UnsupportedOrder)),
+        );
+    }
+
+    #[tokio::test]
+    async fn hooked_order_rejected_without_hooks_trampoline() {
+        let server = rpc_server().await;
+        let mut record = test_order_record();
+        record.hooks = byos_common::hooks::Hooks {
+            pre: vec![byos_common::hooks::Hook {
+                target: Address::ZERO,
+                call_data: alloy::primitives::Bytes::new(),
+                gas_limit: U256::from(100_000_u64),
+            }],
+            post: vec![],
+        };
+        // hooks_trampoline is None (the default in validator_with)
         let validator = validator_with(server.uri(), StubOrders::Found(Box::new(record)));
 
         let verdict = validator.validate(&submitted_proposal()).await;

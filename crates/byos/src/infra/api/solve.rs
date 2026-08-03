@@ -197,6 +197,7 @@ fn build_solution(
         .collect();
 
     // Encode order hooks as pre/post interactions via HooksTrampoline.
+    let (pre_raw, post_raw) = proposal.hooks.encode_interactions(hooks_trampoline);
     let to_calls = |encoded: Vec<byos_common::contracts::GPv2InteractionData>| -> Vec<solution::Call> {
         encoded
             .into_iter()
@@ -207,12 +208,8 @@ fn build_solution(
             })
             .collect()
     };
-    let pre_interactions = hooks_trampoline.map_or_else(Vec::new, |ht| {
-        to_calls(byos_common::hooks::encode_hooks_interaction(&proposal.hooks.pre, ht))
-    });
-    let post_interactions = hooks_trampoline.map_or_else(Vec::new, |ht| {
-        to_calls(byos_common::hooks::encode_hooks_interaction(&proposal.hooks.post, ht))
-    });
+    let pre_interactions = to_calls(pre_raw);
+    let post_interactions = to_calls(post_raw);
 
     // Clearing prices: cross-multiplied from the proposal amounts, and left
     // alone by the cut, so `encode_settle` keeps producing the transaction we
