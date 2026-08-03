@@ -3,7 +3,10 @@
 
 use {
     super::{proposal::Proposal, validator::RejectionReason},
-    byos_common::settlement::{CowOrder, OrderKind},
+    byos_common::{
+        hooks::Hooks,
+        settlement::{CowOrder, OrderKind},
+    },
 };
 
 /// An order fetched from the orderbook, with the fullAppData-derived facts
@@ -12,9 +15,10 @@ use {
 #[derive(Clone, Debug)]
 pub struct OrderRecord {
     pub order: CowOrder,
-    /// True when fullAppData declares hooks (`metadata.hooks`, or
-    /// `metadata.bridging` which implies them).
-    pub has_hooks: bool,
+    /// Pre- and post-hooks parsed from `fullAppData.metadata.hooks`.
+    pub hooks: Hooks,
+    /// True when `fullAppData` declares `metadata.bridging`.
+    pub has_bridging: bool,
     /// True when both balance locations are plain `erc20`.
     pub erc20_balances: bool,
 }
@@ -23,7 +27,7 @@ impl OrderRecord {
     /// Checks the proposal/order pair against the simulation envelope.
     /// `Err` carries the rejection reason to store on the proposal.
     pub fn check_envelope(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
-        if self.has_hooks || self.order.partially_fillable || !self.erc20_balances {
+        if self.has_bridging || self.order.partially_fillable || !self.erc20_balances {
             return Err(RejectionReason::UnsupportedOrder);
         }
         // Fill-or-kill executes the order amount in full; a proposal quoting
@@ -65,7 +69,8 @@ pub(crate) fn test_order_record() -> OrderRecord {
             signing_scheme: SigningScheme::Eip712,
             signature: Bytes::from(vec![0u8; 65]),
         },
-        has_hooks: false,
+        hooks: Hooks::default(),
+        has_bridging: false,
         erc20_balances: true,
     }
 }
@@ -146,13 +151,28 @@ mod tests {
     }
 
     #[test]
-    fn hooked_order_is_rejected() {
+    fn bridging_order_is_rejected() {
         let mut record = sample_order();
-        record.has_hooks = true;
+        record.has_bridging = true;
 
         assert_eq!(
             record.check_envelope(&matching_proposal()),
             Err(RejectionReason::UnsupportedOrder),
         );
+    }
+
+    #[test]
+    fn hooked_order_passes_envelope() {
+        let mut record = sample_order();
+        record.hooks = Hooks {
+            pre: vec![byos_common::hooks::Hook {
+                target: alloy::primitives::Address::ZERO,
+                call_data: alloy::primitives::Bytes::new(),
+                gas_limit: alloy::primitives::U256::from(100_000_u64),
+            }],
+            post: vec![],
+        };
+
+        assert_eq!(record.check_envelope(&matching_proposal()), Ok(()));
     }
 }

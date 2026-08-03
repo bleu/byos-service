@@ -37,6 +37,9 @@ struct AppStateInner {
     /// Lifetime cap (ADR-0013): `POST` rejects `validUntil` further out than
     /// now + this many seconds.
     max_proposal_lifetime_secs: u64,
+    /// `HooksTrampoline` contract address for encoding order hooks in
+    /// `/solve` solutions. `None` when `--hooks-trampoline` is not set.
+    hooks_trampoline: Option<alloy::primitives::Address>,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -50,12 +53,14 @@ impl AppState {
         domain: Eip712Domain,
         gas_price: Arc<AtomicU64>,
         max_proposal_lifetime_secs: u64,
+        hooks_trampoline: Option<alloy::primitives::Address>,
     ) -> Self {
         Self(Arc::new(AppStateInner {
             store,
             domain,
             gas_price,
             max_proposal_lifetime_secs,
+            hooks_trampoline,
         }))
     }
 
@@ -73,6 +78,10 @@ impl AppState {
 
     pub fn max_proposal_lifetime_secs(&self) -> u64 {
         self.0.max_proposal_lifetime_secs
+    }
+
+    pub fn hooks_trampoline(&self) -> Option<alloy::primitives::Address> {
+        self.0.hooks_trampoline
     }
 }
 
@@ -280,6 +289,7 @@ mod tests {
             domain,
             gas_price,
             300,
+            None,
         )
     }
 

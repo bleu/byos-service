@@ -3,7 +3,12 @@
 //! The loop (infra) owns iteration, snapshotting, and state transitions; a
 //! [`ValidateProposal`] owns only the verdict on a single proposal.
 
-use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
+use {
+    super::proposal::Proposal,
+    alloy::primitives::Address,
+    byos_common::hooks::Hooks,
+    serde::Serialize,
+};
 
 /// Why the background validator rejected a proposal. PascalCase on the wire
 /// (ADR-0007), exposed to sub-solvers via `GET /proposal/{id}`; the strum
@@ -29,7 +34,7 @@ pub enum RejectionReason {
 
 /// Results of a successful simulation, stored on the proposal by the
 /// `Accept` verdict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimulationOutcome {
     /// Gas consumed by the simulation `eth_estimateGas` call.
     pub gas_used: u64,
@@ -39,10 +44,13 @@ pub struct SimulationOutcome {
     /// proposal for `/solve`.
     pub sell_token: Address,
     pub buy_token: Address,
+    /// Pre/post hooks from the order's `fullAppData`, stored on the proposal
+    /// for simulation and `/solve` encoding.
+    pub hooks: Hooks,
 }
 
 /// Outcome of validating a single proposal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Passed gatekeeping — proposal becomes `Active`. Carries the
     /// simulation outcome when a simulation ran; `None` for validators that

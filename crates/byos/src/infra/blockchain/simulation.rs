@@ -57,6 +57,10 @@ pub struct SimulationParams<'a> {
     pub proposal: Proposal,
     pub route: &'a [Interaction],
     pub signature: &'a Bytes,
+    /// Hook pre-interactions encoded as `HooksTrampoline.execute()` calls.
+    pub pre_interactions: Vec<byos_common::contracts::GPv2InteractionData>,
+    /// Hook post-interactions encoded as `HooksTrampoline.execute()` calls.
+    pub post_interactions: Vec<byos_common::contracts::GPv2InteractionData>,
 }
 
 /// The built simulation: the transaction request and the two state
@@ -76,6 +80,8 @@ pub fn build_simulation(params: &SimulationParams) -> Simulation {
         params.trampoline,
         params.route,
         params.signature,
+        &params.pre_interactions,
+        &params.post_interactions,
     );
 
     let tx = TransactionRequest::default()

@@ -9,7 +9,7 @@ use {
         proposal::{OrderUid, Proposal},
         scoring::{Candidate, SurplusPrice, effective_gas, score_proposal, surplus_token},
     },
-    alloy::primitives::U256,
+    alloy::primitives::{Address, U256},
     axum::{Json, extract::State},
     byos_common::trampoline::encode_trampoline_interactions,
     solvers_dto::{
@@ -119,7 +119,9 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
 
         // Build the solution using solvers-dto types.
         let id = solutions.len() as u64 + 1;
-        let Some(sol) = build_solution(id, order, proposal, gas_used, cut) else {
+        let Some(sol) =
+            build_solution(id, order, proposal, gas_used, cut, state.hooks_trampoline())
+        else {
             continue;
         };
 
@@ -153,6 +155,7 @@ fn build_solution(
     proposal: &Proposal,
     gas_used: u64,
     cut: GasCut,
+    hooks_trampoline: Option<Address>,
 ) -> Option<solution::Solution> {
     let Some(trampoline) = proposal.trampoline else {
         tracing::error!(
@@ -193,6 +196,24 @@ fn build_solution(
         })
         .collect();
 
+    // Encode order hooks as pre/post interactions via HooksTrampoline.
+    let to_calls = |encoded: Vec<byos_common::contracts::GPv2InteractionData>| -> Vec<solution::Call> {
+        encoded
+            .into_iter()
+            .map(|i| solution::Call {
+                target: i.target,
+                value: i.value,
+                calldata: i.callData.to_vec(),
+            })
+            .collect()
+    };
+    let pre_interactions = hooks_trampoline.map_or_else(Vec::new, |ht| {
+        to_calls(byos_common::hooks::encode_hooks_interaction(&proposal.hooks.pre, ht))
+    });
+    let post_interactions = hooks_trampoline.map_or_else(Vec::new, |ht| {
+        to_calls(byos_common::hooks::encode_hooks_interaction(&proposal.hooks.post, ht))
+    });
+
     // Clearing prices: cross-multiplied from the proposal amounts, and left
     // alone by the cut, so `encode_settle` keeps producing the transaction we
     // simulated.
@@ -212,9 +233,9 @@ fn build_solution(
         id,
         prices,
         trades: vec![trade],
-        pre_interactions: vec![],
+        pre_interactions,
         interactions,
-        post_interactions: vec![],
+        post_interactions,
         gas: Some(effective_gas(gas_used)),
         flashloans: None,
         wrappers: vec![],

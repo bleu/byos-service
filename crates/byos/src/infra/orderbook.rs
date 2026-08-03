@@ -252,15 +252,21 @@ enum SchemeDto {
 
 impl OrderDto {
     fn into_record(self) -> OrderRecord {
-        let has_hooks = self
+        let doc = self
             .full_app_data
             .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .map(|doc| {
-                let metadata = &doc["metadata"];
-                !metadata["hooks"].is_null() || !metadata["bridging"].is_null()
-            })
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+
+        let hooks = doc
+            .as_ref()
+            .and_then(|d| serde_json::from_value(d["metadata"]["hooks"].clone()).ok())
+            .unwrap_or_default();
+
+        let has_bridging = doc
+            .as_ref()
+            .map(|d| !d["metadata"]["bridging"].is_null())
             .unwrap_or(false);
+
         let erc20_balances =
             self.sell_token_balance == "erc20" && self.buy_token_balance == "erc20";
 
@@ -292,7 +298,8 @@ impl OrderDto {
                 },
                 signature: self.signature,
             },
-            has_hooks,
+            hooks,
+            has_bridging,
             erc20_balances,
         }
     }
@@ -393,7 +400,8 @@ mod tests {
         assert!(!record.order.partially_fillable);
         assert_eq!(record.order.signing_scheme, SigningScheme::Eip712);
         assert_eq!(record.order.signature.len(), 65);
-        assert!(!record.has_hooks, "plain metadata is not hooks");
+        assert!(record.hooks.is_empty(), "plain metadata has no hooks");
+        assert!(!record.has_bridging, "plain metadata is not bridging");
         assert!(record.erc20_balances);
     }
 
@@ -572,7 +580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridging_metadata_counts_as_hooks() {
+    async fn bridging_metadata_sets_has_bridging() {
         let server = MockServer::start().await;
         let mut body = real_order_json();
         body["fullAppData"] = json!(
@@ -590,6 +598,35 @@ mod tests {
             .await
             .expect("order should fetch");
 
-        assert!(record.has_hooks);
+        assert!(record.has_bridging);
+        assert!(record.hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hooks_metadata_is_parsed_into_structured_hooks() {
+        let server = MockServer::start().await;
+        let mut body = real_order_json();
+        body["fullAppData"] = json!(
+            "{\"appCode\":\"CoW Swap\",\"metadata\":{\"hooks\":{\"pre\":[{\"target\":\"0x0000000000000000000000000000000000005678\",\"callData\":\"0xabcd\",\"gasLimit\":\"100000\"}],\"post\":[]}}}"
+        );
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let record = client_with(&server)
+            .await
+            .order(&fixture_uid())
+            .await
+            .expect("order should fetch");
+
+        assert!(!record.hooks.is_empty());
+        assert_eq!(record.hooks.pre.len(), 1);
+        assert_eq!(
+            record.hooks.pre[0].target,
+            address!("0000000000000000000000000000000000005678")
+        );
+        assert!(record.hooks.post.is_empty());
+        assert!(!record.has_bridging);
     }
 }

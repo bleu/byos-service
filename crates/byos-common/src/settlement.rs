@@ -54,12 +54,18 @@ pub struct CowOrder {
 /// `[sell, buy]`, clearing prices `[proposal.buyAmount, proposal.sellAmount]`
 /// (so the user is paid exactly the proposal's clearing amounts), the order
 /// as a single trade, and the trampoline intra-interactions.
+///
+/// `pre_interactions` and `post_interactions` are spliced into
+/// `interactions[0]` and `interactions[2]` respectively — used for order
+/// hooks (`HooksTrampoline.execute`).
 pub fn encode_settle(
     order: &CowOrder,
     proposal: &Proposal,
     trampoline: Address,
     route: &[Interaction],
     proposal_signature: &Bytes,
+    pre_interactions: &[GPv2InteractionData],
+    post_interactions: &[GPv2InteractionData],
 ) -> Bytes {
     let trade = GPv2TradeData {
         sellTokenIndex: U256::ZERO,
@@ -98,7 +104,11 @@ pub fn encode_settle(
         tokens: vec![order.sell_token, order.buy_token],
         clearingPrices: vec![proposal.buyAmount, proposal.sellAmount],
         trades: vec![trade],
-        interactions: [vec![], intra.to_vec(), vec![]],
+        interactions: [
+            pre_interactions.to_vec(),
+            intra.to_vec(),
+            post_interactions.to_vec(),
+        ],
     }
     .abi_encode()
     .into()
@@ -196,6 +206,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &route,
             &proposal_signature,
+            &[],
+            &[],
         );
 
         let expected = include_str!("../testdata/settle-calldata.hex").trim();
@@ -214,6 +226,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let decoded = decode_settle(&calldata);
@@ -240,6 +254,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let settle = decode_settle(&calldata);
@@ -278,6 +294,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let settle = decode_settle(&calldata);

@@ -39,6 +39,12 @@ sol!(
     "abis/Escrow.json"
 );
 
+sol!(
+    #[sol(rpc)]
+    HooksTrampoline,
+    "abis/HooksTrampoline.json"
+);
+
 // Re-export the Proposal and Interaction structs from the Trampoline ABI at the
 // module level for ergonomic access (used by eip712, subsolver, tests, etc.).
 pub use ITrampoline::{Interaction, Proposal};
