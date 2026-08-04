@@ -90,9 +90,7 @@ pub fn build_candidate(
         if order_sell.is_zero() {
             return None;
         }
-        let scaled_buy = order_buy
-            .checked_mul(proposal_sell)?
-            .div_ceil(order_sell);
+        let scaled_buy = order_buy.checked_mul(proposal_sell)?.div_ceil(order_sell);
         Some(Candidate {
             order_sell: proposal_sell,
             order_buy: scaled_buy,

@@ -53,9 +53,7 @@ impl OrderRecord {
     fn check_partial_fill(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
         match self.order.kind {
             OrderKind::Sell => {
-                if proposal.sell_amount.is_zero()
-                    || proposal.sell_amount > self.order.sell_amount
-                {
+                if proposal.sell_amount.is_zero() || proposal.sell_amount > self.order.sell_amount {
                     return Err(RejectionReason::AmountMismatch);
                 }
                 // Limit price: proposal_buy / proposal_sell >= order_buy / order_sell
