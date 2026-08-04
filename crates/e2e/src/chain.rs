@@ -105,6 +105,11 @@ impl Chain {
         &self.provider
     }
 
+    /// The raw anvil instance: keys, addresses, etc. for test setup.
+    pub fn anvil(&self) -> &AnvilInstance {
+        &self.anvil
+    }
+
     /// The anvil JSON-RPC endpoint.
     pub fn endpoint(&self) -> String {
         self.anvil.endpoint()
