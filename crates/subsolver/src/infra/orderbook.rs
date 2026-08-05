@@ -3,8 +3,9 @@
 //! solvable batch to domain orders at the edge (ADR-0005).
 //!
 //! Eligibility mirrors the validation envelope BYOS enforces in
-//! `OrderRecord::check_envelope` (ADR-0012): fill-or-kill, no hooks, plain
-//! `erc20` balance locations. BYOS stays the authority on the envelope. This
+//! `OrderRecord::check_envelope` (ADR-0012): no hooks, plain `erc20` balance
+//! locations. Both fill-or-kill and partially fillable orders are accepted.
+//! BYOS stays the authority on the envelope. This
 //! copy exists so the reference client states its limits where an integrator
 //! will read them, and so it does not spend a submission on a proposal
 //! certain to be rejected: `POST /proposals` only checks the signature, so
@@ -60,7 +61,6 @@ struct AuctionOrder {
     #[serde_as(as = "DisplayFromStr")]
     buy_amount: U256,
     kind: Kind,
-    partially_fillable: bool,
     /// App-data hooks, already expanded into concrete calls by the orderbook
     /// — the auction never carries `fullAppData`. Only emptiness matters, so
     /// the elements are parsed and discarded.
@@ -119,8 +119,7 @@ impl OrderbookClient {
             .orders
             .into_iter()
             .filter(|order| {
-                !order.partially_fillable
-                    && order.pre_interactions.is_empty()
+                order.pre_interactions.is_empty()
                     && order.post_interactions.is_empty()
                     && order.sell_token_balance == "erc20"
                     && order.buy_token_balance == "erc20"
@@ -245,15 +244,19 @@ mod tests {
 
         assert_eq!(
             orders.len(),
-            2,
-            "an ordinary quote-derived appData hash is inside the envelope"
+            3,
+            "fill-or-kill and partially fillable orders are both in-envelope"
         );
+        // 0x11: sell fill-or-kill
         assert_eq!(orders[0].uid, Bytes::from(vec![0x11; 56]));
         assert_eq!(orders[0].kind, OrderKind::Sell);
         assert_eq!(orders[0].sell_amount, U256::from(1000));
         assert_eq!(orders[0].buy_amount, U256::from(900));
+        // 0x22: buy fill-or-kill (quote-derived appData hash is in-envelope)
         assert_eq!(orders[1].uid, Bytes::from(vec![0x22; 56]));
         assert_eq!(orders[1].kind, OrderKind::Buy);
+        // 0x66: partially fillable
+        assert_eq!(orders[2].uid, Bytes::from(vec![0x66; 56]));
     }
 
     #[tokio::test]

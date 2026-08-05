@@ -32,12 +32,20 @@ impl OrderRecord {
     /// Checks the proposal/order pair against the simulation envelope.
     /// `Err` carries the rejection reason to store on the proposal.
     pub fn check_envelope(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
-        if self.has_bridging || self.order.partially_fillable || !self.erc20_balances {
+        if self.has_bridging || !self.erc20_balances {
             return Err(RejectionReason::UnsupportedOrder);
         }
-        // Fill-or-kill executes the order amount in full; a proposal quoting
-        // a different amount would simulate a different trade than the one
-        // the driver settles.
+        if self.order.partially_fillable {
+            self.check_partial_fill(proposal)
+        } else {
+            self.check_fill_or_kill(proposal)
+        }
+    }
+
+    /// Fill-or-kill: the proposal must quote exactly the order's target
+    /// amount. A mismatch would simulate a different trade than the one the
+    /// driver settles.
+    fn check_fill_or_kill(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
         let amounts_match = match self.order.kind {
             OrderKind::Sell => proposal.sell_amount == self.order.sell_amount,
             OrderKind::Buy => proposal.buy_amount == self.order.buy_amount,
@@ -46,6 +54,45 @@ impl OrderRecord {
             return Err(RejectionReason::AmountMismatch);
         }
         Ok(())
+    }
+
+    /// Partially fillable: the proposal may fill any fraction of the order,
+    /// but the fill must be non-zero, must not exceed the signed order
+    /// amount, and must respect the order's limit price.
+    fn check_partial_fill(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
+        match self.order.kind {
+            OrderKind::Sell => {
+                if proposal.sell_amount.is_zero() || proposal.sell_amount > self.order.sell_amount {
+                    return Err(RejectionReason::AmountMismatch);
+                }
+                // Limit price: proposal_buy / proposal_sell >= order_buy / order_sell
+                // Cross-multiply to avoid division:
+                //   proposal_buy * order_sell >= proposal_sell * order_buy
+                let lhs = proposal.buy_amount.checked_mul(self.order.sell_amount);
+                let rhs = proposal.sell_amount.checked_mul(self.order.buy_amount);
+                match (lhs, rhs) {
+                    (Some(l), Some(r)) if l >= r => Ok(()),
+                    _ => Err(RejectionReason::AmountMismatch),
+                }
+            }
+            OrderKind::Buy => {
+                if proposal.buy_amount.is_zero()
+                    || proposal.sell_amount.is_zero()
+                    || proposal.buy_amount > self.order.buy_amount
+                {
+                    return Err(RejectionReason::AmountMismatch);
+                }
+                // Limit price: proposal_sell / proposal_buy <= order_sell / order_buy
+                // Cross-multiply:
+                //   proposal_sell * order_buy <= proposal_buy * order_sell
+                let lhs = proposal.sell_amount.checked_mul(self.order.buy_amount);
+                let rhs = proposal.buy_amount.checked_mul(self.order.sell_amount);
+                match (lhs, rhs) {
+                    (Some(l), Some(r)) if l <= r => Ok(()),
+                    _ => Err(RejectionReason::AmountMismatch),
+                }
+            }
+        }
     }
 }
 
@@ -104,15 +151,118 @@ mod tests {
         )
     }
 
+    // -- partial fill: sell orders --
+
     #[test]
-    fn partially_fillable_order_is_rejected() {
+    fn partial_fill_sell_order_within_limit_passes() {
         let mut record = sample_order();
         record.order.partially_fillable = true;
+        // Proposal fills half the order at a better-than-limit price.
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::from(500_000_u64);
+        proposal.buy_amount = U256::from(495_000_u64); // > 490_000 scaled limit
+        assert_eq!(record.check_envelope(&proposal), Ok(()));
+    }
 
+    #[test]
+    fn partial_fill_sell_order_at_exact_limit_passes() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        // order limit ratio = 980_000 / 1_000_000 = 0.98
+        // Half fill at exactly the limit: 500_000 sell, 490_000 buy
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::from(500_000_u64);
+        proposal.buy_amount = U256::from(490_000_u64);
+        assert_eq!(record.check_envelope(&proposal), Ok(()));
+    }
+
+    #[test]
+    fn partial_fill_sell_order_below_limit_price_rejected() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::from(500_000_u64);
+        proposal.buy_amount = U256::from(489_999_u64); // below 490_000 scaled limit
         assert_eq!(
-            record.check_envelope(&matching_proposal()),
-            Err(RejectionReason::UnsupportedOrder),
+            record.check_envelope(&proposal),
+            Err(RejectionReason::AmountMismatch),
         );
+    }
+
+    #[test]
+    fn partial_fill_sell_order_exceeding_order_amount_rejected() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::from(1_000_001_u64);
+        assert_eq!(
+            record.check_envelope(&proposal),
+            Err(RejectionReason::AmountMismatch),
+        );
+    }
+
+    #[test]
+    fn partial_fill_sell_order_zero_amount_rejected() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::ZERO;
+        assert_eq!(
+            record.check_envelope(&proposal),
+            Err(RejectionReason::AmountMismatch),
+        );
+    }
+
+    #[test]
+    fn partial_fill_buy_order_zero_sell_amount_rejected() {
+        let mut record = sample_order();
+        record.order.kind = OrderKind::Buy;
+        record.order.partially_fillable = true;
+        let mut proposal = matching_proposal();
+        proposal.buy_amount = U256::from(490_000_u64);
+        proposal.sell_amount = U256::ZERO;
+        assert_eq!(
+            record.check_envelope(&proposal),
+            Err(RejectionReason::AmountMismatch),
+        );
+    }
+
+    // -- partial fill: buy orders --
+
+    #[test]
+    fn partial_fill_buy_order_within_limit_passes() {
+        let mut record = sample_order();
+        record.order.kind = OrderKind::Buy;
+        record.order.partially_fillable = true;
+        // order: sell 1_000_000, buy 980_000
+        // proposal fills half: buy 490_000, sell 490_000 (< 500_000 scaled limit)
+        let mut proposal = matching_proposal();
+        proposal.buy_amount = U256::from(490_000_u64);
+        proposal.sell_amount = U256::from(490_000_u64);
+        assert_eq!(record.check_envelope(&proposal), Ok(()));
+    }
+
+    #[test]
+    fn partial_fill_buy_order_exceeding_order_amount_rejected() {
+        let mut record = sample_order();
+        record.order.kind = OrderKind::Buy;
+        record.order.partially_fillable = true;
+        let mut proposal = matching_proposal();
+        proposal.buy_amount = U256::from(980_001_u64);
+        assert_eq!(
+            record.check_envelope(&proposal),
+            Err(RejectionReason::AmountMismatch),
+        );
+    }
+
+    // -- partial fill: full-amount fill (degenerate case) --
+
+    #[test]
+    fn partial_fill_at_full_amount_passes() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        // Fill the entire order — should behave like fill-or-kill.
+        assert_eq!(record.check_envelope(&matching_proposal()), Ok(()));
     }
 
     #[test]

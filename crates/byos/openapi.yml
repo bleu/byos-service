@@ -367,10 +367,10 @@ components:
         - `InsufficientEscrow` — the sub-solver's escrow balance is below
           the required minimum. Fix: deposit escrow and resubmit.
         - `UnsupportedOrder` — the order is outside the simulation envelope
-          (hooks, partial fill, non-erc20 balances).
-        - `AmountMismatch` — the proposal's fill-or-kill amount differs from
-          the order's (sell amount for sell orders, buy amount for buy
-          orders).
+          (hooks, non-erc20 balances).
+        - `AmountMismatch` — for fill-or-kill orders, the proposal amount
+          differs from the order's; for partial fills, the amount is
+          zero, exceeds the order, or violates the limit price.
         - `OrderNotFound` — the orderbook does not know the proposal's
           order UID.
         - `Unprofitable` — the first simulation scored the proposal at or

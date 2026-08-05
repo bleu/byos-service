@@ -77,11 +77,13 @@ pub fn encode_settle(
         appData: order.app_data,
         feeAmount: order.fee_amount,
         flags: trade_flags(order),
-        // Ignored by GPv2 for fill-or-kill orders; set to the order amount
-        // the trade executes in full.
+        // For fill-or-kill orders GPv2 ignores this field (the full order
+        // amount is used). For partially fillable orders it is the actual
+        // fill size. Using the proposal amounts is correct for both: the
+        // envelope check guarantees proposal == order for fill-or-kill.
         executedAmount: match order.kind {
-            OrderKind::Sell => order.sell_amount,
-            OrderKind::Buy => order.buy_amount,
+            OrderKind::Sell => proposal.sellAmount,
+            OrderKind::Buy => proposal.buyAmount,
         },
         signature: order.signature.clone(),
     };
@@ -234,7 +236,10 @@ mod tests {
         let trade = &decoded.trades[0];
         // bit 0 = buy, bits 5-6 = eip1271 (0b10).
         assert_eq!(trade.flags, U256::from(1u64 | (2 << 5)));
-        assert_eq!(trade.executedAmount, order.buy_amount);
+        // executedAmount comes from the proposal, not the order. In this
+        // fixture they are equal (fill-or-kill envelope), but the source
+        // is the proposal.
+        assert_eq!(trade.executedAmount, fixture_proposal().buyAmount);
     }
 
     /// GPv2's pseudo-token for orders buying native ETH. The Trampoline reads
@@ -272,6 +277,78 @@ mod tests {
         assert_eq!(
             settle.clearingPrices,
             vec![proposal.buyAmount, proposal.sellAmount]
+        );
+    }
+
+    /// Partially fillable order with halved proposal amounts: `executedAmount`
+    /// must come from the proposal, not the order.
+    #[test]
+    fn partial_fill_uses_proposal_amounts_for_executed_amount() {
+        let mut order = fixture_order();
+        order.partially_fillable = true;
+
+        let half_sell = order.sell_amount / U256::from(2);
+        let half_buy = order.buy_amount / U256::from(2);
+        let proposal = Proposal {
+            sellAmount: half_sell,
+            buyAmount: half_buy,
+            ..fixture_proposal()
+        };
+
+        let calldata = encode_settle(
+            &order,
+            &proposal,
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
+        );
+
+        let decoded = decode_settle(&calldata);
+        let trade = &decoded.trades[0];
+
+        // executedAmount must reflect the partial fill, not the full order.
+        assert_eq!(
+            trade.executedAmount, half_sell,
+            "sell partial fill: executedAmount should be the proposal's sellAmount"
+        );
+
+        // Clearing prices still use the proposal amounts.
+        assert_eq!(decoded.clearingPrices, vec![half_buy, half_sell]);
+
+        // The partially_fillable flag is set in the trade flags (bit 1).
+        assert_ne!(trade.flags & U256::from(2), U256::ZERO);
+    }
+
+    /// Same as above but for a buy-side partial fill.
+    #[test]
+    fn partial_fill_buy_order_uses_proposal_buy_amount() {
+        let mut order = fixture_order();
+        order.partially_fillable = true;
+        order.kind = OrderKind::Buy;
+
+        let half_buy = order.buy_amount / U256::from(2);
+        let proposal = Proposal {
+            sellAmount: order.sell_amount / U256::from(2),
+            buyAmount: half_buy,
+            ..fixture_proposal()
+        };
+
+        let calldata = encode_settle(
+            &order,
+            &proposal,
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
+        );
+
+        let trade = &decode_settle(&calldata).trades[0];
+        assert_eq!(
+            trade.executedAmount, half_buy,
+            "buy partial fill: executedAmount should be the proposal's buyAmount"
         );
     }
 

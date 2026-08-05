@@ -92,6 +92,20 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
             .iter()
             .filter(|p| p.valid_until > now)
             .filter_map(|p| {
+                // For partially fillable orders, skip proposals whose fill
+                // exceeds the remaining auction amount. The remaining amount
+                // is dynamic across auctions, so no terminal state change.
+                if order.partially_fillable {
+                    let exceeds = if is_sell {
+                        p.sell_amount > order.sell_amount
+                    } else {
+                        p.buy_amount > order.buy_amount
+                    };
+                    if exceeds {
+                        return None;
+                    }
+                }
+
                 let gas_used = p.gas_used?;
                 let gas_cost =
                     U256::from(effective_gas(gas_used)).saturating_mul(auction.effective_gas_price);
@@ -102,7 +116,8 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                     proposal_buy: p.buy_amount,
                     is_sell_order: is_sell,
                     gas_cost,
-                };
+                }
+                .scaled_to_fill(order.partially_fillable)?;
                 let score = score_proposal(&candidate, surplus_price)?;
                 // Can rule out a proposal the score accepts: the score converts
                 // surplus at the auction's price, the limit is enforced on the
