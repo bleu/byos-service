@@ -1,12 +1,11 @@
 //! Tier-1 e2e: GPv2Settlement executes order hooks via the HooksTrampoline.
 //!
 //! Deploys the HooksTrampoline contract on anvil, presigns a fill-or-kill
-//! same-token sell order, and settles it with a pre-hook and a post-hook
-//! encoded as `HooksTrampoline.execute()` calls in `interactions[0]` and
-//! `interactions[2]`. Verifies the settlement succeeds — which requires the
-//! HooksTrampoline's `msg.sender == settlement` auth check to pass.
-//! Note: the trampoline discards each hook's call result, so hook reverts
-//! cannot fail this test; only the auth check is verified.
+//! same-token sell order, and settles it with a pre-hook that grants the
+//! vault relayer allowance via ERC-2612 `permit`. Without the pre-hook the
+//! trade has no approval and reverts — so a passing settlement proves that
+//! GPv2 executed the hook. A benign post-hook (`WETH.symbol()`) rides in
+//! `interactions[2]` to exercise the post-interaction slot.
 
 use {
     alloy::{
@@ -14,7 +13,7 @@ use {
         primitives::{Address, B256, Bytes, U256, address, keccak256},
         providers::{Provider, ProviderBuilder},
         rpc::types::TransactionRequest,
-        signers::local::PrivateKeySigner,
+        signers::{Signer, local::PrivateKeySigner},
         sol,
         sol_types::{SolCall, SolConstructor},
     },
@@ -26,6 +25,10 @@ use {
     },
     e2e::chain::{Chain, GPV2_SETTLEMENT},
 };
+
+/// USDC at its mainnet address (TestUSDC with EIP-2612 permit in the
+/// offline-mode state). 6 decimals.
+const USDC: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
 /// WETH at its mainnet address (present in the offline-mode state).
 const WETH: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
@@ -42,9 +45,17 @@ sol! {
     }
 
     #[sol(rpc)]
+    #[allow(clippy::too_many_arguments)]
+    interface IERC20Permit {
+        function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external;
+        function nonces(address owner) external view returns (uint256);
+        function DOMAIN_SEPARATOR() external view returns (bytes32);
+        function balanceOf(address owner) external view returns (uint256);
+    }
+
+    #[sol(rpc)]
     interface IWETH {
         function deposit() external payable;
-        function approve(address spender, uint256 amount) external returns (bool);
     }
 }
 
@@ -115,6 +126,53 @@ fn order_uid(digest: B256, owner: Address, valid_to: u32) -> [u8; 56] {
 const CREATE2_FACTORY: Address = address!("4e59b44847b379578588920cA78FbF26c0B4956C");
 
 // ---------------------------------------------------------------------------
+// EIP-2612 permit signing
+// ---------------------------------------------------------------------------
+
+/// EIP-2612 Permit typehash.
+fn permit_typehash() -> B256 {
+    keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)")
+}
+
+/// Build and sign an EIP-2612 permit, returning the encoded
+/// `permit(owner, spender, value, deadline, v, r, s)` calldata.
+async fn sign_permit_calldata(
+    signer: &PrivateKeySigner,
+    token_domain_separator: B256,
+    owner: Address,
+    spender: Address,
+    value: U256,
+    nonce: U256,
+    deadline: U256,
+) -> Bytes {
+    let struct_hash = keccak256(
+        [
+            permit_typehash().as_slice(),
+            B256::left_padding_from(owner.as_slice()).as_slice(),
+            B256::left_padding_from(spender.as_slice()).as_slice(),
+            &value.to_be_bytes::<32>(),
+            &nonce.to_be_bytes::<32>(),
+            &deadline.to_be_bytes::<32>(),
+        ]
+        .concat(),
+    );
+    let digest = eip712_digest(token_domain_separator, struct_hash);
+    let sig = signer.sign_hash(&digest).await.expect("permit signing");
+
+    IERC20Permit::permitCall {
+        owner,
+        spender,
+        value,
+        deadline,
+        v: sig.v() as u8,
+        r: sig.r().into(),
+        s: sig.s().into(),
+    }
+    .abi_encode()
+    .into()
+}
+
+// ---------------------------------------------------------------------------
 // HooksTrampoline deployment
 // ---------------------------------------------------------------------------
 
@@ -153,12 +211,10 @@ async fn deploy_hooks_trampoline(
 // Test
 // ---------------------------------------------------------------------------
 
-/// Settles an order with a pre-hook and a post-hook routed through the
-/// HooksTrampoline. The hooks call `WETH.name()` and `WETH.symbol()` —
-/// benign reads that succeed without side effects. What matters is that
-/// the settlement does not revert: the HooksTrampoline's auth check
-/// (`msg.sender == settlement`) passes, and GPv2 executes `interactions[0]`
-/// before the trade and `interactions[2]` after.
+/// Settles a USDC→USDC order whose only vault-relayer allowance comes from
+/// a `permit` pre-hook. If hooks do not execute, the permit never runs and
+/// the settlement reverts for lack of approval — so a passing test proves
+/// hooks ran. A benign post-hook (`WETH.symbol()`) exercises the post slot.
 #[tokio::test]
 #[ignore = "tier-1 e2e: needs anvil and the offline-mode submodule"]
 async fn hooked_settlement_executes_pre_and_post_hooks_via_trampoline() {
@@ -184,29 +240,23 @@ async fn hooked_settlement_executes_pre_and_post_hooks_via_trampoline() {
     let user = chain.anvil().addresses()[3];
     let user_signer: PrivateKeySigner = chain.anvil().keys()[3].clone().into();
     let user_provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(user_signer))
+        .wallet(EthereumWallet::from(user_signer.clone()))
         .connect_http(chain.anvil().endpoint_url())
         .erased();
 
-    let sell_amount = U256::from(1_000_000_000_000_000_000u128); // 1 WETH
-    let buy_amount = U256::from(900_000_000_000_000_000u128); // 0.9 WETH limit
+    // USDC has 6 decimals. Account #3 has 75K USDC in the offline-mode state.
+    let sell_amount = U256::from(1_000_000_000u64); // 1000 USDC
+    let buy_amount = U256::from(900_000_000u64); // 900 USDC limit
 
-    let weth = IWETH::new(WETH, &user_provider);
-    weth.deposit()
-        .value(sell_amount * U256::from(2))
-        .send()
-        .await
-        .expect("WETH deposit tx")
-        .get_receipt()
-        .await
-        .expect("WETH deposit receipt");
-    weth.approve(VAULT_RELAYER, U256::MAX)
-        .send()
-        .await
-        .expect("WETH approve tx")
-        .get_receipt()
-        .await
-        .expect("WETH approve receipt");
+    let usdc = IERC20Permit::new(USDC, &user_provider);
+
+    // Sanity: the user has USDC but NO vault-relayer allowance.
+    let balance: U256 = usdc.balanceOf(user).call().await.expect("balanceOf");
+    assert!(
+        balance >= sell_amount,
+        "user must have enough USDC (has {balance}, need {sell_amount})"
+    );
+    // No approve() call — the permit pre-hook is the only source of allowance.
 
     // -- presign the order ---------------------------------------------------
 
@@ -220,8 +270,8 @@ async fn hooked_settlement_executes_pre_and_post_hooks_via_trampoline() {
         .expect("domainSeparator read");
 
     let struct_hash = gpv2_struct_hash(
-        WETH,
-        WETH,
+        USDC,
+        USDC,
         Address::ZERO,
         sell_amount,
         buy_amount,
@@ -242,14 +292,37 @@ async fn hooked_settlement_executes_pre_and_post_hooks_via_trampoline() {
 
     // -- encode hooks --------------------------------------------------------
 
-    // Pre-hook: WETH.name() — a benign view call (selector 0x06fdde03).
+    // Pre-hook: ERC-2612 permit granting VAULT_RELAYER the sell amount.
+    // This is the ONLY source of allowance — if it doesn't run, the trade
+    // reverts. `permit` is signature-authorized, so any msg.sender (including
+    // the HooksTrampoline) can submit it.
+    let usdc_domain_separator: B256 = usdc
+        .DOMAIN_SEPARATOR()
+        .call()
+        .await
+        .expect("USDC DOMAIN_SEPARATOR");
+    let nonce: U256 = usdc.nonces(user).call().await.expect("USDC nonces");
+    let permit_deadline = U256::from(u64::MAX);
+
+    let permit_calldata = sign_permit_calldata(
+        &user_signer,
+        usdc_domain_separator,
+        user,
+        VAULT_RELAYER,
+        sell_amount,
+        nonce,
+        permit_deadline,
+    )
+    .await;
+
     let pre_hook = HooksTrampolineBindings::Hook {
-        target: WETH,
-        callData: Bytes::from(vec![0x06, 0xfd, 0xde, 0x03]), // name()
-        gasLimit: U256::from(50_000u64),
+        target: USDC,
+        callData: permit_calldata,
+        gasLimit: U256::from(100_000u64),
     };
 
-    // Post-hook: WETH.symbol() — another benign view call.
+    // Post-hook: WETH.symbol() — a benign view call that exercises the post
+    // interaction slot.
     let post_hook = HooksTrampolineBindings::Hook {
         target: WETH,
         callData: Bytes::from(vec![0x95, 0xd8, 0x9b, 0x41]), // symbol()
@@ -283,7 +356,7 @@ async fn hooked_settlement_executes_pre_and_post_hooks_via_trampoline() {
     let flags = U256::from(3u64 << 5);
 
     let calldata: Bytes = GPv2Settlement::settleCall {
-        tokens: vec![WETH, WETH],
+        tokens: vec![USDC, USDC],
         clearingPrices: vec![sell_amount, sell_amount], // 1:1 same token
         trades: vec![GPv2TradeData {
             sellTokenIndex: U256::ZERO,
@@ -324,6 +397,7 @@ async fn hooked_settlement_executes_pre_and_post_hooks_via_trampoline() {
 
     assert!(
         receipt.status(),
-        "settlement with pre/post hooks via HooksTrampoline should succeed"
+        "settlement with permit pre-hook must succeed — the permit is the only source of \
+         vault-relayer allowance, so a revert here means hooks did not execute"
     );
 }
