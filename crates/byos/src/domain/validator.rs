@@ -30,7 +30,7 @@ pub enum RejectionReason {
 
 /// Results of a successful simulation, stored on the proposal by the
 /// `Accept` verdict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimulationOutcome {
     /// Gas consumed by the simulation `eth_estimateGas` call.
     pub gas_used: u64,
@@ -43,7 +43,7 @@ pub struct SimulationOutcome {
 }
 
 /// Outcome of validating a single proposal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Passed gatekeeping — proposal becomes `Active`. Carries the
     /// simulation outcome when a simulation ran; `None` for validators that

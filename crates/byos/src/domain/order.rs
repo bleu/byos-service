@@ -3,18 +3,25 @@
 
 use {
     super::{proposal::Proposal, validator::RejectionReason},
-    byos_common::settlement::{CowOrder, OrderKind},
+    byos_common::{
+        contracts::GPv2InteractionData,
+        settlement::{CowOrder, OrderKind},
+    },
 };
 
-/// An order fetched from the orderbook, with the fullAppData-derived facts
-/// the envelope check needs. Immutable once fetched (orders never change;
+/// An order fetched from the orderbook, with the facts the envelope check
+/// and simulation need. Immutable once fetched (orders never change;
 /// off-chain cancellation is accepted staleness, see ADR-0012).
 #[derive(Clone, Debug)]
 pub struct OrderRecord {
     pub order: CowOrder,
-    /// True when fullAppData declares hooks (`metadata.hooks`, or
-    /// `metadata.bridging` which implies them).
-    pub has_hooks: bool,
+    /// Pre-hook interactions from the orderbook's `interactions.pre` field,
+    /// already trampoline-wrapped by the orderbook. Included in simulation
+    /// for accurate gas estimates; NOT returned by `/solve` (the driver
+    /// appends hooks itself).
+    pub pre_interactions: Vec<GPv2InteractionData>,
+    /// Post-hook interactions from the orderbook's `interactions.post` field.
+    pub post_interactions: Vec<GPv2InteractionData>,
     /// True when both balance locations are plain `erc20`.
     pub erc20_balances: bool,
 }
@@ -23,7 +30,7 @@ impl OrderRecord {
     /// Checks the proposal/order pair against the simulation envelope.
     /// `Err` carries the rejection reason to store on the proposal.
     pub fn check_envelope(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
-        if self.has_hooks || !self.erc20_balances {
+        if !self.erc20_balances {
             return Err(RejectionReason::UnsupportedOrder);
         }
         if self.order.partially_fillable {
@@ -112,7 +119,8 @@ pub(crate) fn test_order_record() -> OrderRecord {
             signing_scheme: SigningScheme::Eip712,
             signature: Bytes::from(vec![0u8; 65]),
         },
-        has_hooks: false,
+        pre_interactions: vec![],
+        post_interactions: vec![],
         erc20_balances: true,
     }
 }
@@ -296,13 +304,36 @@ mod tests {
     }
 
     #[test]
-    fn hooked_order_is_rejected() {
+    fn hooked_order_passes_envelope() {
         let mut record = sample_order();
-        record.has_hooks = true;
+        record.pre_interactions = vec![byos_common::contracts::GPv2InteractionData {
+            target: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
+            callData: alloy::primitives::Bytes::new(),
+        }];
 
-        assert_eq!(
-            record.check_envelope(&matching_proposal()),
-            Err(RejectionReason::UnsupportedOrder),
-        );
+        assert_eq!(record.check_envelope(&matching_proposal()), Ok(()));
+    }
+
+    #[test]
+    fn hooked_partially_fillable_order_passes_envelope() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        record.pre_interactions = vec![byos_common::contracts::GPv2InteractionData {
+            target: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
+            callData: alloy::primitives::Bytes::new(),
+        }];
+        record.post_interactions = vec![byos_common::contracts::GPv2InteractionData {
+            target: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
+            callData: alloy::primitives::Bytes::new(),
+        }];
+
+        // Half-fill within limit price.
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::from(500_000_u64);
+        proposal.buy_amount = U256::from(495_000_u64);
+        assert_eq!(record.check_envelope(&proposal), Ok(()));
     }
 }

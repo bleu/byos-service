@@ -57,6 +57,24 @@ pub struct SimulationParams<'a> {
     pub proposal: Proposal,
     pub route: &'a [Interaction],
     pub signature: &'a Bytes,
+    /// Pre-hook interactions from the order, already trampoline-wrapped by
+    /// the orderbook. Included so the gas estimate covers hook execution.
+    ///
+    /// **Known overestimate for partially fillable orders:** the order cache
+    /// is keyed by UID and never invalidated, so pre-interactions are always
+    /// present regardless of whether the order has been filled before. The
+    /// CoW social consensus is that pre-hooks run only on the *first* fill
+    /// (autopilot strips them when `executed_amount > 0`), so subsequent
+    /// fills overestimate gas by the pre-hook cost. This is conservative
+    /// (never under-counts), but reduces surplus and competitiveness
+    /// slightly. Fixing it would require fetching `executedAmount` from the
+    /// orderbook and invalidating the cache — deferred as a low-priority
+    /// optimisation.
+    pub pre_interactions: Vec<byos_common::contracts::GPv2InteractionData>,
+    /// Post-hook interactions from the order, already trampoline-wrapped.
+    /// Post-hooks run on every fill per the CoW social consensus, so these
+    /// are always correctly included.
+    pub post_interactions: Vec<byos_common::contracts::GPv2InteractionData>,
 }
 
 /// The built simulation: the transaction request and the two state
@@ -76,6 +94,8 @@ pub fn build_simulation(params: &SimulationParams) -> Simulation {
         params.trampoline,
         params.route,
         params.signature,
+        &params.pre_interactions,
+        &params.post_interactions,
     );
 
     let tx = TransactionRequest::default()

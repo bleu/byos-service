@@ -3,24 +3,20 @@
 //! solvable batch to domain orders at the edge (ADR-0005).
 //!
 //! Eligibility mirrors the validation envelope BYOS enforces in
-//! `OrderRecord::check_envelope` (ADR-0012): no hooks, plain `erc20` balance
-//! locations. Both fill-or-kill and partially fillable orders are accepted.
-//! BYOS stays the authority on the envelope. This
+//! `OrderRecord::check_envelope` (ADR-0012): plain `erc20` balance
+//! locations. Both fill-or-kill and partially fillable orders are accepted,
+//! with or without hooks. BYOS stays the authority on the envelope. This
 //! copy exists so the reference client states its limits where an integrator
 //! will read them, and so it does not spend a submission on a proposal
 //! certain to be rejected: `POST /proposals` only checks the signature, so
 //! an out-of-envelope order costs a stored row, an orderbook fetch, and a
-//! verdict poll before the sub-solver learns anything. Hook support is the
-//! gap tracked in COW-1197; closing it deletes the two interaction
-//! conditions here. Should the two definitions drift apart, the poll loop
-//! logs the resulting `UnsupportedOrder` verdict rather than absorbing it
-//! (see `run.rs`).
+//! verdict poll before the sub-solver learns anything. Should the two
+//! definitions drift apart, the poll loop logs the resulting
+//! `UnsupportedOrder` verdict rather than absorbing it (see `run.rs`).
 //!
 //! Every condition reads a field the auction already carries, so none of it
-//! costs an extra request: an auction order has no `fullAppData`, but the
-//! orderbook expands app-data hooks into `preInteractions` and
-//! `postInteractions` before serving them. Missing fields fail open, since a
-//! filter that silently discovers nothing is the bug this one replaced.
+//! costs an extra request. Missing fields fail open, since a filter that
+//! silently discovers nothing is the bug this one replaced.
 
 use {
     crate::domain::proposal::{Order, OrderKind},
@@ -61,13 +57,6 @@ struct AuctionOrder {
     #[serde_as(as = "DisplayFromStr")]
     buy_amount: U256,
     kind: Kind,
-    /// App-data hooks, already expanded into concrete calls by the orderbook
-    /// — the auction never carries `fullAppData`. Only emptiness matters, so
-    /// the elements are parsed and discarded.
-    #[serde(default)]
-    pre_interactions: Vec<serde::de::IgnoredAny>,
-    #[serde(default)]
-    post_interactions: Vec<serde::de::IgnoredAny>,
     /// Balance locations. Deprecated in the orderbook's schema — only
     /// `erc20` is accepted for new orders — so in practice these never
     /// exclude anything; they are read so the filter states the whole
@@ -119,10 +108,7 @@ impl OrderbookClient {
             .orders
             .into_iter()
             .filter(|order| {
-                order.pre_interactions.is_empty()
-                    && order.post_interactions.is_empty()
-                    && order.sell_token_balance == "erc20"
-                    && order.buy_token_balance == "erc20"
+                order.sell_token_balance == "erc20" && order.buy_token_balance == "erc20"
             })
             .map(|order| Order {
                 uid: order.uid,
@@ -206,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn solvable_orders_keeps_in_envelope_fill_or_kill_orders() {
+    async fn solvable_orders_keeps_in_envelope_orders() {
         // Buy orders are inside the envelope as much as sell orders are;
         // kept here so the kind mapping stays covered.
         let mut buy = auction_order(0x22);
@@ -214,7 +200,7 @@ mod tests {
 
         let mut partially_fillable = auction_order(0x66);
         partially_fillable["partiallyFillable"] = json!(true);
-        // A pre-hook, as the orderbook expands it for the auction.
+        // Hooked orders are in-envelope — hooks are supported (COW-1243).
         let mut pre_hooked = auction_order(0x33);
         pre_hooked["preInteractions"] = json!([{
             "target": "0x0000000000000000000000000000000000000002",
@@ -229,6 +215,7 @@ mod tests {
             "callData": "0xfeedface",
         }]);
 
+        // Non-erc20 balance is the only remaining filter.
         let mut vault_balance = auction_order(0x55);
         vault_balance["sellTokenBalance"] = json!("external");
 
@@ -244,35 +231,28 @@ mod tests {
 
         assert_eq!(
             orders.len(),
-            3,
-            "fill-or-kill and partially fillable orders are both in-envelope"
+            5,
+            "all orders except non-erc20 balance are in-envelope"
         );
-        // 0x11: sell fill-or-kill
         assert_eq!(orders[0].uid, Bytes::from(vec![0x11; 56]));
         assert_eq!(orders[0].kind, OrderKind::Sell);
         assert_eq!(orders[0].sell_amount, U256::from(1000));
         assert_eq!(orders[0].buy_amount, U256::from(900));
-        // 0x22: buy fill-or-kill (quote-derived appData hash is in-envelope)
         assert_eq!(orders[1].uid, Bytes::from(vec![0x22; 56]));
         assert_eq!(orders[1].kind, OrderKind::Buy);
-        // 0x66: partially fillable
         assert_eq!(orders[2].uid, Bytes::from(vec![0x66; 56]));
+        assert_eq!(orders[3].uid, Bytes::from(vec![0x33; 56]));
+        assert_eq!(orders[4].uid, Bytes::from(vec![0x44; 56]));
     }
 
     #[tokio::test]
     async fn an_order_missing_the_envelope_fields_is_still_solvable() {
-        // The balance fields are already deprecated upstream and the
-        // interaction arrays could be reshaped. When a field the filter
-        // depends on goes missing the sub-solver must submit and let BYOS
-        // judge — the opposite default would silently empty the auction,
-        // which is the failure this filter replaced.
+        // The balance fields are already deprecated upstream. When a field
+        // the filter depends on goes missing the sub-solver must submit and
+        // let BYOS judge — the opposite default would silently empty the
+        // auction, which is the failure this filter replaced.
         let mut order = auction_order(0x11);
-        for field in [
-            "preInteractions",
-            "postInteractions",
-            "sellTokenBalance",
-            "buyTokenBalance",
-        ] {
+        for field in ["sellTokenBalance", "buyTokenBalance"] {
             order.as_object_mut().unwrap().remove(field);
         }
 

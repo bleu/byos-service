@@ -208,6 +208,10 @@ fn build_solution(
         })
         .collect();
 
+    // Hook interactions are NOT included: the driver appends the order's
+    // own hooks itself (already trampoline-wrapped by the orderbook), so
+    // emitting them here would execute every hook twice.
+
     // Clearing prices: cross-multiplied from the proposal amounts, and left
     // alone by the cut, so `encode_settle` keeps producing the transaction we
     // simulated.

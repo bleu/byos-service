@@ -54,12 +54,18 @@ pub struct CowOrder {
 /// `[sell, buy]`, clearing prices `[proposal.buyAmount, proposal.sellAmount]`
 /// (so the user is paid exactly the proposal's clearing amounts), the order
 /// as a single trade, and the trampoline intra-interactions.
+///
+/// `pre_interactions` and `post_interactions` are spliced into
+/// `interactions[0]` and `interactions[2]` respectively — used for order
+/// hooks (`HooksTrampoline.execute`).
 pub fn encode_settle(
     order: &CowOrder,
     proposal: &Proposal,
     trampoline: Address,
     route: &[Interaction],
     proposal_signature: &Bytes,
+    pre_interactions: &[GPv2InteractionData],
+    post_interactions: &[GPv2InteractionData],
 ) -> Bytes {
     let trade = GPv2TradeData {
         sellTokenIndex: U256::ZERO,
@@ -100,7 +106,11 @@ pub fn encode_settle(
         tokens: vec![order.sell_token, order.buy_token],
         clearingPrices: vec![proposal.buyAmount, proposal.sellAmount],
         trades: vec![trade],
-        interactions: [vec![], intra.to_vec(), vec![]],
+        interactions: [
+            pre_interactions.to_vec(),
+            intra.to_vec(),
+            post_interactions.to_vec(),
+        ],
     }
     .abi_encode()
     .into()
@@ -198,6 +208,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &route,
             &proposal_signature,
+            &[],
+            &[],
         );
 
         let expected = include_str!("../testdata/settle-calldata.hex").trim();
@@ -216,6 +228,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let decoded = decode_settle(&calldata);
@@ -245,6 +259,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let settle = decode_settle(&calldata);
@@ -285,6 +301,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let decoded = decode_settle(&calldata);
@@ -323,6 +341,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let trade = &decode_settle(&calldata).trades[0];
@@ -351,6 +371,8 @@ mod tests {
             address!("0000000000000000000000000000000000007777"),
             &[],
             &Bytes::from(vec![0x11u8; 65]),
+            &[],
+            &[],
         );
 
         let settle = decode_settle(&calldata);
@@ -365,5 +387,126 @@ mod tests {
         // the cross-multiplied prices still pay out exactly the signed floor.
         let paid = order.sell_amount * settle.clearingPrices[0] / settle.clearingPrices[1];
         assert_eq!(paid, proposal.buyAmount);
+    }
+
+    /// Non-empty pre/post hooks land in `interactions[0]` and
+    /// `interactions[2]`, alongside the two trampoline intra-interactions
+    /// in `interactions[1]`.
+    #[test]
+    fn pre_and_post_hook_interactions_are_spliced_into_the_settlement() {
+        let pre = vec![GPv2InteractionData {
+            target: address!("000000000000000000000000000000000000aaaa"),
+            value: U256::ZERO,
+            callData: hex!("11111111").into(),
+        }];
+        let post = vec![
+            GPv2InteractionData {
+                target: address!("000000000000000000000000000000000000bbbb"),
+                value: U256::ZERO,
+                callData: hex!("22222222").into(),
+            },
+            GPv2InteractionData {
+                target: address!("000000000000000000000000000000000000cccc"),
+                value: U256::ZERO,
+                callData: hex!("33333333").into(),
+            },
+        ];
+
+        let calldata = encode_settle(
+            &fixture_order(),
+            &fixture_proposal(),
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+            &pre,
+            &post,
+        );
+
+        let settle = decode_settle(&calldata);
+
+        // interactions[0] = pre-hooks
+        assert_eq!(
+            settle.interactions[0].len(),
+            1,
+            "one pre-hook interaction expected",
+        );
+        assert_eq!(settle.interactions[0][0].target, pre[0].target);
+        assert_eq!(settle.interactions[0][0].callData, pre[0].callData);
+
+        // interactions[1] = the two trampoline intra-interactions (unchanged)
+        assert_eq!(
+            settle.interactions[1].len(),
+            2,
+            "two trampoline intra-interactions expected",
+        );
+
+        // interactions[2] = post-hooks
+        assert_eq!(
+            settle.interactions[2].len(),
+            2,
+            "two post-hook interactions expected",
+        );
+        assert_eq!(settle.interactions[2][0].target, post[0].target);
+        assert_eq!(settle.interactions[2][0].callData, post[0].callData);
+        assert_eq!(settle.interactions[2][1].target, post[1].target);
+        assert_eq!(settle.interactions[2][1].callData, post[1].callData);
+    }
+
+    /// Partial fill + hooks: `executedAmount` reflects the fill fraction
+    /// while pre/post hooks are spliced into interactions[0] and [2].
+    #[test]
+    fn partial_fill_with_hooks_encodes_both_correctly() {
+        let mut order = fixture_order();
+        order.partially_fillable = true;
+
+        let half_sell = order.sell_amount / U256::from(2);
+        let half_buy = order.buy_amount / U256::from(2);
+        let proposal = Proposal {
+            sellAmount: half_sell,
+            buyAmount: half_buy,
+            ..fixture_proposal()
+        };
+
+        let pre = vec![GPv2InteractionData {
+            target: address!("000000000000000000000000000000000000aaaa"),
+            value: U256::ZERO,
+            callData: hex!("11111111").into(),
+        }];
+        let post = vec![GPv2InteractionData {
+            target: address!("000000000000000000000000000000000000bbbb"),
+            value: U256::ZERO,
+            callData: hex!("22222222").into(),
+        }];
+
+        let calldata = encode_settle(
+            &order,
+            &proposal,
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+            &pre,
+            &post,
+        );
+
+        let settle = decode_settle(&calldata);
+        let trade = &settle.trades[0];
+
+        // executedAmount is the partial fill, not the full order.
+        assert_eq!(trade.executedAmount, half_sell);
+        // partially_fillable flag is set (bit 1).
+        assert_ne!(trade.flags & U256::from(2), U256::ZERO);
+        // Clearing prices use the partial amounts.
+        assert_eq!(settle.clearingPrices, vec![half_buy, half_sell]);
+
+        // Pre-hooks in interactions[0].
+        assert_eq!(settle.interactions[0].len(), 1);
+        assert_eq!(settle.interactions[0][0].target, pre[0].target);
+
+        // Intra-interactions in interactions[1] (trampoline).
+        assert_eq!(settle.interactions[1].len(), 2);
+
+        // Post-hooks in interactions[2].
+        assert_eq!(settle.interactions[2].len(), 1);
+        assert_eq!(settle.interactions[2][0].target, post[0].target);
     }
 }

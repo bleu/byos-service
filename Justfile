@@ -403,6 +403,9 @@ stack-settled:
 # e2e harness's Escrow artifact, which also carries creation bytecode because
 # the harness deploys it. Needs foundry and jq; nothing else in this file does,
 # and `just build` never runs it. CI runs it and fails on a dirty tree.
+#
+# Note: HooksTrampoline.json is vendored separately — it is a CoW Protocol
+# contract (not in byos-contracts) and is maintained manually.
 sync-abis:
     #!/usr/bin/env bash
     set -euo pipefail

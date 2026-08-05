@@ -290,6 +290,8 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             proposal: on_chain_proposal,
             route: &proposal.interactions,
             signature: &proposal.signature,
+            pre_interactions: record.pre_interactions.clone(),
+            post_interactions: record.post_interactions.clone(),
         });
 
         // 5. Dispatch eth_estimateGas under the two state overrides.
@@ -600,6 +602,8 @@ mod tests {
             TRAMPOLINE,
             &proposal.interactions,
             &proposal.signature,
+            &[],
+            &[],
         );
         let input = tx
             .get("input")
@@ -763,7 +767,7 @@ mod tests {
     async fn out_of_envelope_order_rejects_proposal() {
         let server = rpc_server().await;
         let mut record = test_order_record();
-        record.has_hooks = true;
+        record.erc20_balances = false;
         let validator = validator_with(server.uri(), StubOrders::Found(Box::new(record)));
 
         let verdict = validator.validate(&submitted_proposal()).await;

@@ -294,14 +294,10 @@ impl ProposalStore {
             });
         }
 
-        let (to, rejection_reason) = match verdict {
-            Verdict::Accept(_) => (ProposalStatus::Active, None),
-            Verdict::Reject(reason) => (ProposalStatus::Rejected, Some(reason)),
-            Verdict::SimFailed => (ProposalStatus::SimFailed, None),
-        };
-        let sim = match verdict {
-            Verdict::Accept(sim) => sim,
-            Verdict::Reject(_) | Verdict::SimFailed => None,
+        let (to, rejection_reason, sim) = match verdict {
+            Verdict::Accept(sim) => (ProposalStatus::Active, None, sim),
+            Verdict::Reject(reason) => (ProposalStatus::Rejected, Some(reason), None),
+            Verdict::SimFailed => (ProposalStatus::SimFailed, None, None),
         };
 
         sqlx::query(
@@ -317,10 +313,10 @@ impl ProposalStore {
         // value this column cannot hold, so this is a backstop that must not
         // be able to panic the validation loop. A saturated value scores the
         // proposal out of contention, which is the safe direction.
-        .bind(sim.map(|s| i64::try_from(s.gas_used).unwrap_or(i64::MAX)))
-        .bind(sim.map(|s| format!("{:#x}", s.trampoline)))
-        .bind(sim.map(|s| format!("{:#x}", s.sell_token)))
-        .bind(sim.map(|s| format!("{:#x}", s.buy_token)))
+        .bind(sim.as_ref().map(|s| i64::try_from(s.gas_used).unwrap_or(i64::MAX)))
+        .bind(sim.as_ref().map(|s| format!("{:#x}", s.trampoline)))
+        .bind(sim.as_ref().map(|s| format!("{:#x}", s.sell_token)))
+        .bind(sim.as_ref().map(|s| format!("{:#x}", s.buy_token)))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1674,7 +1670,7 @@ mod tests {
             buy_token: address!("00000000000000000000000000000000000000dd"),
         };
         let status = store
-            .resolve_verdict(id, Verdict::Accept(Some(sim)))
+            .resolve_verdict(id, Verdict::Accept(Some(sim.clone())))
             .await
             .expect("verdict lands");
         assert_eq!(status, ProposalStatus::Active);
