@@ -291,7 +291,6 @@ mod tests {
             trampoline: None,
             settlement_tx_hash: None,
             penalty_tx_hash: None,
-            hooks: byos_common::hooks::Hooks::default(),
         };
         AuditEvent {
             occurred_at: SystemTime::now(),

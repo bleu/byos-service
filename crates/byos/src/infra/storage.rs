@@ -128,8 +128,8 @@ impl ProposalStore {
             "INSERT INTO proposals (sub_solver, order_uid, order_uid_hash, sell_amount, \
              buy_amount, sell_token, buy_token, interactions, interactions_hash, valid_until, \
              nonce, signature, status, rejection_reason, gas_used, trampoline, \
-             settlement_tx_hash, penalty_tx_hash, hooks) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-             $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
+             settlement_tx_hash, penalty_tx_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, \
+             $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id",
         )
         .bind(format!("{:#x}", proposal.sub_solver))
         .bind(proposal.order_uid.to_string())
@@ -153,7 +153,6 @@ impl ProposalStore {
         .bind(proposal.trampoline.map(|t| format!("{t:#x}")))
         .bind(proposal.settlement_tx_hash.map(|t| format!("{t:#x}")))
         .bind(proposal.penalty_tx_hash.map(|t| format!("{t:#x}")))
-        .bind(serde_json::to_value(&proposal.hooks).expect("hooks serialize"))
         .fetch_one(&self.pool)
         .await?;
 
@@ -301,15 +300,10 @@ impl ProposalStore {
             Verdict::SimFailed => (ProposalStatus::SimFailed, None, None),
         };
 
-        let hooks_json = sim
-            .as_ref()
-            .map(|s| serde_json::to_value(&s.hooks).expect("hooks serialize"));
-
         sqlx::query(
             "UPDATE proposals SET status = $2, rejection_reason = $3, gas_used = COALESCE($4, \
              gas_used), trampoline = COALESCE($5, trampoline), sell_token = COALESCE($6, \
-             sell_token), buy_token = COALESCE($7, buy_token), hooks = COALESCE($8, hooks), \
-             status_changed_at = CASE WHEN \
+             sell_token), buy_token = COALESCE($7, buy_token), status_changed_at = CASE WHEN \
              status = $2 THEN status_changed_at ELSE now() END WHERE id = $1",
         )
         .bind(as_db_id(id)?)
@@ -323,7 +317,6 @@ impl ProposalStore {
         .bind(sim.as_ref().map(|s| format!("{:#x}", s.trampoline)))
         .bind(sim.as_ref().map(|s| format!("{:#x}", s.sell_token)))
         .bind(sim.as_ref().map(|s| format!("{:#x}", s.buy_token)))
-        .bind(hooks_json)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -974,7 +967,7 @@ fn status_names(statuses: &[ProposalStatus]) -> Vec<String> {
 const PROPOSAL_COLUMNS: &str =
     "id, sub_solver, order_uid, order_uid_hash, sell_amount, buy_amount, sell_token, buy_token, \
      interactions, interactions_hash, valid_until, nonce, signature, status, rejection_reason, \
-     gas_used, trampoline, settlement_tx_hash, penalty_tx_hash, hooks";
+     gas_used, trampoline, settlement_tx_hash, penalty_tx_hash";
 
 /// The raw column values; [`Proposal::try_from`] parses them back into
 /// domain types. A parse failure means a corrupt row (we wrote these values),
@@ -1001,7 +994,6 @@ struct ProposalRow {
     trampoline: Option<String>,
     settlement_tx_hash: Option<String>,
     penalty_tx_hash: Option<String>,
-    hooks: serde_json::Value,
 }
 
 /// A column in `proposals` that cannot be parsed back into its domain type.
@@ -1078,7 +1070,6 @@ impl TryFrom<ProposalRow> for Proposal {
                 .map(|t| t.parse::<B256>())
                 .transpose()
                 .map_err(|e| corrupt("penalty_tx_hash", e))?,
-            hooks: serde_json::from_value(row.hooks).map_err(|e| corrupt("hooks", e))?,
         })
     }
 }
@@ -1677,7 +1668,6 @@ mod tests {
             trampoline: address!("00000000000000000000000000000000000000ee"),
             sell_token: address!("00000000000000000000000000000000000000cc"),
             buy_token: address!("00000000000000000000000000000000000000dd"),
-            hooks: byos_common::hooks::Hooks::default(),
         };
         let status = store
             .resolve_verdict(id, Verdict::Accept(Some(sim.clone())))
@@ -1710,7 +1700,6 @@ mod tests {
             trampoline: address!("00000000000000000000000000000000000000ee"),
             sell_token: address!("00000000000000000000000000000000000000cc"),
             buy_token: address!("00000000000000000000000000000000000000dd"),
-            hooks: byos_common::hooks::Hooks::default(),
         };
         let status = store
             .resolve_verdict(id, Verdict::Accept(Some(sim)))

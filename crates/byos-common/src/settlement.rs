@@ -317,8 +317,6 @@ mod tests {
     /// in `interactions[1]`.
     #[test]
     fn pre_and_post_hook_interactions_are_spliced_into_the_settlement() {
-        let _hooks_trampoline = address!("0000000000000000000000000000000000009999");
-
         let pre = vec![GPv2InteractionData {
             target: address!("000000000000000000000000000000000000aaaa"),
             value: U256::ZERO,

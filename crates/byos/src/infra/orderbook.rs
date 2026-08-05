@@ -9,7 +9,10 @@
 use {
     crate::domain::{order::OrderRecord, proposal::OrderUid},
     alloy::primitives::{Address, B256, Bytes, U256, hex},
-    byos_common::settlement::{CowOrder, OrderKind, SigningScheme},
+    byos_common::{
+        contracts::GPv2InteractionData,
+        settlement::{CowOrder, OrderKind, SigningScheme},
+    },
     parking_lot::Mutex,
     reqwest::{StatusCode, Url},
     serde::Deserialize,
@@ -229,9 +232,35 @@ struct OrderDto {
     buy_token_balance: String,
     signing_scheme: SchemeDto,
     signature: Bytes,
-    /// JSON document as a string; `metadata.hooks` (or `metadata.bridging`,
-    /// which implies hooks) puts the order outside the envelope.
+    /// JSON document as a string; `metadata.bridging` puts the order outside
+    /// the envelope.
     full_app_data: Option<String>,
+    /// Pre-encoded hook interactions, trampoline-wrapped by the orderbook.
+    /// Used in simulation for accurate gas estimates; NOT returned by `/solve`
+    /// (the driver appends hooks itself).
+    #[serde(default)]
+    interactions: OrderInteractionsDto,
+}
+
+/// The orderbook's `interactions` object: pre- and post-hook calls,
+/// already encoded as `HooksTrampoline.execute()` by the orderbook.
+#[derive(Default, Deserialize)]
+struct OrderInteractionsDto {
+    #[serde(default)]
+    pre: Vec<InteractionDto>,
+    #[serde(default)]
+    post: Vec<InteractionDto>,
+}
+
+/// A single pre-encoded interaction from the orderbook API.
+#[serde_as]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InteractionDto {
+    target: Address,
+    #[serde_as(as = "DisplayFromStr")]
+    value: U256,
+    call_data: Bytes,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -250,25 +279,41 @@ enum SchemeDto {
     PreSign,
 }
 
+impl InteractionDto {
+    fn into_gpv2(self) -> GPv2InteractionData {
+        GPv2InteractionData {
+            target: self.target,
+            value: self.value,
+            callData: self.call_data,
+        }
+    }
+}
+
 impl OrderDto {
     fn into_record(self) -> OrderRecord {
-        let doc = self
+        let has_bridging = self
             .full_app_data
             .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-
-        let hooks = doc
-            .as_ref()
-            .and_then(|d| serde_json::from_value(d["metadata"]["hooks"].clone()).ok())
-            .unwrap_or_default();
-
-        let has_bridging = doc
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
             .as_ref()
             .map(|d| !d["metadata"]["bridging"].is_null())
             .unwrap_or(false);
 
         let erc20_balances =
             self.sell_token_balance == "erc20" && self.buy_token_balance == "erc20";
+
+        let pre_interactions: Vec<GPv2InteractionData> = self
+            .interactions
+            .pre
+            .into_iter()
+            .map(InteractionDto::into_gpv2)
+            .collect();
+        let post_interactions: Vec<GPv2InteractionData> = self
+            .interactions
+            .post
+            .into_iter()
+            .map(InteractionDto::into_gpv2)
+            .collect();
 
         OrderRecord {
             order: CowOrder {
@@ -298,7 +343,8 @@ impl OrderDto {
                 },
                 signature: self.signature,
             },
-            hooks,
+            pre_interactions,
+            post_interactions,
             has_bridging,
             erc20_balances,
         }
@@ -400,7 +446,14 @@ mod tests {
         assert!(!record.order.partially_fillable);
         assert_eq!(record.order.signing_scheme, SigningScheme::Eip712);
         assert_eq!(record.order.signature.len(), 65);
-        assert!(record.hooks.is_empty(), "plain metadata has no hooks");
+        assert!(
+            record.pre_interactions.is_empty(),
+            "plain order has no pre-interactions"
+        );
+        assert!(
+            record.post_interactions.is_empty(),
+            "plain order has no post-interactions"
+        );
         assert!(!record.has_bridging, "plain metadata is not bridging");
         assert!(record.erc20_balances);
     }
@@ -599,19 +652,20 @@ mod tests {
             .expect("order should fetch");
 
         assert!(record.has_bridging);
-        assert!(record.hooks.is_empty());
     }
 
     #[tokio::test]
-    async fn hooks_metadata_is_parsed_into_structured_hooks() {
+    async fn order_interactions_are_deserialized_from_the_api() {
         let server = MockServer::start().await;
         let mut body = real_order_json();
-        body["fullAppData"] = json!(
-            "{\"appCode\":\"CoW \
-             Swap\",\"metadata\":{\"hooks\":{\"pre\":[{\"target\":\"\
-             0x0000000000000000000000000000000000005678\",\"callData\":\"0xabcd\",\"gasLimit\":\"\
-             100000\"}],\"post\":[]}}}"
-        );
+        body["interactions"] = json!({
+            "pre": [{
+                "target": "0x0000000000000000000000000000000000005678",
+                "value": "0",
+                "callData": "0xabcd"
+            }],
+            "post": []
+        });
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
@@ -623,13 +677,13 @@ mod tests {
             .await
             .expect("order should fetch");
 
-        assert!(!record.hooks.is_empty());
-        assert_eq!(record.hooks.pre.len(), 1);
+        assert_eq!(record.pre_interactions.len(), 1);
         assert_eq!(
-            record.hooks.pre[0].target,
+            record.pre_interactions[0].target,
             address!("0000000000000000000000000000000000005678")
         );
-        assert!(record.hooks.post.is_empty());
+        assert_eq!(record.pre_interactions[0].callData.as_ref(), &[0xab, 0xcd]);
+        assert!(record.post_interactions.is_empty());
         assert!(!record.has_bridging);
     }
 }

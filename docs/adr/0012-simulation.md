@@ -58,8 +58,8 @@ Orders are immutable once placed, so fetches are cached for the process lifetime
 Before simulating, the order/proposal pair must pass the envelope (cheap, no RPC):
 
 - **Fill-or-kill only** — partially fillable orders reject (`UnsupportedOrder`).
-- **No bridging** — orders whose `fullAppData` declares `metadata.bridging` reject (`UnsupportedOrder`). Bridging implies hooks that BYOS cannot encode.
-- **Hooks require `--hooks-trampoline`** — orders with `metadata.hooks` in `fullAppData` are supported when the `--hooks-trampoline` address is configured. Pre- and post-hooks are parsed into structured `Hooks { pre, post }` on the order record, encoded as `HooksTrampoline.execute(hooks)` interactions, and spliced into the settlement's `interactions[0]` (pre) and `interactions[2]` (post). When `--hooks-trampoline` is not set, hooked orders reject (`UnsupportedOrder`) — hooks cannot be silently omitted because they may be required for the order to settle correctly (e.g. pre-hooks that set up token approvals).
+- **No bridging** — orders whose `fullAppData` declares `metadata.bridging` reject (`UnsupportedOrder`).
+- **Hooks supported** — order hooks are included in simulation for accurate gas estimates via the order's pre-encoded `interactions` from the orderbook API (already trampoline-wrapped). The `/solve` response does NOT include hooks — the driver appends the order's own hooks itself.
 - **erc20 balance flavors only** — `external`/`internal` balance orders reject (`UnsupportedOrder`).
 - **Amounts consistent** — sell fill-or-kill needs `proposal.sellAmount == order.sellAmount`; buy needs `proposal.buyAmount == order.buyAmount` (`AmountMismatch`). Fill-or-kill executes the order amount in full; a proposal quoting anything else would simulate a different trade than the one the driver settles.
 

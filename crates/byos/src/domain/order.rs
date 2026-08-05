@@ -4,19 +4,24 @@
 use {
     super::{proposal::Proposal, validator::RejectionReason},
     byos_common::{
-        hooks::Hooks,
+        contracts::GPv2InteractionData,
         settlement::{CowOrder, OrderKind},
     },
 };
 
-/// An order fetched from the orderbook, with the fullAppData-derived facts
-/// the envelope check needs. Immutable once fetched (orders never change;
+/// An order fetched from the orderbook, with the facts the envelope check
+/// and simulation need. Immutable once fetched (orders never change;
 /// off-chain cancellation is accepted staleness, see ADR-0012).
 #[derive(Clone, Debug)]
 pub struct OrderRecord {
     pub order: CowOrder,
-    /// Pre- and post-hooks parsed from `fullAppData.metadata.hooks`.
-    pub hooks: Hooks,
+    /// Pre-hook interactions from the orderbook's `interactions.pre` field,
+    /// already trampoline-wrapped by the orderbook. Included in simulation
+    /// for accurate gas estimates; NOT returned by `/solve` (the driver
+    /// appends hooks itself).
+    pub pre_interactions: Vec<GPv2InteractionData>,
+    /// Post-hook interactions from the orderbook's `interactions.post` field.
+    pub post_interactions: Vec<GPv2InteractionData>,
     /// True when `fullAppData` declares `metadata.bridging`.
     pub has_bridging: bool,
     /// True when both balance locations are plain `erc20`.
@@ -69,7 +74,8 @@ pub(crate) fn test_order_record() -> OrderRecord {
             signing_scheme: SigningScheme::Eip712,
             signature: Bytes::from(vec![0u8; 65]),
         },
-        hooks: Hooks::default(),
+        pre_interactions: vec![],
+        post_interactions: vec![],
         has_bridging: false,
         erc20_balances: true,
     }
@@ -164,14 +170,11 @@ mod tests {
     #[test]
     fn hooked_order_passes_envelope() {
         let mut record = sample_order();
-        record.hooks = Hooks {
-            pre: vec![byos_common::hooks::Hook {
-                target: alloy::primitives::Address::ZERO,
-                call_data: alloy::primitives::Bytes::new(),
-                gas_limit: alloy::primitives::U256::from(100_000_u64),
-            }],
-            post: vec![],
-        };
+        record.pre_interactions = vec![byos_common::contracts::GPv2InteractionData {
+            target: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
+            callData: alloy::primitives::Bytes::new(),
+        }];
 
         assert_eq!(record.check_envelope(&matching_proposal()), Ok(()));
     }

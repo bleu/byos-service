@@ -128,7 +128,6 @@ pub async fn create_proposal(
         trampoline: None,
         settlement_tx_hash: None,
         penalty_tx_hash: None,
-        hooks: byos_common::hooks::Hooks::default(),
     };
 
     let id = state.store().insert(stored).await.map_err(internal)?;

@@ -1,10 +1,7 @@
 //! Proposal domain types. The store itself is Postgres
 //! ([`crate::infra::storage::ProposalStore`], ADR-0013).
 
-use {
-    alloy::primitives::{Address, B256, Bytes, U256},
-    byos_common::hooks::Hooks,
-};
+use alloy::primitives::{Address, B256, Bytes, U256};
 
 /// Server-assigned proposal identifier (newtype for type safety — a
 /// `ProposalId` cannot be accidentally confused with any other `u64`).
@@ -162,9 +159,6 @@ pub struct Proposal {
     /// The Track A escrow debit that closed a `SettleFailed` story
     /// (ADR-0003): set on the `SettleFailed` → `Penalized` transition.
     pub penalty_tx_hash: Option<B256>,
-    /// Pre/post hooks from the order's `fullAppData`, set by the validator
-    /// on first simulation.
-    pub hooks: Hooks,
 }
 
 /// Test fixture: a minimal proposal in the given status.
@@ -195,6 +189,5 @@ pub(crate) fn test_proposal(
         trampoline: None,
         settlement_tx_hash: None,
         penalty_tx_hash: None,
-        hooks: Hooks::default(),
     }
 }

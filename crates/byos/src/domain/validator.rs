@@ -3,12 +3,7 @@
 //! The loop (infra) owns iteration, snapshotting, and state transitions; a
 //! [`ValidateProposal`] owns only the verdict on a single proposal.
 
-use {
-    super::proposal::Proposal,
-    alloy::primitives::Address,
-    byos_common::hooks::Hooks,
-    serde::Serialize,
-};
+use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
 
 /// Why the background validator rejected a proposal. PascalCase on the wire
 /// (ADR-0007), exposed to sub-solvers via `GET /proposal/{id}`; the strum
@@ -44,9 +39,6 @@ pub struct SimulationOutcome {
     /// proposal for `/solve`.
     pub sell_token: Address,
     pub buy_token: Address,
-    /// Pre/post hooks from the order's `fullAppData`, stored on the proposal
-    /// for simulation and `/solve` encoding.
-    pub hooks: Hooks,
 }
 
 /// Outcome of validating a single proposal.

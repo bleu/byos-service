@@ -58,11 +58,6 @@ pub struct SimulationValidator<P, O> {
     settlement_address: Address,
     escrow_address: Address,
     trampoline_factory: Address,
-    /// `HooksTrampoline` contract address for encoding order hooks.
-    /// When `None`, hooked orders are rejected at validation time — hooks
-    /// cannot be silently omitted because they may be required for the order
-    /// to settle correctly (e.g. pre-hooks that set up token approvals).
-    hooks_trampoline: Option<Address>,
     /// Last-seen auction gas price, shared with `/solve` — the "current gas
     /// price" of the profitability gate (ADR-0013).
     gas_price: Arc<AtomicU64>,
@@ -81,14 +76,12 @@ pub struct SimulationValidator<P, O> {
 }
 
 impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: P,
         orderbook: O,
         settlement_address: Address,
         escrow_address: Address,
         trampoline_factory: Address,
-        hooks_trampoline: Option<Address>,
         gas_price: Arc<AtomicU64>,
         min_score: U256,
     ) -> Self {
@@ -98,7 +91,6 @@ impl<P: Provider, O: FetchOrder> SimulationValidator<P, O> {
             settlement_address,
             escrow_address,
             trampoline_factory,
-            hooks_trampoline,
             gas_price,
             min_score,
             trampoline_cache: Mutex::new(HashMap::new()),
@@ -237,18 +229,6 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             return Some(Verdict::Reject(reason));
         }
 
-        // Reject hooked orders when the HooksTrampoline address is not configured:
-        // hooks cannot be silently omitted because pre-hooks may be required for
-        // the order to settle (e.g. token approvals), and post-hooks are part of
-        // the user's intent.
-        if self.hooks_trampoline.is_none() && !record.hooks.is_empty() {
-            tracing::info!(
-                id = %proposal.id,
-                "order has hooks but --hooks-trampoline is not set, rejecting",
-            );
-            return Some(Verdict::Reject(RejectionReason::UnsupportedOrder));
-        }
-
         // 2. Resolve trampoline address. If already stored on the proposal
         //    (re-validation), skip the RPC call; otherwise resolve from the factory (or
         //    its cache).
@@ -300,9 +280,6 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             nonce: proposal.nonce,
         };
 
-        let (pre_interactions, post_interactions) =
-            record.hooks.encode_interactions(self.hooks_trampoline);
-
         let sim = simulation::build_simulation(&simulation::SimulationParams {
             settlement: self.settlement_address,
             authenticator,
@@ -312,8 +289,8 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
             proposal: on_chain_proposal,
             route: &proposal.interactions,
             signature: &proposal.signature,
-            pre_interactions,
-            post_interactions,
+            pre_interactions: record.pre_interactions.clone(),
+            post_interactions: record.post_interactions.clone(),
         });
 
         // 5. Dispatch eth_estimateGas under the two state overrides.
@@ -352,7 +329,6 @@ impl<P: Provider + Send + Sync, O: FetchOrder> ValidateProposal for SimulationVa
                     trampoline,
                     sell_token: record.order.sell_token,
                     buy_token: record.order.buy_token,
-                    hooks: record.hooks.clone(),
                 })))
             }
             Err(e) if is_revert(&e) => {
@@ -556,7 +532,6 @@ mod tests {
             SETTLEMENT,
             ESCROW,
             FACTORY,
-            None,
             Arc::new(AtomicU64::new(gas_price)),
             U256::ZERO,
         )
@@ -590,7 +565,6 @@ mod tests {
                 trampoline: TRAMPOLINE,
                 sell_token: test_order_record().order.sell_token,
                 buy_token: test_order_record().order.buy_token,
-                hooks: byos_common::hooks::Hooks::default(),
             }))),
         );
 
@@ -803,28 +777,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hooked_order_rejected_without_hooks_trampoline() {
-        let server = rpc_server().await;
-        let mut record = test_order_record();
-        record.hooks = byos_common::hooks::Hooks {
-            pre: vec![byos_common::hooks::Hook {
-                target: Address::ZERO,
-                call_data: alloy::primitives::Bytes::new(),
-                gas_limit: U256::from(100_000_u64),
-            }],
-            post: vec![],
-        };
-        // hooks_trampoline is None (the default in validator_with)
-        let validator = validator_with(server.uri(), StubOrders::Found(Box::new(record)));
-
-        let verdict = validator.validate(&submitted_proposal()).await;
-        assert_eq!(
-            verdict,
-            Some(Verdict::Reject(RejectionReason::UnsupportedOrder)),
-        );
-    }
-
-    #[tokio::test]
     async fn simulation_returns_none_on_transport_error() {
         // Provider pointed at a port that is (almost certainly) not listening.
         let validator = validator_with(
@@ -846,7 +798,6 @@ mod tests {
             Address::ZERO,
             Address::ZERO,
             Address::ZERO,
-            None,
             Arc::new(AtomicU64::new(0)),
             U256::ZERO,
         );

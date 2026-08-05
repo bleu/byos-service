@@ -37,9 +37,6 @@ struct AppStateInner {
     /// Lifetime cap (ADR-0013): `POST` rejects `validUntil` further out than
     /// now + this many seconds.
     max_proposal_lifetime_secs: u64,
-    /// `HooksTrampoline` contract address for encoding order hooks in
-    /// `/solve` solutions. `None` when `--hooks-trampoline` is not set.
-    hooks_trampoline: Option<alloy::primitives::Address>,
 }
 
 /// Shared application state, cheaply cloneable via `Arc`. The store is
@@ -53,14 +50,12 @@ impl AppState {
         domain: Eip712Domain,
         gas_price: Arc<AtomicU64>,
         max_proposal_lifetime_secs: u64,
-        hooks_trampoline: Option<alloy::primitives::Address>,
     ) -> Self {
         Self(Arc::new(AppStateInner {
             store,
             domain,
             gas_price,
             max_proposal_lifetime_secs,
-            hooks_trampoline,
         }))
     }
 
@@ -78,10 +73,6 @@ impl AppState {
 
     pub fn max_proposal_lifetime_secs(&self) -> u64 {
         self.0.max_proposal_lifetime_secs
-    }
-
-    pub fn hooks_trampoline(&self) -> Option<alloy::primitives::Address> {
-        self.0.hooks_trampoline
     }
 }
 
@@ -289,7 +280,6 @@ mod tests {
             domain,
             gas_price,
             300,
-            None,
         )
     }
 
@@ -1616,104 +1606,6 @@ mod tests {
             "the sub-solver's route must reach the trampoline unchanged",
         );
         assert_eq!(execute._signature, proposal.signature);
-    }
-
-    const HOOKS_TRAMPOLINE: Address = address!("6666666666666666666666666666666666666666");
-
-    /// Creates an AppState with `hooks_trampoline` set, so `/solve` encodes
-    /// hooks into the solution's pre/post interactions.
-    async fn test_state_with_hooks_trampoline() -> AppState {
-        let (audit_tx, audit_rx) = tokio::sync::mpsc::unbounded_channel();
-        std::mem::forget(audit_rx);
-        let db = crate::tests::setup::TestDb::create().await;
-        let pool = crate::infra::audit::connect_and_migrate(&db.url)
-            .await
-            .expect("migrations run");
-        let domain = eip712::byos_domain(CHAIN_ID, factory());
-        let gas_price = Arc::new(AtomicU64::new(0));
-        AppState::new(
-            Arc::new(ProposalStore::new(pool, audit_tx)),
-            domain,
-            gas_price,
-            300,
-            Some(HOOKS_TRAMPOLINE),
-        )
-    }
-
-    /// A hooked order's pre/post interactions must appear in the `/solve`
-    /// response as `preInteractions` / `postInteractions`, encoded as
-    /// `HooksTrampoline.execute(hooks)` calls.
-    #[ignore]
-    #[tokio::test]
-    async fn solve_includes_hook_interactions_for_a_hooked_order() {
-        use alloy::sol_types::SolCall;
-
-        let state = test_state_with_hooks_trampoline().await;
-        let app = internal_router(state.clone(), None);
-
-        let pre_hook = byos_common::hooks::Hook {
-            target: address!("000000000000000000000000000000000000aaaa"),
-            call_data: alloy::primitives::Bytes::from(vec![0xab, 0xcd]),
-            gas_limit: U256::from(100_000_u64),
-        };
-        let post_hook = byos_common::hooks::Hook {
-            target: address!("000000000000000000000000000000000000bbbb"),
-            call_data: alloy::primitives::Bytes::from(vec![0xef]),
-            gas_limit: U256::from(50_000_u64),
-        };
-
-        let mut proposal =
-            test_proposal(OrderUid(ORDER_UID), Address::ZERO, ProposalStatus::Active);
-        proposal.sell_amount = U256::from(1_000_u64);
-        proposal.buy_amount = U256::from(950_u64);
-        proposal.gas_used = Some(200_000);
-        proposal.trampoline = Some(TRAMPOLINE);
-        proposal.hooks = byos_common::hooks::Hooks {
-            pre: vec![pre_hook.clone()],
-            post: vec![post_hook.clone()],
-        };
-        state
-            .store()
-            .insert(proposal)
-            .await
-            .expect("insert succeeds");
-
-        let result = post_solve(&app, &auction_json("sell", "1000", "900", "0")).await;
-
-        let solution = &result["solutions"][0];
-
-        // Pre-interactions: one HooksTrampoline.execute([pre_hook]) call.
-        let pre = solution["preInteractions"]
-            .as_array()
-            .expect("preInteractions must be an array");
-        assert_eq!(pre.len(), 1, "one pre-hook → one HooksTrampoline call");
-        assert_eq!(
-            pre[0]["target"].as_str().unwrap().to_lowercase(),
-            format!("{HOOKS_TRAMPOLINE:#x}"),
-        );
-        let pre_execute =
-            byos_common::contracts::HooksTrampoline::executeCall::abi_decode(&calldata_of(&pre[0]))
-                .expect("pre-interaction must decode as HooksTrampoline.execute()");
-        assert_eq!(pre_execute.hooks.len(), 1);
-        assert_eq!(pre_execute.hooks[0].target, pre_hook.target);
-        assert_eq!(pre_execute.hooks[0].callData, pre_hook.call_data);
-        assert_eq!(pre_execute.hooks[0].gasLimit, pre_hook.gas_limit);
-
-        // Post-interactions: one HooksTrampoline.execute([post_hook]) call.
-        let post = solution["postInteractions"]
-            .as_array()
-            .expect("postInteractions must be an array");
-        assert_eq!(post.len(), 1, "one post-hook → one HooksTrampoline call");
-        assert_eq!(
-            post[0]["target"].as_str().unwrap().to_lowercase(),
-            format!("{HOOKS_TRAMPOLINE:#x}"),
-        );
-        let post_execute = byos_common::contracts::HooksTrampoline::executeCall::abi_decode(
-            &calldata_of(&post[0]),
-        )
-        .expect("post-interaction must decode as HooksTrampoline.execute()");
-        assert_eq!(post_execute.hooks.len(), 1);
-        assert_eq!(post_execute.hooks[0].target, post_hook.target);
     }
 
     /// A proposal only reaches `/solve` unresolved if the validator accepted it

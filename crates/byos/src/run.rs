@@ -95,12 +95,6 @@ pub(crate) struct Args {
     #[arg(long, env)]
     settlement_address: Option<alloy::primitives::Address>,
 
-    /// HooksTrampoline contract address for encoding order hooks. When set,
-    /// hooked orders' pre/post hooks are included in simulation and `/solve`
-    /// solutions. When omitted, hooks are not encoded.
-    #[arg(long, env)]
-    hooks_trampoline: Option<alloy::primitives::Address>,
-
     /// Minimum collateral (`c_l`) in wei. Chain-specific: 0.010 ETH for
     /// mainnet (~10000000000000000), 10 xDAI for Gnosis
     /// (~10000000000000000000). Required when `--rpc-url` is set.
@@ -291,7 +285,6 @@ async fn run_with(
         domain,
         gas_price.clone(),
         args.max_proposal_lifetime_secs,
-        args.hooks_trampoline,
     );
 
     let period = std::time::Duration::from_secs(args.validation_interval_secs);
@@ -368,7 +361,6 @@ async fn run_with(
             settlement_address,
             escrow_address,
             args.trampoline_factory,
-            args.hooks_trampoline,
             gas_price,
             U256::from(args.min_proposal_score),
         );

@@ -4,8 +4,9 @@
 //! same-token sell order, and settles it with a pre-hook and a post-hook
 //! encoded as `HooksTrampoline.execute()` calls in `interactions[0]` and
 //! `interactions[2]`. Verifies the settlement succeeds — which requires the
-//! HooksTrampoline's `msg.sender == settlement` auth check to pass and the
-//! hooks themselves to not revert.
+//! HooksTrampoline's `msg.sender == settlement` auth check to pass.
+//! Note: the trampoline discards each hook's call result, so hook reverts
+//! cannot fail this test; only the auth check is verified.
 
 use {
     alloy::{

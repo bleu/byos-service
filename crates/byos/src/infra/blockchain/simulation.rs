@@ -57,9 +57,10 @@ pub struct SimulationParams<'a> {
     pub proposal: Proposal,
     pub route: &'a [Interaction],
     pub signature: &'a Bytes,
-    /// Hook pre-interactions encoded as `HooksTrampoline.execute()` calls.
+    /// Pre-hook interactions from the order, already trampoline-wrapped by
+    /// the orderbook. Included so the gas estimate covers hook execution.
     pub pre_interactions: Vec<byos_common::contracts::GPv2InteractionData>,
-    /// Hook post-interactions encoded as `HooksTrampoline.execute()` calls.
+    /// Post-hook interactions from the order, already trampoline-wrapped.
     pub post_interactions: Vec<byos_common::contracts::GPv2InteractionData>,
 }
 
