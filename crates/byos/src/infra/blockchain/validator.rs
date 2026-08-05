@@ -767,7 +767,7 @@ mod tests {
     async fn out_of_envelope_order_rejects_proposal() {
         let server = rpc_server().await;
         let mut record = test_order_record();
-        record.has_bridging = true;
+        record.erc20_balances = false;
         let validator = validator_with(server.uri(), StubOrders::Found(Box::new(record)));
 
         let verdict = validator.validate(&submitted_proposal()).await;

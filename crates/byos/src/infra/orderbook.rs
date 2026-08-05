@@ -232,9 +232,6 @@ struct OrderDto {
     buy_token_balance: String,
     signing_scheme: SchemeDto,
     signature: Bytes,
-    /// JSON document as a string; `metadata.bridging` puts the order outside
-    /// the envelope.
-    full_app_data: Option<String>,
     /// Pre-encoded hook interactions, trampoline-wrapped by the orderbook.
     /// Used in simulation for accurate gas estimates; NOT returned by `/solve`
     /// (the driver appends hooks itself).
@@ -291,14 +288,6 @@ impl InteractionDto {
 
 impl OrderDto {
     fn into_record(self) -> OrderRecord {
-        let has_bridging = self
-            .full_app_data
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .as_ref()
-            .map(|d| !d["metadata"]["bridging"].is_null())
-            .unwrap_or(false);
-
         let erc20_balances =
             self.sell_token_balance == "erc20" && self.buy_token_balance == "erc20";
 
@@ -345,7 +334,6 @@ impl OrderDto {
             },
             pre_interactions,
             post_interactions,
-            has_bridging,
             erc20_balances,
         }
     }
@@ -454,7 +442,6 @@ mod tests {
             record.post_interactions.is_empty(),
             "plain order has no post-interactions"
         );
-        assert!(!record.has_bridging, "plain metadata is not bridging");
         assert!(record.erc20_balances);
     }
 
@@ -633,28 +620,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridging_metadata_sets_has_bridging() {
-        let server = MockServer::start().await;
-        let mut body = real_order_json();
-        body["fullAppData"] = json!(
-            "{\"appCode\":\"CoW \
-             Swap\",\"metadata\":{\"bridging\":{\"destinationChainId\":\"56\"}}}"
-        );
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(&server)
-            .await;
-
-        let record = client_with(&server)
-            .await
-            .order(&fixture_uid())
-            .await
-            .expect("order should fetch");
-
-        assert!(record.has_bridging);
-    }
-
-    #[tokio::test]
     async fn order_interactions_are_deserialized_from_the_api() {
         let server = MockServer::start().await;
         let mut body = real_order_json();
@@ -684,6 +649,5 @@ mod tests {
         );
         assert_eq!(record.pre_interactions[0].callData.as_ref(), &[0xab, 0xcd]);
         assert!(record.post_interactions.is_empty());
-        assert!(!record.has_bridging);
     }
 }

@@ -22,8 +22,6 @@ pub struct OrderRecord {
     pub pre_interactions: Vec<GPv2InteractionData>,
     /// Post-hook interactions from the orderbook's `interactions.post` field.
     pub post_interactions: Vec<GPv2InteractionData>,
-    /// True when `fullAppData` declares `metadata.bridging`.
-    pub has_bridging: bool,
     /// True when both balance locations are plain `erc20`.
     pub erc20_balances: bool,
 }
@@ -32,7 +30,7 @@ impl OrderRecord {
     /// Checks the proposal/order pair against the simulation envelope.
     /// `Err` carries the rejection reason to store on the proposal.
     pub fn check_envelope(&self, proposal: &Proposal) -> Result<(), RejectionReason> {
-        if self.has_bridging || !self.erc20_balances {
+        if !self.erc20_balances {
             return Err(RejectionReason::UnsupportedOrder);
         }
         if self.order.partially_fillable {
@@ -123,7 +121,6 @@ pub(crate) fn test_order_record() -> OrderRecord {
         },
         pre_interactions: vec![],
         post_interactions: vec![],
-        has_bridging: false,
         erc20_balances: true,
     }
 }
@@ -304,17 +301,6 @@ mod tests {
     #[test]
     fn matching_fill_or_kill_order_passes() {
         assert_eq!(sample_order().check_envelope(&matching_proposal()), Ok(()));
-    }
-
-    #[test]
-    fn bridging_order_is_rejected() {
-        let mut record = sample_order();
-        record.has_bridging = true;
-
-        assert_eq!(
-            record.check_envelope(&matching_proposal()),
-            Err(RejectionReason::UnsupportedOrder),
-        );
     }
 
     #[test]
