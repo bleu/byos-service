@@ -451,4 +451,62 @@ mod tests {
         assert_eq!(settle.interactions[2][1].target, post[1].target);
         assert_eq!(settle.interactions[2][1].callData, post[1].callData);
     }
+
+    /// Partial fill + hooks: `executedAmount` reflects the fill fraction
+    /// while pre/post hooks are spliced into interactions[0] and [2].
+    #[test]
+    fn partial_fill_with_hooks_encodes_both_correctly() {
+        let mut order = fixture_order();
+        order.partially_fillable = true;
+
+        let half_sell = order.sell_amount / U256::from(2);
+        let half_buy = order.buy_amount / U256::from(2);
+        let proposal = Proposal {
+            sellAmount: half_sell,
+            buyAmount: half_buy,
+            ..fixture_proposal()
+        };
+
+        let pre = vec![GPv2InteractionData {
+            target: address!("000000000000000000000000000000000000aaaa"),
+            value: U256::ZERO,
+            callData: hex!("11111111").into(),
+        }];
+        let post = vec![GPv2InteractionData {
+            target: address!("000000000000000000000000000000000000bbbb"),
+            value: U256::ZERO,
+            callData: hex!("22222222").into(),
+        }];
+
+        let calldata = encode_settle(
+            &order,
+            &proposal,
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+            &pre,
+            &post,
+        );
+
+        let settle = decode_settle(&calldata);
+        let trade = &settle.trades[0];
+
+        // executedAmount is the partial fill, not the full order.
+        assert_eq!(trade.executedAmount, half_sell);
+        // partially_fillable flag is set (bit 1).
+        assert_ne!(trade.flags & U256::from(2), U256::ZERO);
+        // Clearing prices use the partial amounts.
+        assert_eq!(settle.clearingPrices, vec![half_buy, half_sell]);
+
+        // Pre-hooks in interactions[0].
+        assert_eq!(settle.interactions[0].len(), 1);
+        assert_eq!(settle.interactions[0][0].target, pre[0].target);
+
+        // Intra-interactions in interactions[1] (trampoline).
+        assert_eq!(settle.interactions[1].len(), 2);
+
+        // Post-hooks in interactions[2].
+        assert_eq!(settle.interactions[2].len(), 1);
+        assert_eq!(settle.interactions[2][0].target, post[0].target);
+    }
 }
