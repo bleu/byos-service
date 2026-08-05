@@ -59,8 +59,7 @@ Heavy validation runs in the **background validation loop**, not on the `POST /p
 
 - EIP-712 signature recovery and verification
 - Escrow balance >= minimum (cached with short TTL)
-- Simulation against reference block (permanent drop on failure); gas estimate cached per proposal
-- Hook presence — required pre/post hooks from order app data present in `interactions`
+- Simulation against reference block (permanent drop on failure); gas estimate cached per proposal. For hooked orders, the order's pre-encoded hook interactions are included in simulation for accurate gas estimates (COW-1243)
 - Baseline price sanity — proposal not obviously worse than reference AMM prices (EBBO baseline)
 - Profitability gate — proposal's surplus must exceed its gas cost (`surplus - gas > min_score`, ADR-0013). This gate cannot see fee policies: they exist only in the `/solve` payload. It asks about gas headroom and deliberately stops there (§Scoring)
 - Rate limiting (IP-based + signer-based, escrow-tiered)
@@ -110,7 +109,7 @@ Every field, and why:
 | `trades[0].fee` | the gas cut, in sell-token atoms | **Never `None`.** Every live order is limit class, so the driver requires a solver-determined fee and rejects `Fee::Static` |
 | `trades[0].executed_amount` | sell order: `candidate.order_sell - fee`. Buy order: `candidate.order_buy` | For fill-or-kill, `candidate.order_sell` equals the signed order amount. For partial fills, it equals the proposal's fill amount (`Candidate::scaled_to_fill` scales order limits to the fill fraction). The driver requires `executed + fee == target` for sell orders and leaves the fee out of that check for buy orders |
 | `interactions` | two `Custom` entries, `internalize: false` | The transfer and the Trampoline `execute` (§Settlement crafting) |
-| `pre_interactions`, `post_interactions`, `wrappers` | empty | Hook-carrying orders are outside the simulation envelope (ADR-0012) |
+| `pre_interactions`, `post_interactions`, `wrappers` | empty | The driver appends the order's own hooks itself (ADR-0012); emitting them here would execute every hook twice |
 | `gas` | simulated gas + 30k buffer | The driver's settlement budget; the same number the cut is priced from |
 | `flashloans` | `None` | Out of scope for v1 |
 

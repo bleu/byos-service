@@ -18,9 +18,9 @@ CoW's own penalty framework has four enforcement layers (see [`../reference/cow-
 3. **DAO governance** (EBBO, score inflation, surplus shifts, overbidding, hooks, catch-all) — only **EBBO/unfair pricing** and the **catch-all** apply to sub-solvers. Score inflation, illegal buffer usage, surplus shifting, and overbidding are either architecturally prevented or are BYOS's own responsibility (BYOS controls score construction, buffer access, and settlement composition).
 4. **Economic penalties** (reward formula, `missingScore`, `c_l` cap) — mirrored via the Track A `gas + c_l` debit. Sub-solvers receive no rewards in v1, so the escrow debit is the only lever.
 
-### Sub-solver responsibility for hooks
+### Hooks and sub-solver responsibility
 
-Sub-solvers are responsible for including pre/post hooks from order app data in their proposal `interactions`. Some hooks (e.g., withdrawing DEX liquidity before a swap) change the token balances available for the route — the sub-solver must see and simulate them to compute a correct route. BYOS validates hook presence at gatekeeping (preventive); proposals missing required hooks are rejected before settlement. Passing gatekeeping does not absolve the sub-solver — the EIP-712 signature is the sub-solver accepting responsibility for their route.
+Hooks are handled by BYOS and the driver, not by sub-solvers (COW-1243). The orderbook pre-encodes hooks as `HooksTrampoline.execute()` calls; BYOS includes them in simulation for accurate gas estimates, and the driver appends them to the settlement. Sub-solvers submit routing proposals without hook interactions — their EIP-712 signature covers the route, not the hooks. Some hooks (e.g., withdrawing DEX liquidity before a swap) change the token balances available for the route; sub-solvers must account for their effects when computing routes, but do not encode or submit them.
 
 ## Decision
 
@@ -94,8 +94,7 @@ If a Track B claim exceeds the sub-solver's escrow balance, BYOS drains the rema
 
 BYOS validates proposals before settlement:
 
-- **Simulation** — proposal must not revert against the reference block.
-- **Hook presence** — required pre/post hooks from order app data must be present in `interactions`.
+- **Simulation** — proposal must not revert against the reference block. For hooked orders, the order's pre-encoded hook interactions are included in simulation for accurate gas estimates.
 - **Baseline price check** — route must not be obviously worse than reference AMM prices (EBBO baseline).
 
 Passing gatekeeping does not absolve the sub-solver of liability if CoW later determines the settlement violated protocol rules. Gatekeeping reduces risk; it does not eliminate it.
@@ -112,7 +111,7 @@ Immutable for v1. No unilateral updates. Changes require a v2 policy with a new 
 
 - **Replicate all four CoW enforcement layers.** Rejected — Layers 1 and 2 are either architecturally prevented or already covered by gatekeeping + escrow + collateral gate. Adding separate participation guards (ban timers) would be redundant.
 - **Pass all Layer 3 violations through to sub-solvers** (score inflation, buffer abuse, surplus shifting, overbidding). Rejected — sub-solvers cannot cause most of these violations. BYOS controls score construction, buffer access, and settlement composition. Listing violations sub-solvers can't commit would be confusing.
-- **BYOS injects hooks** (sub-solvers only provide routing interactions). Rejected — some hooks change the token state the route depends on (e.g., LP withdrawal before swap). Sub-solvers must see and simulate hooks to compute correct routes.
+- **Sub-solvers encode hooks in their proposals.** Reversed (COW-1243) — BYOS now handles hooks: the orderbook pre-encodes them, BYOS includes them in simulation, and the driver appends them to the settlement. Sub-solvers provide only routing interactions. Hooks that change token state (e.g., LP withdrawal before swap) affect the route but are not the sub-solver's responsibility to encode.
 - **No penalty for non-settlement** (BYOS wins auction but doesn't settle). Rejected — non-settlement degrades BYOS's participation-guard standing with CoW. Sub-solvers should internalize this cost.
 - **Credit Track A against Track B for the same settlement.** Rejected — if both penalties hit BYOS, the sub-solver should pay both. The sub-solver's proposal caused both problems.
 - **Formal dispute mechanism for Track A with external arbiter.** Rejected — Track A is on-chain-verifiable. BYOS-unilateral adjudication is sufficient given the trust model. Sub-solvers trust BYOS as operator.
