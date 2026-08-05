@@ -328,4 +328,26 @@ mod tests {
 
         assert_eq!(record.check_envelope(&matching_proposal()), Ok(()));
     }
+
+    #[test]
+    fn hooked_partially_fillable_order_passes_envelope() {
+        let mut record = sample_order();
+        record.order.partially_fillable = true;
+        record.pre_interactions = vec![byos_common::contracts::GPv2InteractionData {
+            target: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
+            callData: alloy::primitives::Bytes::new(),
+        }];
+        record.post_interactions = vec![byos_common::contracts::GPv2InteractionData {
+            target: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
+            callData: alloy::primitives::Bytes::new(),
+        }];
+
+        // Half-fill within limit price.
+        let mut proposal = matching_proposal();
+        proposal.sell_amount = U256::from(500_000_u64);
+        proposal.buy_amount = U256::from(495_000_u64);
+        assert_eq!(record.check_envelope(&proposal), Ok(()));
+    }
 }
