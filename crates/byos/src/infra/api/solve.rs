@@ -7,7 +7,7 @@ use {
     crate::domain::{
         gas_cut::{self, GasCut, SellTokenPrice},
         proposal::{OrderUid, Proposal},
-        scoring::{SurplusPrice, build_candidate, effective_gas, score_proposal, surplus_token},
+        scoring::{Candidate, SurplusPrice, effective_gas, score_proposal, surplus_token},
     },
     alloy::primitives::U256,
     axum::{Json, extract::State},
@@ -109,15 +109,15 @@ pub async fn solve(State(state): State<AppState>, Json(auction): Json<Auction>) 
                 let gas_used = p.gas_used?;
                 let gas_cost =
                     U256::from(effective_gas(gas_used)).saturating_mul(auction.effective_gas_price);
-                let candidate = build_candidate(
-                    order.sell_amount,
-                    order.buy_amount,
-                    p.sell_amount,
-                    p.buy_amount,
-                    is_sell,
-                    order.partially_fillable,
+                let candidate = Candidate {
+                    order_sell: order.sell_amount,
+                    order_buy: order.buy_amount,
+                    proposal_sell: p.sell_amount,
+                    proposal_buy: p.buy_amount,
+                    is_sell_order: is_sell,
                     gas_cost,
-                )?;
+                }
+                .scaled_to_fill(order.partially_fillable)?;
                 let score = score_proposal(&candidate, surplus_price)?;
                 // Can rule out a proposal the score accepts: the score converts
                 // surplus at the auction's price, the limit is enforced on the

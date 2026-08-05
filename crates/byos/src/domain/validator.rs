@@ -13,11 +13,12 @@ use {super::proposal::Proposal, alloy::primitives::Address, serde::Serialize};
 #[non_exhaustive]
 pub enum RejectionReason {
     InsufficientEscrow,
-    /// The order is outside the simulation envelope (hooks, partial fill,
-    /// non-erc20 balances — ADR-0012).
+    /// The order is outside the simulation envelope (hooks, non-erc20
+    /// balances — ADR-0012).
     UnsupportedOrder,
-    /// The proposal's fill-or-kill amount differs from the order's (sell
-    /// amount for sell orders, buy amount for buy orders).
+    /// For fill-or-kill orders, the proposal amount differs from the order's.
+    /// For partial fills, the amount is zero, exceeds the order, or violates
+    /// the limit price (ADR-0012).
     AmountMismatch,
     /// The orderbook does not know the proposal's order uid.
     OrderNotFound,

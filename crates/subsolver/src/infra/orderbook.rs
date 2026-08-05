@@ -247,13 +247,16 @@ mod tests {
             3,
             "fill-or-kill and partially fillable orders are both in-envelope"
         );
+        // 0x11: sell fill-or-kill
         assert_eq!(orders[0].uid, Bytes::from(vec![0x11; 56]));
         assert_eq!(orders[0].kind, OrderKind::Sell);
         assert_eq!(orders[0].sell_amount, U256::from(1000));
         assert_eq!(orders[0].buy_amount, U256::from(900));
+        // 0x22: buy fill-or-kill (quote-derived appData hash is in-envelope)
         assert_eq!(orders[1].uid, Bytes::from(vec![0x22; 56]));
-        assert_eq!(orders[2].uid, Bytes::from(vec![0x66; 56]));
         assert_eq!(orders[1].kind, OrderKind::Buy);
+        // 0x66: partially fillable
+        assert_eq!(orders[2].uid, Bytes::from(vec![0x66; 56]));
     }
 
     #[tokio::test]

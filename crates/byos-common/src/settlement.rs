@@ -264,6 +264,74 @@ mod tests {
         );
     }
 
+    /// Partially fillable order with halved proposal amounts: `executedAmount`
+    /// must come from the proposal, not the order.
+    #[test]
+    fn partial_fill_uses_proposal_amounts_for_executed_amount() {
+        let mut order = fixture_order();
+        order.partially_fillable = true;
+
+        let half_sell = order.sell_amount / U256::from(2);
+        let half_buy = order.buy_amount / U256::from(2);
+        let proposal = Proposal {
+            sellAmount: half_sell,
+            buyAmount: half_buy,
+            ..fixture_proposal()
+        };
+
+        let calldata = encode_settle(
+            &order,
+            &proposal,
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+        );
+
+        let decoded = decode_settle(&calldata);
+        let trade = &decoded.trades[0];
+
+        // executedAmount must reflect the partial fill, not the full order.
+        assert_eq!(
+            trade.executedAmount, half_sell,
+            "sell partial fill: executedAmount should be the proposal's sellAmount"
+        );
+
+        // Clearing prices still use the proposal amounts.
+        assert_eq!(decoded.clearingPrices, vec![half_buy, half_sell]);
+
+        // The partially_fillable flag is set in the trade flags (bit 1).
+        assert_ne!(trade.flags & U256::from(2), U256::ZERO);
+    }
+
+    /// Same as above but for a buy-side partial fill.
+    #[test]
+    fn partial_fill_buy_order_uses_proposal_buy_amount() {
+        let mut order = fixture_order();
+        order.partially_fillable = true;
+        order.kind = OrderKind::Buy;
+
+        let half_buy = order.buy_amount / U256::from(2);
+        let proposal = Proposal {
+            sellAmount: order.sell_amount / U256::from(2),
+            buyAmount: half_buy,
+            ..fixture_proposal()
+        };
+
+        let calldata = encode_settle(
+            &order,
+            &proposal,
+            address!("0000000000000000000000000000000000007777"),
+            &[],
+            &Bytes::from(vec![0x11u8; 65]),
+        );
+
+        let trade = &decode_settle(&calldata).trades[0];
+        assert_eq!(
+            trade.executedAmount, half_buy,
+            "buy partial fill: executedAmount should be the proposal's buyAmount"
+        );
+    }
+
     #[test]
     fn same_token_order_still_pays_the_proposal_buy_amount() {
         // CoW carries sellToken == buyToken orders, submitted mainly to run
