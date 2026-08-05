@@ -206,11 +206,11 @@ async fn deploy_hooks_trampoline(
 
 /// Settles a partially fillable USDC→USDC order in two rounds:
 ///
-/// 1. First fill (50%): pre-hook (permit) + post-hook — proves hooks execute
-///    on the first partial fill.
-/// 2. Second fill (30%): post-hook only — proves the CoW social consensus
-///    that pre-hooks run only on the first fill, and post-hooks run on every
-///    fill. The remaining allowance from the permit covers this fill.
+/// 1. First fill (50%): pre-hook (permit) + post-hook — proves hooks execute on
+///    the first partial fill.
+/// 2. Second fill (30%): post-hook only — proves the CoW social consensus that
+///    pre-hooks run only on the first fill, and post-hooks run on every fill.
+///    The remaining allowance from the permit covers this fill.
 #[tokio::test]
 #[ignore = "tier-1 e2e: needs anvil and the offline-mode submodule"]
 async fn partial_fill_with_hooks_settlement() {
@@ -358,8 +358,8 @@ async fn partial_fill_with_hooks_settlement() {
             signature: Bytes::copy_from_slice(user.as_slice()),
         }],
         interactions: [
-            vec![pre_interaction],         // pre-hook: permit
-            vec![],                        // intra: no trampoline for same-token
+            vec![pre_interaction],          // pre-hook: permit
+            vec![],                         // intra: no trampoline for same-token
             vec![post_interaction.clone()], // post-hook: WETH.symbol()
         ],
     }
@@ -381,8 +381,8 @@ async fn partial_fill_with_hooks_settlement() {
 
     assert!(
         receipt_1.status(),
-        "first partial fill (50%) with pre-hook permit must succeed — the permit \
-         is the only source of vault-relayer allowance"
+        "first partial fill (50%) with pre-hook permit must succeed — the permit is the only \
+         source of vault-relayer allowance"
     );
 
     // -- second partial fill: 30% with only post-hook ------------------------
@@ -409,9 +409,9 @@ async fn partial_fill_with_hooks_settlement() {
             signature: Bytes::copy_from_slice(user.as_slice()),
         }],
         interactions: [
-            vec![],                    // NO pre-hook on second fill
-            vec![],                    // intra: no trampoline
-            vec![post_interaction],    // post-hook still runs
+            vec![],                 // NO pre-hook on second fill
+            vec![],                 // intra: no trampoline
+            vec![post_interaction], // post-hook still runs
         ],
     }
     .abi_encode()
@@ -432,7 +432,7 @@ async fn partial_fill_with_hooks_settlement() {
 
     assert!(
         receipt_2.status(),
-        "second partial fill (30%, cumulative 80%) with only post-hook must succeed — \
-         the permit from the first fill already granted enough allowance"
+        "second partial fill (30%, cumulative 80%) with only post-hook must succeed — the permit \
+         from the first fill already granted enough allowance"
     );
 }
