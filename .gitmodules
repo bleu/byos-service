@@ -4,3 +4,6 @@
 [submodule "offline-mode"]
 	path = offline-mode
 	url = https://github.com/cowdao-grants/offline-mode.git
+[submodule "docs/shared"]
+	path = docs/shared
+	url = https://github.com/bleu/byos-docs

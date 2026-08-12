@@ -2,6 +2,9 @@
 
 Status: accepted
 
+Spec: docs/shared/design-document.md#proposal-lifecycle
+      https://bleu.github.io/byos-docs/design-document#proposal-lifecycle
+
 > Resolves the "driver callbacks for outcome observation" open question from [ADR-0002](0002-solver-engine.md). Uses the slashing policy in [ADR-0003](0003-slash-attribution-flow.md). Rewritten 2026-07 during the proposal-lifecycle review ([ADR-0013](0013-proposal-lifecycle-and-retention.md)): the original version proposed forking the driver to add an outcome hook; the stock driver turned out to already send everything we need.
 
 ## Context
@@ -22,12 +25,13 @@ The driver handles private submissions and dropped txs, so these notifications c
 
 ## Decision
 
-Get the outcome from the stock driver's `/notify` notifications. No fork, no chain watcher.
+Get the outcome from the stock driver's `/notify` notifications. No fork, no chain watcher. The notification-to-state mapping and attribution join are specified in the design document (see Spec link above).
 
-- **Trigger.** BYOS implements the solver-engine `/notify` endpoint (internal listener). `Revert { transaction }` is the Track A trigger; `Success` closes the proposal as settled. The full notification→state mapping is owned by [ADR-0013](0013-proposal-lifecycle-and-retention.md).
-- **Attribution.** Notifications carry auction and solution ids, not proposals. `/solve` records `(auction_id, solution_id, proposal_id)` in the `solutions` table before returning a solution (ADR-0013), so attribution is a join in our own database. The Trampoline address in the settlement calldata remains the on-chain proof, checked when we debit.
-- **Gas.** BYOS makes one `eth_getTransactionReceipt` call on the reverted tx hash to read the real gas used and gas price. No block scanning, no subscriptions. The receipt read is required, not a double-check: it is how we get the amount to debit.
-- **Escrow stays native.** It applies `gas + c_l` for Track A and handles Track B. Track B (freeze/debit on a CoW ruling) is triggered by hand, not by a chain event.
+The key implementation-level decisions:
+
+- **Attribution** is a join through the `solutions` table: `/solve` records `(auction_id, solution_id, proposal_id)` before returning a solution (ADR-0013). The Trampoline address in calldata remains the on-chain proof, checked when we debit.
+- **Gas** for Track A debits comes from one `eth_getTransactionReceipt` call on the reverted tx hash. The receipt read is required, not a double-check: it is how we get the debit amount.
+- **Track B** (freeze/debit on a CoW ruling) is triggered by hand, not by a chain event.
 
 ## Alternatives considered
 

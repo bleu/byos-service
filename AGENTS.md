@@ -16,9 +16,8 @@ crates/proposal-dto/  Serde wire types for the proposal API (server + clients)
 crates/subsolver/     Reference sub-solver client
 crates/e2e/           End-to-end tests (contracts on anvil + byos + subsolver)
 docs/adr/             Architecture decision records
-docs/reference/       CoW protocol background (slashing, auctions, CIPs)
+docs/shared/          Shared BYOS specification (submodule → bleu/byos-docs)
 docs/agents/          Agent workflow conventions (issue tracker, triage labels)
-docs/metrics-reasoning.md  SLO targets and cost/revenue reasoning
 Justfile              The command surface — same recipes locally and in CI
 ```
 
@@ -28,6 +27,12 @@ Justfile              The command surface — same recipes locally and in CI
 - If your output contradicts an existing ADR, surface it explicitly rather than silently overriding: _"Contradicts ADR-0001 (GET returns metadata only) — but worth reopening because…"_ Note that [ADR-0002](docs/adr/0002-solver-engine.md) is still **proposed**; its open questions are fair game.
 - Contract interfaces this service integrates with (Escrow operator functions, Trampoline `execute`, the EIP-712 `ProposalData` schema) are owned by [`bleu/byos-contracts`](https://github.com/bleu/byos-contracts) — check there before assuming a signature or event shape.
 - Issues and PRDs live as local markdown under `.scratch/` — see [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md).
+
+## Shared specification
+
+The normative BYOS specification lives in `docs/shared/` (a Git submodule pointing to [bleu/byos-docs](https://github.com/bleu/byos-docs)). Domain vocabulary is in `docs/shared/glossary.md`. The design document is `docs/shared/design-document.md`. The wire contract is `crates/byos/openapi.yml`.
+
+**Rule**: ADRs in this repo record *why* a decision was made. They do not restate *what is true* — the specification does that. Each domain ADR carries a `Spec:` line citing the relevant section. If an ADR and the specification disagree, the specification is correct.
 
 ## Key conventions
 

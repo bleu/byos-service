@@ -26,7 +26,7 @@ Start with [`CONTEXT.md`](CONTEXT.md) for the domain language, then the ADRs:
 - [ADR-0003](docs/adr/0003-slash-attribution-flow.md) — slashing policy & attribution
 - [ADRs 0004–0009](docs/adr/README.md) — engineering conventions ported from [`cowprotocol/services`](https://github.com/cowprotocol/services)
 
-CoW protocol background (solver auctions, slashing policy, CIPs) is captured in [`docs/reference/`](docs/reference), SLO targets in [`docs/metrics-reasoning.md`](docs/metrics-reasoning.md).
+CoW protocol background, the normative specification, and domain vocabulary are in [`docs/shared/`](docs/shared) (a submodule pointing to [bleu/byos-docs](https://github.com/bleu/byos-docs)).
 
 ## Development
 
