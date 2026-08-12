@@ -2,6 +2,9 @@
 
 Status: accepted
 
+Spec: docs/shared/design-document.md#proposal-lifecycle
+      https://bleu.github.io/byos-docs/design-document#proposal-lifecycle
+
 ## Context
 
 The proposal state machine grew by accretion: `Submitted → Active` plus five terminal states, defined in `domain/proposal.rs` and described piecemeal across ADR-0001 (ingestion, persistence), ADR-0012 (simulation, re-validation), and ADR-0010 (settlement outcomes). Several things were missing or wrong as of 2026-07:
@@ -17,132 +20,54 @@ One discovery reshaped the settlement half: the stock CoW driver already notifie
 
 ## Decision
 
-### The state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> Submitted: POST /proposals
-    Submitted --> Active: first simulation passes,\nscore > 0
-    Submitted --> Rejected: gatekeeping fails\n(escrow, envelope, unprofitable, ...)
-    Submitted --> SimFailed: simulation reverts
-    Active --> Active: re-simulation each tick\n(updates gas)
-    Active --> SimFailed: re-simulation reverts
-    Active --> Rejected: escrow re-check fails
-    Active --> Executing: driver SettlementStarted
-    Submitted --> Expired: validUntil passed
-    Active --> Expired: validUntil passed
-    Submitted --> Cancelled: DELETE /proposals/{id}
-    Active --> Cancelled: DELETE /proposals/{id}
-    Executing --> Settled: driver Success
-    Executing --> SettleFailed: driver Revert
-    Executing --> Active: driver Cancelled/Expired/Fail,\nor executing timeout
-    SettleFailed --> Penalized: Track A escrow debit lands
-    Settled --> [*]
-    Penalized --> [*]
-```
-
-Every transition, in one place:
-
-| From | To | Trigger |
-|---|---|---|
-| — | `Submitted` | `POST /proposals`: signature verified, expiry window OK; stored for background validation. |
-| `Submitted` | `Active` | First validation passes: escrow check, envelope check, simulation succeeds, score > 0. Writes `gas_used`, `trampoline`, token addresses. |
-| `Submitted` | `Rejected` | A gatekeeping rule fails: `InsufficientEscrow`, `UnsupportedOrder`, `AmountMismatch`, `OrderNotFound`, or `Unprofitable` (score ≤ 0 at first simulation). Carries the typed `rejectionReason`. |
-| `Submitted` | `SimFailed` | First simulation reverts. |
-| `Active` | `Active` | Re-validation tick: fresh simulation refreshes `gas_used`. No status change, no audit event. |
-| `Active` | `Rejected` | Escrow re-check fails on re-validation (balance dropped below the threshold). |
-| `Active` | `SimFailed` | Re-simulation reverts (order filled or expired on-chain, route broke, balances moved). |
-| `Submitted`, `Active` | `Expired` | Expiry sweep: `validUntil` is behind the clock. |
-| `Submitted`, `Active` | `Cancelled` | Signed `DELETE /proposals/{id}` by the owner. `DELETE` against any other state is a `409`. |
-| `Active` | `Executing` | Driver `/notify SettlementStarted`: our solution won and the settlement tx is being submitted. |
-| `Executing` | `Settled` | Driver `/notify Success { transaction }`: the tx landed. Tx hash recorded. |
-| `Executing` | `SettleFailed` | Driver `/notify Revert { transaction }`: the tx reverted on-chain. Tx hash recorded; the Track A debit follows ([ADR-0010](0010-settlement-outcome-source.md)). |
-| `Executing` | `Active` | Driver `/notify Cancelled`/`Expired`/`Fail` (submission abandoned, no tx landed), or `--executing-timeout` elapsed (lost notification, restart mid-settlement). The proposal re-enters competition; if the order is actually gone, re-simulation kills it. |
-| `SettleFailed` | `Penalized` | The Track A escrow debit lands on-chain. `penalty_tx_hash` recorded. |
-
-A state answers one question: what does the service do with the proposal right now?
-
-| State | Simulated | Offered to `/solve` | Expiry sweep | Cancellable | Exits | Retention |
-|---|---|---|---|---|---|---|
-| `Submitted` | first pass | no | yes | yes | verdict, expiry, cancel | — (live) |
-| `Active` | every tick | yes (needs `gas_used`) | yes | yes | verdict, expiry, cancel, `SettlementStarted` | — (live) |
-| `Executing` | no | no | no | no | driver notification or timeout | — (live) |
-| `Rejected` | no | no | — | no | none | 1 hour |
-| `SimFailed` | no | no | — | no | none | 1 hour |
-| `Expired` | no | no | — | no | none | 1 hour |
-| `Cancelled` | no | no | — | no | none | 1 hour |
-| `Settled` | no | no | — | no | none | indefinite |
-| `SettleFailed` | no | no | — | no | `Penalized` when the debit lands | indefinite |
-| `Penalized` | no | no | — | no | none | indefinite |
-
-`Executing` is exempt from the expiry sweep on purpose: the chain enforces the order's real deadline, and the proposal's exit is the driver notification (or the timeout below), not the wall clock.
+The state machine, transition table, state properties, settlement outcome mapping, and retention windows are specified in the design document (see Spec link above). This ADR records *why* each design choice was made.
 
 ### Auction participation: losses are events, states are for winners
 
-A proposal that loses an auction — outscored internally at `/solve`, or our solution losing the external CoW competition — is still a valid, executable proposal for the next auction. Losing is therefore **not a state**: the proposal stays `Active` and keeps competing. Participation is recorded as data (the `solutions` table below plus audit events), so "which auctions did this proposal compete in and lose" is a query, not a status.
-
-Winning is a state change, because it changes what the service does: once the driver starts submitting a settlement built on the proposal, we must stop offering it and stop re-simulating it.
+Losing an auction is **not a state**: the proposal stays `Active` and keeps competing. Participation is recorded as data (the `solutions` table plus audit events). Winning is a state change, because it changes what the service does: stop offering the proposal and stop re-simulating it.
 
 ### `Executing`: entered and exited by driver notifications
 
-BYOS implements the solver-engine `/notify` endpoint and maps notifications to transitions:
-
-| Notification | Transition |
-|---|---|
-| `SettlementStarted` | `Active → Executing` |
-| `Success { transaction }` | `Executing → Settled` (tx hash recorded) |
-| `Revert { transaction }` | `Executing → SettleFailed` (tx hash recorded; Track A follows, ADR-0010) |
-| `Cancelled`, `Expired`, `Fail` | `Executing → Active` — the tx never landed; the proposal re-enters competition. Queues the `0.1 × c_l` non-settlement debit ([ADR-0003](0003-slash-attribution-flow.md)) |
-| pre-submission kinds (`SimulationFailed`, `EmptySolution`, ...) | no transition; recorded as audit events |
-
-`Executing` is entered on `SettlementStarted`, not at `/solve` time — at `/solve` time we don't yet know we won. The window between the autopilot picking our solution and `SettlementStarted` arriving is accepted: it is sub-second-to-seconds, and inventing a "won but not yet submitting" state isn't worth it.
+`Executing` is entered on `SettlementStarted`, not at `/solve` time — at `/solve` time we don't yet know we won. The window between the autopilot picking our solution and `SettlementStarted` arriving is sub-second-to-seconds; inventing a "won but not yet submitting" state isn't worth it.
 
 Two safety properties:
 
-- **`Executing → Active` is always safe.** If the order was actually consumed (our tx landed but the notification was lost, or the order was filled externally), the next re-simulation reverts and the proposal dies as `SimFailed`. Re-simulation is the truth-teller.
-- **Timeout backstop.** An `Executing` proposal older than `--executing-timeout` (default 5 minutes) falls back to `Active` — covering lost notifications and restarts mid-settlement. Same argument as above: if it really settled, re-simulation kills it within a tick.
+- **`Executing → Active` is always safe.** If the order was actually consumed, the next re-simulation reverts and the proposal dies as `SimFailed`. Re-simulation is the truth-teller.
+- **Timeout backstop.** An `Executing` proposal older than `--executing-timeout` (default 5 minutes) falls back to `Active` — covering lost notifications and restarts mid-settlement.
 
 ### Simulation stops at the first revert
 
-Unchanged from ADR-0012, now with the lifecycle rationale written down: the first re-simulation revert flips the proposal to `SimFailed`, terminal, no strikes, no retry. A proposal that reverted once is not robust enough to offer to `/solve` — if it won and then reverted on-chain, the sub-solver takes a Track A penalty, which is strictly worse for them than resubmitting. Transient transport errors still defer rather than fail. Resubmission is the sub-solver's "I still believe in this route" signal.
+Unchanged from ADR-0012, now with the lifecycle rationale: a proposal that reverted once is not robust enough to offer to `/solve` — if it won and then reverted on-chain, the sub-solver takes a Track A penalty, which is strictly worse than resubmitting. Resubmission is the sub-solver's "I still believe in this route" signal.
 
 ### Profitability gate: first simulation, not re-validation
 
-Settles ADR-0002 Q7 (decided in the 2026-07 review). On the first simulation (the `Submitted → Active` gate), the proposal is scored (`score = surplus − gas`, ADR-0002) with the simulated gas and current gas price. A score of zero or less rejects with the new `RejectionReason::Unprofitable` — matching `/solve`'s own `score > 0` inclusion rule, so one invariant holds: an `Active` proposal is one that could win an auction right now.
-
-The gate is **not re-applied on re-validation**. Gas prices wobble; rejecting an `Active` proposal on a spike would churn proposals that are profitable again two blocks later. `/solve` re-scores with fresh gas at auction time, so an unprofitable-right-now proposal cannot leak into a solution — it just idles, bounded by the lifetime cap below.
+Settles ADR-0002 Q7 (decided in the 2026-07 review). The gate is **not re-applied on re-validation** because gas prices wobble; rejecting an `Active` proposal on a spike would churn proposals that are profitable again two blocks later. `/solve` re-scores with fresh gas at auction time, so an unprofitable-right-now proposal cannot leak into a solution.
 
 ### Proposal lifetime is capped at ingestion
 
-`POST /proposals` rejects any `validUntil` more than `--max-proposal-lifetime` (default 5 minutes) in the future. This bounds worst-case simulation cost per proposal — the expiry sweep is the natural "stop simulating" point and is now guaranteed to arrive — and turns ADR-0001's "short proposal lifetimes" assumption into an enforced invariant. Sub-solvers already run polling loops; re-signing a fresh proposal every few minutes is trivial, and a route priced longer ago than that is stale anyway.
-
-The *order's* `validTo` needs no separate handling: once the order expires or is filled, simulation reverts (GPv2 checks it) and first-revert-terminal cleans up within a tick.
+`--max-proposal-lifetime` (default 5 minutes) bounds worst-case simulation cost per proposal and turns ADR-0001's "short proposal lifetimes" assumption into an enforced invariant.
 
 ### `Penalized`: the Track A debit closes the story
 
-When the Track A escrow debit for a `SettleFailed` proposal lands on-chain, the proposal transitions `SettleFailed → Penalized` and records `penalty_tx_hash` — the proposal row itself answers "was this sub-solver charged, and where's the proof". Until the debit lands (retries included), the proposal sits queryable in `SettleFailed`.
-
-Track B stays out of the proposal machine: a CoW ruling months later is an account-level event against the sub-solver, not a transition of one proposal. It lives in escrow accounting and audit events (ADR-0003).
+The proposal row itself answers "was this sub-solver charged, and where's the proof" via `penalty_tx_hash`. Track B stays out of the proposal machine: a CoW ruling months later is an account-level event, not a transition of one proposal.
 
 ### Storage: Postgres is the proposal store
 
-The in-memory hot store is removed. A `proposals` table in the existing Postgres becomes the single source of truth for current state; `GET`, `/solve`, the validator loop, and `/notify` all read and write it directly.
+The in-memory hot store is removed. Key implementation decisions:
 
-- **The compare-and-swap transition ports as SQL.** `UPDATE proposals SET status = $to WHERE id = $id AND status = $from` — zero rows affected means the caller's verdict was stale (a cancellation or notification won the race), exactly the in-memory semantics, now durable.
-- **No cache, no Redis.** ADR-0001 rejected a DB-backed `/solve` for latency, but the driver gives solvers seconds and an indexed read over a few hundred live rows is ~1 ms. A second store (Redis) or a cache layer is premature until `/solve` measurements say otherwise.
-- **IDs become a Postgres sequence.** The reseed-from-audit-trail dance at boot is deleted.
-- **Restarts stop being lossy.** Live proposals survive: `Submitted`/`Active` re-validate on the next tick, `Executing` resolves via notification or timeout. Sub-solver resubmission on restart is no longer part of the design.
-- **A `solutions` table maps notifications back to proposals**: `(auction_id, solution_id, proposal_id, created_at)`, written synchronously inside `/solve` before the solution is returned — if we can't record it, we don't bid it. `/notify` joins through it; it doubles as the per-auction participation record (a row with no subsequent `SettlementStarted` is a loss).
-- **`audit_events` is unchanged**: append-only history and dispute evidence, written behind the same channel. The `proposals` table holds what *is*; `audit_events` holds what *happened*.
-- **The write-behind keeps a small crash window.** An audit event is emitted only after its proposal write commits, so a crash between the two leaves a durable state change with no matching event. With the in-memory store the state died with the process, so the two always agreed; now they can diverge by exactly one event per crash. Accepted: closing it means writing evidence in the same transaction as the mutation, which couples every store write to the audit codec and removes the writer's retry/backoff isolation. Revisit if a dispute ever hinges on a single missing event.
+- **Compare-and-swap via SQL.** `UPDATE proposals SET status = $to WHERE id = $id AND status = $from` — zero rows means the caller's verdict was stale, exactly the in-memory semantics, now durable.
+- **No cache, no Redis.** An indexed read over a few hundred live rows is ~1 ms. Premature until `/solve` measurements say otherwise.
+- **Restarts stop being lossy.** Live proposals survive; sub-solver resubmission on restart is no longer part of the design.
+- **A `solutions` table maps notifications back to proposals**: written synchronously inside `/solve` before the solution is returned — if we can't record it, we don't bid it.
+- **The write-behind keeps a small crash window** (one event per crash). Accepted: closing it would couple every store write to the audit codec.
 
 ### Retention: one sweep, one knob
 
-A background sweep (its own slow loop, every few minutes — no reason to couple it to the per-block validation tick) deletes terminal rows past their window:
+- **Dropped states: deleted 1 hour after reaching the state** (`--dropped-retention`).
+- **Money states: kept indefinitely.** No sweep code at all.
+- **`audit_events`: still no deletion path.**
 
-- **`Rejected`, `SimFailed`, `Expired`, `Cancelled`: deleted 1 hour after reaching the state** (`--dropped-retention`). Consumers are polling loops that observe the terminal state within one poll interval; an hour is hundreds of intervals. After that the proposal is a 404. `solutions` rows for these proposals go with them.
-- **`Settled`, `SettleFailed`, `Penalized`: kept indefinitely.** These are the money states. No sweep code for them at all — a retention window here is an optimization for later, not a launch requirement.
-- **`audit_events`: still no deletion path.** The volume math permits it (a few rows per proposal is well under a million rows a year even with aggressive resubmission churn), and it is what keeps rejected-proposal history and auction-loss records queryable after the proposal row is gone. ADR-0001's note stands: any future audit retention policy is its own decision.
+New configuration: `--max-proposal-lifetime` (default 5m), `--executing-timeout` (default 5m), `--dropped-retention` (default 1h).
 
 ## Alternatives considered
 

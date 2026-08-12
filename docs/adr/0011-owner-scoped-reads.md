@@ -2,6 +2,9 @@
 
 Status: accepted
 
+Spec: docs/shared/design-document.md#proposal-api
+      https://bleu.github.io/byos-docs/design-document#proposal-api
+
 Supersedes the "GET metadata: per-proposal, no amounts" section of [ADR-0001](0001-proposal-api.md) and its "pre-settlement information leakage via GET" consequence.
 
 ## Context
@@ -14,35 +17,24 @@ Callers are sub-solver servers, not browsers — machine-to-machine over TLS, no
 
 ## Decision
 
+The read authentication model, bearer signature shape, and 404-vs-403 rule are specified in the design document (see Spec link above). This ADR records the reasoning.
+
 ### Every read is authenticated and owner-scoped
 
-All proposal GET endpoints require an EIP-712 signature in the `X-Signature` header (the same header DELETE uses). The recovered signer is the caller's identity and scopes the response:
-
-- `GET /proposal/{id}` — returns the proposal only if the recovered signer is its sub-solver.
-- `GET /proposals/{order_uid}` — returns only the caller's own proposals on that order; competitors' proposals are invisible.
-- `GET /proposals/by-sub-solver` — returns the caller's proposals. The address path parameter was dropped: identity comes entirely from the signature, so an address in the URL would be either redundant or a mismatch error for a value the server already knows.
+The address path parameter on the by-sub-solver route was dropped: identity comes entirely from the signature, so an address in the URL would be either redundant or a mismatch error for a value the server already knows.
 
 ### The read token is a bearer signature
 
-The signed message is a dedicated EIP-712 type, owned by this repo (like `CancelProposal`, never verified on-chain):
+No timestamp, no nonce, no path binding. Reasoning:
 
-```solidity
-struct ReadAuth {
-    uint256 version; // pinned to 1
-}
-```
-
-Signed once, sent on every request. No timestamp, no nonce, no path binding — it is a bearer token. Reasoning:
-
-- **Blast radius of a leaked token is small.** It grants read access to the signer's *own* proposals only — no writes, no cancellation, no funds. Unused proposals are short-lived (a discard API is planned), and settled proposals can become public later anyway.
-- **No off-chain nonce bookkeeping**, consistent with ADR-0001's stateless stance — a nonce set for reads would be the first per-signer auth state in the service.
+- **Blast radius of a leaked token is small.** Read access to the signer's *own* proposals only — no writes, no cancellation, no funds.
+- **No off-chain nonce bookkeeping**, consistent with ADR-0001's stateless stance.
 - **No clock coupling.** A timestamp window would make external teams' clock drift a support burden for marginal benefit.
-- The distinct `ReadAuth` typehash is what prevents cross-type replay: a read signature can never be replayed as a proposal submission or cancellation.
-- `version` exists because EIP-712 structs need at least one field; bumping it invalidates all outstanding read tokens without renaming the type.
+- The distinct `ReadAuth` typehash prevents cross-type replay.
 
 ### Non-owners get 404, not 403
 
-`GET /proposal/{id}` and `DELETE /proposal/{id}` return the same 404 for "does not exist" and "exists but not yours". A 403 would be an existence oracle — anyone could probe IDs 1..N (for DELETE, by signing `CancelProposal` messages) and learn how many proposals are live. Since the point of this decision is that nothing leaks to non-owners, the two cases are indistinguishable on the wire. The ownership check runs before the liveness check, so DELETE's 409 (already terminal) is only ever seen by the owner.
+A 403 would be an existence oracle — anyone could probe IDs and learn how many proposals are live. The ownership check runs before the liveness check, so DELETE's 409 is only ever seen by the owner.
 
 ## Alternatives considered
 
