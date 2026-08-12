@@ -27,7 +27,7 @@ Multi-order proposals are out of scope for v1. Sub-solvers propose single-order 
 
 ### Scoring: why no fee term
 
-There is **no fee term**, and its absence is deliberate. CoW's score is surplus plus protocol fees and nothing else; gas never appears as a subtraction. It reaches the score only because a solver declares gas as its own fee, which lowers what the user receives, which lowers surplus. The protocol fee cancels out of ranking (the "ranking is fee-neutral" property in the contracts' [cow-fee-collection reference](https://github.com/bleu/byos-contracts/blob/main/docs/reference/cow-fee-collection.md)). Once our cut equals the gas cost, `surplus − gas` is the score the autopilot will compute.
+There is **no fee term**, and its absence is deliberate. CoW's score is surplus plus protocol fees and nothing else; gas never appears as a subtraction. It reaches the score only because a solver declares gas as its own fee, which lowers what the user receives, which lowers surplus. The protocol fee cancels out of ranking (the "ranking is fee-neutral" property in the [cow-fee-collection reference](../shared/reference/cow-fee-collection.md)). Once our cut equals the gas cost, `surplus − gas` is the score the autopilot will compute.
 
 **We do not estimate protocol fees either.** The driver applies them itself, then encodes and simulates before bidding. A solution that cannot absorb the fee fails that simulation and is dropped: no revert, no penalty, no escrow debit. It is also impossible before `/solve`: fee policies are built per auction by the autopilot and delivered only in the `/solve` payload.
 

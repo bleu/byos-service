@@ -6,7 +6,7 @@ Status: accepted
 
 ## Context
 
-BYOS is an operated service with SLOs (see [`docs/metrics-reasoning.md`](../metrics-reasoning.md): `/solve` p99 < 100ms, ingestion p99 < 1s) and an operational runbook deliverable in the RFP. It also has money-moving background jobs (Track A debits) whose actions must be reconstructable after the fact. Observability is therefore a day-one concern, not a hardening pass.
+BYOS is an operated service with SLOs (see [`docs/shared/operations/slo-targets.md`](../shared/operations/slo-targets.md): `/solve` p99 < 100ms, ingestion p99 < 1s) and an operational runbook deliverable in the RFP. It also has money-moving background jobs (Track A debits) whose actions must be reconstructable after the fact. Observability is therefore a day-one concern, not a hardening pass.
 
 ## Decision
 
